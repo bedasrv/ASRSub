@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# Secrets / environment files
+.env
+*.env
+!*.env.example
+pipeline.env
+*.key
+*.pem
+
+# Runtime state & data
+*.lock
+state.jsonl
+state*.jsonl
+tmp/
+*.log
+
+# Local config
+config.local.py
+config.local.yaml
+
+# Media / data artifacts
+episodes/
+ground_truth/
+outputs/
+*.wav
+*.mp3
+*.srt
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Systemd / deployment local files
+*.service

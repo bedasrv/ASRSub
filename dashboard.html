@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ASRSub</title>
+<style>
+:root {
+  --bg:#fff; --fg:#111; --card:#f5f5f5; --border:#ddd; --accent:#2563eb;
+  --ok:#16a34a; --err:#dc2626; --run:#d97706; --new:#64748b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#0f1115; --fg:#e5e7eb; --card:#1a1d24; --border:#2a2e37; --accent:#3b82f6;
+  }
+}
+html[data-theme="light"] {
+  --bg:#fff; --fg:#111; --card:#f5f5f5; --border:#ddd; --accent:#2563eb;
+  --ok:#16a34a; --err:#dc2626; --run:#d97706; --new:#64748b;
+}
+html[data-theme="dark"] {
+  --bg:#0f1115; --fg:#e5e7eb; --card:#1a1d24; --border:#2a2e37; --accent:#3b82f6;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--fg); font-size: 15px;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 10;
+}
+header h1 { font-size: 18px; margin: 0; }
+.header-right { display: flex; align-items: center; gap: 10px; }
+#refresh-ind { font-size: 12px; color: var(--new); }
+#theme-toggle {
+  background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer;
+}
+main { padding: 12px; max-width: 900px; margin: 0 auto; }
+#error-banner {
+  display: none; background: var(--err); color: #fff; padding: 10px 14px;
+  border-radius: 8px; margin-bottom: 12px; font-size: 14px;
+}
+#error-banner.visible { display: block; }
+.summary {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 12px;
+}
+.stat {
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px; text-align: center;
+}
+.stat .num { font-size: 26px; font-weight: 700; }
+.stat .lbl { font-size: 12px; color: var(--new); margin-top: 2px; }
+.stat.wanted .num { color: var(--accent); }
+.stat.done .num { color: var(--ok); }
+.stat.error .num { color: var(--err); }
+.stat.running .num { color: var(--run); }
+.pills { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.pill {
+  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 12px; font-size: 13px; display: flex; align-items: center; gap: 6px;
+}
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot.up { background: var(--ok); }
+.dot.down { background: var(--err); }
+.dot.running { background: var(--run); }
+.dot.stopped { background: var(--new); }
+h2 { font-size: 15px; margin: 18px 0 8px; }
+#wanted-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+}
+.ep-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.ep-series { font-weight: 700; font-size: 15px; }
+.ep-code { font-size: 13px; color: var(--accent); font-weight: 600; white-space: nowrap; }
+.ep-title { font-size: 13px; color: var(--new); margin: 4px 0; }
+.ep-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.missing { font-size: 12px; color: var(--new); }
+.badge {
+  border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600; color: #fff;
+}
+.badge.new { background: var(--new); }
+.badge.done { background: var(--ok); }
+.badge.error { background: var(--err); }
+.badge.running { background: var(--run); }
+.elapsed { font-size: 12px; color: var(--new); }
+#recent-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.recent {
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  font-size: 13px;
+}
+.recent .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.recent .ep-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent .right { display: flex; align-items: center; gap: 10px; color: var(--new); font-size: 12px; white-space: nowrap; }
+.muted { color: var(--new); }
+footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0 30px; }
+
+@media (min-width: 768px) {
+  body { font-size: 16px; }
+  main { padding: 20px; }
+  .summary { grid-template-columns: repeat(4, 1fr); }
+  #wanted-list { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>ASRSub</h1>
+  <div class="header-right">
+    <span id="refresh-ind"></span>
+    <button id="theme-toggle" title="Theme">🔄</button>
+  </div>
+</header>
+<main>
+  <div id="error-banner">dashboard backend unreachable</div>
+  <div class="summary">
+    <div class="stat wanted"><div class="num" id="s-wanted">–</div><div class="lbl">Wanted</div></div>
+    <div class="stat done"><div class="num" id="s-done">–</div><div class="lbl">Done</div></div>
+    <div class="stat error"><div class="num" id="s-error">–</div><div class="lbl">Error</div></div>
+    <div class="stat running"><div class="num" id="s-running">–</div><div class="lbl">Running</div></div>
+  </div>
+  <div class="pills">
+    <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
+    <span class="pill"><span class="dot stopped" id="a-dot"></span><span id="a-text">asr …</span></span>
+  </div>
+  <h2>Wanted</h2>
+  <div id="wanted-list"></div>
+  <h2>Recent activity</h2>
+  <div id="recent-list"></div>
+  <footer>polls every 15s · read-only</footer>
+</main>
+<script>
+const LS_THEME = "asr-dash-theme";
+const ICONS = { auto: "🔄", light: "☀️", dark: "🌙" };
+
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  document.getElementById("theme-toggle").textContent = ICONS[t] || ICONS.auto;
+}
+function initTheme() {
+  let t = localStorage.getItem(LS_THEME);
+  if (!t || !ICONS[t]) t = "auto";
+  applyTheme(t);
+  return t;
+}
+let theme = initTheme();
+document.getElementById("theme-toggle").addEventListener("click", function () {
+  const order = ["auto", "light", "dark"];
+  const idx = order.indexOf(theme);
+  theme = order[(idx + 1) % order.length];
+  localStorage.setItem(LS_THEME, theme);
+  applyTheme(theme);
+});
+
+function relTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts.replace("Z", "+00:00"));
+  if (isNaN(d.getTime())) return ts;
+  const diff = Date.now() - d.getTime();
+  if (diff < 0) return "now";
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return m + "m ago";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h ago";
+  return Math.floor(h / 24) + "d ago";
+}
+function fmtElapsed(s) {
+  if (s == null) return "";
+  return s + "s";
+}
+function statusClass(st) {
+  if (st === "done") return "done";
+  if (st === "error") return "error";
+  if (st === "running") return "running";
+  return "new";
+}
+function pillDot(el, up) {
+  el.className = "dot " + (up ? "up" : "down");
+}
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
+
+let lastData = null;
+let fetchFail = false;
+
+function render(data) {
+  lastData = data;
+  document.getElementById("s-wanted").textContent = data.wanted_total ?? "–";
+  document.getElementById("s-done").textContent = data.state_summary.done ?? "–";
+  document.getElementById("s-error").textContent = data.state_summary.error ?? "–";
+  document.getElementById("s-running").textContent = data.state_summary.running ?? "–";
+
+  const pipe = data.pipeline || {};
+  const pd = document.getElementById("p-dot");
+  const pt = document.getElementById("p-text");
+  if (pipe.running) {
+    pd.className = "dot running";
+    pt.textContent = "pipeline running (pid " + (pipe.pid || "?") + ")";
+  } else {
+    pd.className = "dot stopped";
+    pt.textContent = "pipeline stopped";
+  }
+  const ad = document.getElementById("a-dot");
+  const at = document.getElementById("a-text");
+  if (data.asr && data.asr.up) {
+    ad.className = "dot up";
+    at.textContent = "asr up (" + (data.asr.latency_ms != null ? data.asr.latency_ms + "ms" : "?") + ")";
+  } else {
+    ad.className = "dot down";
+    at.textContent = "asr down";
+  }
+
+  const wl = document.getElementById("wanted-list");
+  wl.innerHTML = "";
+  const wanted = data.wanted || [];
+  if (!wanted.length) {
+    wl.innerHTML = '<div class="muted">no wanted episodes</div>';
+  } else {
+    for (const ep of wanted) {
+      const badge = '<span class="badge ' + statusClass(ep.state_status) + '">' + esc(ep.state_status) + "</span>";
+      const elapsed = ep.state_status === "done" && ep.elapsed_s != null
+        ? '<span class="elapsed">' + fmtElapsed(ep.elapsed_s) + "</span>" : "";
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML =
+        '<div class="ep-head"><span class="ep-series">' + esc(ep.series) + '</span><span class="ep-code">' + esc(ep.episode) + "</span></div>" +
+        '<div class="ep-title">' + esc(ep.title) + "</div>" +
+        '<div class="ep-meta"><span class="missing">missing: ' + (ep.missing && ep.missing.length ? esc(ep.missing.join(", ")) : "none") + "</span>" +
+        "<span>" + badge + elapsed + "</span></div>";
+      wl.appendChild(card);
+    }
+  }
+
+  const rl = document.getElementById("recent-list");
+  rl.innerHTML = "";
+  const recent = data.recent || [];
+  if (!recent.length) {
+    rl.innerHTML = '<div class="muted">no recent activity</div>';
+  } else {
+    for (const r of recent) {
+      const el = document.createElement("div");
+      el.className = "recent";
+      el.innerHTML =
+        '<div class="left"><span class="dot ' + (r.status === "error" ? "down" : "up") + '"></span>' +
+        '<span class="ep-label">' + esc(r.label) + "</span></div>" +
+        '<div class="right">' +
+        (r.elapsed_s != null ? "<span>" + fmtElapsed(r.elapsed_s) + "</span>" : "") +
+        "<span>" + relTime(r.ts) + "</span></div>";
+      rl.appendChild(el);
+    }
+  }
+
+  document.getElementById("refresh-ind").textContent = "updated " + relTime(data.updated_at);
+}
+
+async function poll() {
+  const banner = document.getElementById("error-banner");
+  try {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    fetchFail = false;
+    banner.classList.remove("visible");
+    render(data);
+  } catch (e) {
+    fetchFail = true;
+    banner.classList.add("visible");
+  }
+}
+
+poll();
+setInterval(poll, 15000);
+</script>
+</body>
+</html>
