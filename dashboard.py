@@ -38,6 +38,26 @@ def load_cfg():
     return cfg
 
 
+def control_api(method: str, path: str, body=None):
+    """Proxy to orchestrator control API on 127.0.0.1:8085 with server-side token."""
+    import httpx
+
+    cfg = load_cfg()
+    token = cfg.get("CONTROL_API_KEY", "")
+    url = "http://127.0.0.1:8085" + path
+    headers = {"X-API-Key": token} if token else {}
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            r = client.request(method, url, headers=headers, json=body)
+            try:
+                data = r.json()
+            except Exception:
+                data = {"raw": r.text}
+            return r.status_code, data
+    except Exception as exc:
+        return 0, {"error": f"control API unreachable: {exc}"}
+
+
 # ---------- caches ----------
 
 
@@ -298,6 +318,33 @@ def index():
 @app.get("/api/status")
 def api_status():
     return JSONResponse(build_status())
+
+
+@app.get("/api/control/status")
+def api_control_status():
+    code, data = control_api("GET", "/status")
+    return JSONResponse(data, status_code=code if code else 503)
+
+
+@app.get("/api/control/config")
+def api_control_config():
+    code, data = control_api("GET", "/config")
+    return JSONResponse(data, status_code=code if code else 503)
+
+
+@app.post("/api/control/config")
+def api_control_config_set(body: dict):
+    code, data = control_api("POST", "/config", body=body)
+    return JSONResponse(data, status_code=code if code else 503)
+
+
+@app.post("/api/control/action")
+def api_control_action(body: dict):
+    action = (body or {}).get("action")
+    if action not in ("pause", "resume", "run-once", "wake"):
+        return JSONResponse({"error": f"unknown action: {action}"}, status_code=400)
+    code, data = control_api("POST", "/" + action)
+    return JSONResponse(data, status_code=code if code else 503)
 
 
 if __name__ == "__main__":

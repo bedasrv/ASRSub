@@ -98,6 +98,43 @@ h2 { font-size: 15px; margin: 18px 0 8px; }
 .muted { color: var(--new); }
 footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0 30px; }
 
+#ctl-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+#ctl-actions button {
+  background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+}
+#ctl-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+#ctl-actions button#act-pause { border-color: var(--err); color: var(--err); }
+#ctl-actions button#act-resume { border-color: var(--ok); color: var(--ok); }
+.ctl-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px;
+}
+.ctl-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.ctl-stat .lbl { font-size: 11px; color: var(--new); }
+.ctl-stat .val { font-size: 14px; font-weight: 600; }
+.ctl-stat .val.ok { color: var(--ok); }
+.ctl-stat .val.err { color: var(--err); }
+.ctl-stat .val.run { color: var(--run); }
+#ctl-config table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#ctl-config th, #ctl-config td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+#ctl-config th { color: var(--new); font-size: 12px; font-weight: 600; }
+#ctl-config td .kv { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+#ctl-config .mini {
+  background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer;
+}
+#ctl-config .mini.unset { border-color: var(--err); color: var(--err); }
+#ctl-config input[type="text"] {
+  background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 6px; padding: 4px 6px; font-size: 12px; width: 200px;
+}
+#ctl-msg { font-size: 13px; min-height: 18px; margin-top: 8px; }
+#ctl-msg.ok { color: var(--ok); }
+#ctl-msg.err { color: var(--err); }
+@media (min-width: 768px) {
+  .ctl-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
 @media (min-width: 768px) {
   body { font-size: 16px; }
   main { padding: 20px; }
@@ -130,6 +167,16 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
   <div id="wanted-list"></div>
   <h2>Recent activity</h2>
   <div id="recent-list"></div>
+  <h2>Control</h2>
+  <div id="ctl-status"><div class="muted">loading…</div></div>
+  <div id="ctl-actions">
+    <button id="act-wake" onclick="ctlAction('wake')">Wake now</button>
+    <button id="act-run-once" onclick="ctlAction('run-once')">Run once</button>
+    <button id="act-pause" onclick="ctlAction('pause')">Pause</button>
+    <button id="act-resume" onclick="ctlAction('resume')">Resume</button>
+  </div>
+  <div id="ctl-config"><div class="muted">loading…</div></div>
+  <div id="ctl-msg"></div>
   <footer>polls every 15s · read-only</footer>
 </main>
 <script>
@@ -275,8 +322,163 @@ async function poll() {
   }
 }
 
+function ctlMsg(text, kind) {
+  const m = document.getElementById("ctl-msg");
+  m.textContent = text || "";
+  m.className = kind || "";
+}
+
+async function ctlFetch(url, opts) {
+  const res = await fetch(url, Object.assign({ cache: "no-store" }, opts || {}));
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = { raw: "" }; }
+  return { status: res.status, data: data };
+}
+
+async function loadControlStatus() {
+  const el = document.getElementById("ctl-status");
+  const pa = document.getElementById("act-pause");
+  const re = document.getElementById("act-resume");
+  try {
+    const { status, data } = await ctlFetch("/api/control/status");
+    if (status !== 200) {
+      el.innerHTML = '<div class="muted">control API unreachable (' + esc(data.error || status) + ")</div>";
+      pa.disabled = true; re.disabled = true;
+      return;
+    }
+    const lp = data.last_pass || {};
+    const sc = data.state_counts || {};
+    const paused = !!data.paused;
+    const rows = [
+      ["daemon state", paused ? '<span class="val run">paused</span>' : '<span class="val ok">running</span>'],
+      ["uptime", '<span class="val">' + esc(data.uptime_s != null ? data.uptime_s + "s" : "?") + "</span>"],
+      ["run-once requested", '<span class="val">' + (data.run_once_requested ? "yes" : "no") + "</span>"],
+      ["consecutive failures", '<span class="val">' + esc(data.consecutive_failures ?? "?") + "</span>"],
+      ["last pass processed", '<span class="val">' + esc(lp.processed ?? "?") + "</span>"],
+      ["last pass done/skipped/failed", '<span class="val">' + esc((lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?")) + "</span>"],
+      ["last pass wanted before/after", '<span class="val">' + esc((lp.wanted_before ?? "?") + "/" + (lp.wanted_after ?? "?")) + "</span>"],
+      ["state counts done", '<span class="val ok">' + esc(sc.done ?? "?") + "</span>"],
+      ["state counts error", '<span class="val err">' + esc(sc.error ?? "?") + "</span>"],
+      ["state counts pending", '<span class="val">' + esc(sc.pending ?? "?") + "</span>"],
+      ["state counts total", '<span class="val">' + esc(sc.total ?? "?") + "</span>"],
+      ["started at", '<span class="val">' + esc(data.started_at || "?") + "</span>"],
+    ];
+    el.innerHTML = '<div class="ctl-grid">' + rows.map(function (r) {
+      return '<div class="ctl-stat"><div class="lbl">' + r[0] + '</div><div class="val">' + r[1] + "</div></div>";
+    }).join("") + "</div>";
+    pa.disabled = paused;
+    re.disabled = !paused;
+  } catch (e) {
+    el.innerHTML = '<div class="muted">control API unreachable (' + esc(e.message) + ")</div>";
+    pa.disabled = true; re.disabled = true;
+  }
+}
+
+const DEFAULT_KEYS = ["MAX_EPS_PER_RUN", "TARGET_LANGS", "TRANSLATE_BASE", "TRANSLATE_MODEL", "MAX_TRANSLATE_WORKERS"];
+
+function ctlRow(key, value) {
+  const secret = value === "***";
+  const input = secret
+    ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
+    : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
+  return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
+    '<td><button class="mini" onclick="setConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Set</button> ' +
+    '<button class="mini unset" onclick="unsetConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Unset</button></td></tr>';
+}
+
+async function loadControlConfig() {
+  const el = document.getElementById("ctl-config");
+  try {
+    const { status, data } = await ctlFetch("/api/control/config");
+    if (status !== 200) {
+      el.innerHTML = '<div class="muted">control API unreachable (' + esc(data.error || status) + ")</div>";
+      return;
+    }
+    const keys = DEFAULT_KEYS.concat(Object.keys(data).sort()).filter(function (k, i, a) {
+      return a.indexOf(k) === i;
+    });
+    let html = '<table><tr><th>Key</th><th>Value</th><th></th></tr>';
+    for (const k of keys) {
+      html += ctlRow(k, data[k] != null ? data[k] : "");
+    }
+    html += '<tr><td><input type="text" id="ctl-new-key" placeholder="KEY" style="width:160px"></td>' +
+      '<td><input type="text" id="ctl-new-val" placeholder="VALUE" style="width:200px"></td>' +
+      '<td><button class="mini" onclick="addKey()">Add</button></td></tr></table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<div class="muted">control API unreachable (' + esc(e.message) + ")</div>";
+  }
+}
+
+function addKey() {
+  const k = document.getElementById("ctl-new-key").value.trim();
+  const v = document.getElementById("ctl-new-val").value;
+  if (!k) { ctlMsg("key required", "err"); return; }
+  setConfigKey(k, v);
+}
+
+async function setConfigKey(key, value) {
+  const input = document.querySelector('#ctl-config input[data-key="' + CSS.escape(key) + '"]');
+  const val = (value !== undefined && value !== null) ? value : (input ? input.value : "");
+  if (val === "***") {
+    ctlMsg("secret keys are masked; re-enter the actual value to change", "err");
+    return;
+  }
+  const body = {}; body[key] = val;
+  try {
+    const { status, data } = await ctlFetch("/api/control/config", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (status === 200) {
+      ctlMsg("applied " + key + "=" + val, "ok");
+      loadControlConfig();
+    } else {
+      ctlMsg("set failed: " + esc(data.error || status), "err");
+    }
+  } catch (e) {
+    ctlMsg("set failed: " + esc(e.message), "err");
+  }
+}
+
+async function unsetConfigKey(key) {
+  const body = {}; body[key] = null;
+  try {
+    const { status, data } = await ctlFetch("/api/control/config", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (status === 200) {
+      ctlMsg("unset " + key, "ok");
+      loadControlConfig();
+    } else {
+      ctlMsg("unset failed: " + esc(data.error || status), "err");
+    }
+  } catch (e) {
+    ctlMsg("unset failed: " + esc(e.message), "err");
+  }
+}
+
+async function ctlAction(a) {
+  ctlMsg("sending " + a + "…");
+  try {
+    const { status, data } = await ctlFetch("/api/control/action", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: a }),
+    });
+    if (status === 200) {
+      ctlMsg(a + " ok: " + JSON.stringify(data));
+      loadControlStatus();
+    } else {
+      ctlMsg(a + " failed: " + esc(data.error || status), "err");
+    }
+  } catch (e) {
+    ctlMsg(a + " failed: " + esc(e.message), "err");
+  }
+}
+
 poll();
 setInterval(poll, 15000);
+loadControlStatus();
+loadControlConfig();
+setInterval(loadControlStatus, 15000);
 </script>
 </body>
 </html>
