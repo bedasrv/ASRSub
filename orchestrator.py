@@ -464,6 +464,30 @@ def _parse_numbered_response(raw):
     return parsed
 
 
+def sanitize_lines(lines, max_repeat=10):
+    """Collapse runs of >max_repeat identical chars to max_repeat + ellipsis
+    (anime scream lines otherwise trigger repetition collapse in small models)."""
+    out = []
+    for s in lines:
+        if not s:
+            out.append(s)
+            continue
+        parts = []
+        i = 0
+        while i < len(s):
+            j = i
+            while j < len(s) and s[j] == s[i]:
+                j += 1
+            run = j - i
+            if run > max_repeat:
+                parts.append(s[i] * max_repeat + "…")
+            else:
+                parts.append(s[i:j])
+            i = j
+        out.append("".join(parts))
+    return out
+
+
 def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None):
     if context_lines:
         context_lines = context_lines[:20]
@@ -521,6 +545,7 @@ def _local_translate_batch(cfg, lines, target_lang, key, context_lines=None):
 
 
 def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None):
+    lines = sanitize_lines(lines)
     if is_local_translate(cfg):
         # local 1.8B model echoes target-language REF lines verbatim (verified
         # 12-40/100 echo at any ref count); prior context only for cloud path
