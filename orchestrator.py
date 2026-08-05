@@ -522,7 +522,9 @@ def _local_translate_batch(cfg, lines, target_lang, key, context_lines=None):
 
 def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None):
     if is_local_translate(cfg):
-        return _local_translate_batch(cfg, lines, target_lang, key, context_lines)
+        # local 1.8B model echoes target-language REF lines verbatim (verified
+        # 12-40/100 echo at any ref count); prior context only for cloud path
+        return _local_translate_batch(cfg, lines, target_lang, key, None)
     models = [cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL] + [
         m for m in MODEL_FALLBACKS if m != cfg.get("TRANSLATE_MODEL")
     ]
