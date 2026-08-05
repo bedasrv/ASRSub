@@ -4,7 +4,10 @@
 Self-looping daemon (systemd Restart=always; flock guards single instance). Idempotent via JSONL state file.
 """
 
+import collections
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -20,6 +23,7 @@ import requests
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 _LOG_LOCK = threading.Lock()
+_LOG_RING = collections.deque(maxlen=25)
 
 ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
 STATE_FILE = os.environ.get("STATE_FILE", "/home/user/.config/asr-pipeline/state.jsonl")
@@ -60,6 +64,7 @@ _run_once_requested = False
 _last_pass_stats = None
 _started_at = datetime.now(timezone.utc)
 _consecutive_failures = 0
+_HELP_COOLDOWN = {}
 
 
 def _handle_sigterm(signum, frame):
@@ -100,6 +105,7 @@ def load_config():
 def log(msg):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with _LOG_LOCK:
+        _LOG_RING.append(f"{ts} {msg}")
         print(f"{ts} {msg}", flush=True)
 
 
@@ -650,6 +656,42 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes):
     return last_code
 
 
+def notify_hermes(cfg, ep_id, lang, series, tag, exc):
+    try:
+        url = cfg.get("HERMES_WEBHOOK_URL", "")
+        secret = cfg.get("HERMES_WEBHOOK_SECRET", "")
+        if not url or not secret:
+            return
+        last = _HELP_COOLDOWN.get((ep_id, lang), 0)
+        if time.time() - last < 1800:
+            return
+        payload = {
+            "event_type": "pipeline_error",
+            "episode": f"{tag} {series}",
+            "lang": lang,
+            "error": str(exc)[:500],
+            "log_tail": list(_LOG_RING),
+        }
+        body = json.dumps(payload).encode()
+        ts = str(int(time.time()))
+        sig = hmac.new(
+            secret.encode(), ts.encode() + b"." + body, hashlib.sha256
+        ).hexdigest()
+        headers = {
+            "X-Webhook-Signature-V2": sig,
+            "X-Webhook-Timestamp": ts,
+            "Content-Type": "application/json",
+        }
+        r = requests.post(url, data=body, headers=headers, timeout=10)
+        if r.status_code in (200, 202):
+            _HELP_COOLDOWN[(ep_id, lang)] = time.time()
+            log(f"help: {tag} {series} [{lang}] notified Hermes")
+        else:
+            log(f"help: notify failed: HTTP {r.status_code}")
+    except Exception as e:
+        log(f"help: notify failed: {e}")
+
+
 def process_after_asr(
     cfg,
     key,
@@ -727,6 +769,7 @@ def process_after_asr(
             }
         )
         log(f"fail: {series} [{lang}] {exc}")
+        notify_hermes(cfg, ep_id, lang, series, tag, exc)
         return "failed"
 
 
@@ -838,6 +881,14 @@ def run_pass():
                     decision = choose_source(streams, lang)
                     if decision is None:
                         log(f"fail: {tag} {series} [{lang}] no audio streams")
+                        notify_hermes(
+                            cfg,
+                            ep_id,
+                            lang,
+                            series,
+                            tag,
+                            RuntimeError("no audio streams"),
+                        )
                         failed += 1
                         append_state(
                             {
@@ -904,6 +955,7 @@ def run_pass():
                         }
                     )
                     log(f"fail: {series} [{lang}] {exc}")
+                    notify_hermes(cfg, ep_id, lang, series, tag, exc)
 
         for fut in as_completed(futures):
             if fut.result() == "done":
