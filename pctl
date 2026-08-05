@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Control CLI for the ASR pipeline orchestrator control API (stdlib only)."""
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_HOST = "http://127.0.0.1:8085"
+ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
+
+
+def get_host():
+    return os.environ.get("PIPE_HOST", DEFAULT_HOST)
+
+
+def read_token():
+    tok = os.environ.get("PIPE_TOKEN")
+    if tok:
+        return tok
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if line.startswith("CONTROL_API_KEY="):
+                    return line.partition("=")[2].strip()
+    except OSError:
+        pass
+    return None
+
+
+def request(method, path, token=None, body=None):
+    req = urllib.request.Request(get_host() + path, method=method)
+    req.add_header("Content-Type", "application/json")
+    if token is not None:
+        req.add_header("X-API-Key", token)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    try:
+        with urllib.request.urlopen(req, data=data) as resp:
+            raw = resp.read().decode("utf-8")
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8")
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = {"error": raw}
+        return exc.code, parsed
+    except urllib.error.URLError as exc:
+        return 0, {"error": str(exc.reason)}
+
+
+def fail(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def main(argv):
+    if not argv:
+        fail("usage: pctl <status|config|wake|pause|resume|run-once|config set K=V...|config unset K...>")
+    cmd = argv[0]
+    if cmd == "status":
+        code, body = request("GET", "/status")
+        print(json.dumps(body, indent=2))
+        sys.exit(0 if code == 200 else 1)
+    if cmd == "config":
+        if len(argv) >= 2 and argv[1] == "set":
+            token = read_token()
+            if not token:
+                fail("PIPE_TOKEN env or CONTROL_API_KEY in pipeline.env required for config set")
+            kv = {}
+            for pair in argv[2:]:
+                if "=" not in pair:
+                    fail(f"expected KEY=VALUE, got: {pair}")
+                k, _, v = pair.partition("=")
+                kv[k] = v
+            code, body = request("POST", "/config", token=token, body=kv)
+            print(json.dumps(body, indent=2))
+            sys.exit(0 if code == 200 else 1)
+        if len(argv) >= 2 and argv[1] == "unset":
+            token = read_token()
+            if not token:
+                fail("PIPE_TOKEN env or CONTROL_API_KEY in pipeline.env required for config unset")
+            if len(argv) < 3:
+                fail("config unset requires at least one KEY")
+            body = {k: None for k in argv[2:]}
+            code, resp = request("POST", "/config", token=token, body=body)
+            print(json.dumps(resp, indent=2))
+            sys.exit(0 if code == 200 else 1)
+        token = None
+        code, body = request("GET", "/config")
+        print(json.dumps(body, indent=2))
+        sys.exit(0 if code == 200 else 1)
+    if cmd in ("wake", "pause", "resume", "run-once"):
+        token = read_token() if cmd != "wake" else None
+        code, body = request("POST", "/" + cmd, token=token)
+        print(json.dumps(body, indent=2))
+        sys.exit(0 if code == 200 else 1)
+    fail(f"unknown command: {cmd}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

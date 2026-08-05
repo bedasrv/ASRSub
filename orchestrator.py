@@ -42,6 +42,8 @@ MODEL_FALLBACKS = [
 MAX_WORKERS = int(os.environ.get("MAX_TRANSLATE_WORKERS", "1"))
 WAKE_EVENT = threading.Event()
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8085"))
+OVERRIDE_FILE = "/home/user/.config/asr-pipeline/config.overrides.json"
+CONTROL_API_KEY = os.environ.get("CONTROL_API_KEY", "")
 ASR_CACHE_DIR = os.environ.get(
     "ASR_CACHE_DIR",
     os.path.join(os.path.expanduser("~"), ".cache", "asr-pipeline", "asr"),
@@ -53,6 +55,11 @@ LOCAL_CHUNK_SIZE = 100
 HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
 
 _stop_requested = False
+_paused = False
+_run_once_requested = False
+_last_pass_stats = None
+_started_at = datetime.now(timezone.utc)
+_consecutive_failures = 0
 
 
 def _handle_sigterm(signum, frame):
@@ -71,6 +78,15 @@ def load_config():
                 continue
             k, _, v = line.partition("=")
             cfg[k.strip()] = v.strip()
+    if os.path.exists(OVERRIDE_FILE):
+        try:
+            with open(OVERRIDE_FILE, "r", encoding="utf-8") as fh:
+                ov = json.loads(fh.read())
+            if isinstance(ov, dict):
+                for k, v in ov.items():
+                    cfg[str(k)] = str(v)
+        except Exception as exc:
+            log(f"WARNING: failed to load {OVERRIDE_FILE}: {exc}")
     cfg["MAX_EPS_PER_RUN"] = int(
         os.environ.get("MAX_EPS_PER_RUN", cfg.get("MAX_EPS_PER_RUN", "8"))
     )
@@ -886,18 +902,137 @@ def run_pass():
     }
 
 
-class _WakeHandler(BaseHTTPRequestHandler):
-    def _ok(self):
-        self.send_response(200)
-        self.send_header("Content-Length", "0")
+SECRET_KEY_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+
+
+def _mask_secrets(cfg):
+    return {
+        k: ("***" if any(h in k.upper() for h in SECRET_KEY_HINTS) else v)
+        for k, v in cfg.items()
+    }
+
+
+def _read_overrides():
+    if not os.path.exists(OVERRIDE_FILE):
+        return {}
+    try:
+        with open(OVERRIDE_FILE, "r", encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_overrides(ov):
+    os.makedirs(os.path.dirname(OVERRIDE_FILE), exist_ok=True)
+    tmp = OVERRIDE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(ov, ensure_ascii=False, indent=2) + "\n")
+    os.replace(tmp, OVERRIDE_FILE)
+
+
+class ControlHandler(BaseHTTPRequestHandler):
+    def _send_json(self, code, obj):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        WAKE_EVENT.set()
+        self.wfile.write(body)
+
+    def _check_auth(self):
+        if not CONTROL_API_KEY:
+            self._send_json(401, {"error": "CONTROL_API_KEY not configured"})
+            return False
+        if self.headers.get("X-API-Key") != CONTROL_API_KEY:
+            self._send_json(401, {"error": "unauthorized"})
+            return False
+        return True
+
+    def _state_counts(self):
+        counts = {"done": 0, "error": 0, "pending": 0, "total": 0}
+        for e in load_state():
+            counts["total"] += 1
+            st = e.get("status")
+            if st in counts:
+                counts[st] += 1
+        return counts
 
     def do_GET(self):
-        self._ok()
+        path = self.path.split("?", 1)[0]
+        if path == "/health":
+            self._send_json(200, {"ok": True})
+        elif path == "/status":
+            self._send_json(
+                200,
+                {
+                    "uptime_s": int(
+                        (datetime.now(timezone.utc) - _started_at).total_seconds()
+                    ),
+                    "paused": _paused,
+                    "run_once_requested": _run_once_requested,
+                    "last_pass": _last_pass_stats,
+                    "state_counts": self._state_counts(),
+                    "consecutive_failures": _consecutive_failures,
+                    "started_at": _started_at.isoformat(),
+                },
+            )
+        elif path == "/config":
+            self._send_json(200, _mask_secrets(load_config()))
+        elif path == "/sonarr-webhook":
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True})
+        else:
+            self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        self._ok()
+        global _paused, _run_once_requested
+        path = self.path.split("?", 1)[0]
+        if path == "/sonarr-webhook":
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True})
+            return
+        if path == "/wake":
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True})
+            return
+        if not self._check_auth():
+            return
+        if path == "/config":
+            try:
+                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                body = json.loads(raw.decode("utf-8") or "{}")
+            except Exception as exc:
+                self._send_json(400, {"error": f"invalid JSON body: {exc}"})
+                return
+            if not isinstance(body, dict):
+                self._send_json(400, {"error": "body must be a JSON object"})
+                return
+            ov = _read_overrides()
+            applied = {}
+            for k, v in body.items():
+                if v is None:
+                    ov.pop(k, None)
+                    applied[k] = None
+                else:
+                    ov[str(k)] = str(v)
+                    applied[str(k)] = str(v)
+            _write_overrides(ov)
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True, "applied": _mask_secrets(applied)})
+        elif path == "/pause":
+            _paused = True
+            self._send_json(200, {"ok": True, "paused": True})
+        elif path == "/resume":
+            _paused = False
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True, "paused": False})
+        elif path == "/run-once":
+            _run_once_requested = True
+            WAKE_EVENT.set()
+            self._send_json(200, {"ok": True, "run_once_requested": True})
+        else:
+            self._send_json(404, {"error": "not found"})
 
     def log_message(self, *args):
         pass
@@ -905,14 +1040,16 @@ class _WakeHandler(BaseHTTPRequestHandler):
 
 def start_webhook_listener():
     try:
-        srv = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), _WakeHandler)
+        srv = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), ControlHandler)
     except OSError as exc:
         log(
             f"webhook listener unavailable on :{WEBHOOK_PORT} ({exc}); continuing without it"
         )
         return
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log(f"webhook listener on :{WEBHOOK_PORT} (any request wakes the loop)")
+    log(
+        f"control API + webhook listener on :{WEBHOOK_PORT} (GET /status, /config, /health; POST /config /pause /resume /run-once /wake /sonarr-webhook)"
+    )
 
 
 def main():
@@ -923,36 +1060,44 @@ def main():
     except OSError:
         log("another orchestrator instance running, exiting")
         return 0
+    global _consecutive_failures, _last_pass_stats, _paused, _run_once_requested
     start_webhook_listener()
     signal.signal(signal.SIGTERM, _handle_sigterm)
-    consecutive_failures = 0
+    _consecutive_failures = 0
     while True:
+        if _paused and not _run_once_requested:
+            log("paused; waiting")
+            WAKE_EVENT.wait(timeout=900)
+            WAKE_EVENT.clear()
+            continue
         try:
             stats = run_pass()
         except Exception as exc:
             log(f"pass crashed: {exc}")
             stats = {"fetch_error": True}
+        _last_pass_stats = stats
+        _run_once_requested = False
         if _stop_requested:
             log("stop requested, exiting after pass")
             return 0
         if stats.get("fetch_error"):
-            consecutive_failures += 1
+            _consecutive_failures += 1
         else:
-            consecutive_failures = 0
+            _consecutive_failures = 0
         remaining = stats.get("wanted_after")
         if remaining is None:
             remaining = stats.get("wanted_before", 0)
         processed = stats.get("processed") or 0
         failed = stats.get("failed") or 0
         busy = (processed > 0 and (remaining or 0) > 0) or failed > 0
-        if consecutive_failures >= 3:
+        if _consecutive_failures >= 3:
             delay = 900  # Bazarr/API down - stop hot-looping
         elif busy:
             delay = 60  # backlog or failures - re-check soon
         else:
             delay = 900  # idle
         log(
-            f"sleeping {delay}s until next pass (busy={busy}, consecutive_failures={consecutive_failures})"
+            f"sleeping {delay}s until next pass (busy={busy}, consecutive_failures={_consecutive_failures})"
         )
         WAKE_EVENT.wait(timeout=delay)
         WAKE_EVENT.clear()
