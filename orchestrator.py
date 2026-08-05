@@ -343,7 +343,7 @@ def post_chat(cfg, messages, model, key, local=False):
             "top_k": 20,
             "top_p": 0.6,
             "repeat_penalty": 1.0,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "stop": HY_STOP_TOKENS,
         }
     else:
