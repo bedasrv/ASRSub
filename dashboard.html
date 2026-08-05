@@ -38,39 +38,46 @@ header h1 { font-size: 18px; margin: 0; }
   background: var(--card); border: 1px solid var(--border); color: var(--fg);
   border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer;
 }
-main { padding: 12px; max-width: 900px; margin: 0 auto; }
+main { padding: 10px; max-width: 820px; margin: 0 auto; }
 #error-banner {
   display: none; background: var(--err); color: #fff; padding: 10px 14px;
   border-radius: 8px; margin-bottom: 12px; font-size: 14px;
 }
 #error-banner.visible { display: block; }
 .summary {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 12px;
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px;
 }
 .stat {
   background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px; text-align: center;
+  padding: 10px; text-align: center;
 }
-.stat .num { font-size: 26px; font-weight: 700; }
+.stat .num { font-size: 22px; font-weight: 700; }
 .stat .lbl { font-size: 12px; color: var(--new); margin-top: 2px; }
 .stat.wanted .num { color: var(--accent); }
 .stat.done .num { color: var(--ok); }
 .stat.error .num { color: var(--err); }
 .stat.running .num { color: var(--run); }
-.pills { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.pills { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .pill {
   background: var(--card); border: 1px solid var(--border); border-radius: 999px;
-  padding: 6px 12px; font-size: 13px; display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; font-size: 13px; display: flex; align-items: center; gap: 6px;
 }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot.up { background: var(--ok); }
 .dot.down { background: var(--err); }
 .dot.running { background: var(--run); }
 .dot.stopped { background: var(--new); }
-h2 { font-size: 15px; margin: 18px 0 8px; }
-#wanted-list { display: grid; grid-template-columns: 1fr; gap: 10px; }
+h2 { font-size: 15px; margin: 14px 0 6px; }
+.sec-head {
+  display: flex; align-items: center; justify-content: space-between;
+  cursor: pointer; user-select: none;
+}
+.chev { transition: transform .15s; font-size: 12px; color: var(--new); }
+.sec.collapsed .sec-body { display: none; }
+.sec.collapsed .chev { transform: rotate(-90deg); }
+#wanted-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .card {
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
 }
 .ep-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .ep-series { font-weight: 700; font-size: 15px; }
@@ -89,7 +96,7 @@ h2 { font-size: 15px; margin: 18px 0 8px; }
 #recent-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
 .recent {
   background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 6px 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
   font-size: 13px;
 }
 .recent .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -107,16 +114,16 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
 #ctl-actions button#act-pause { border-color: var(--err); color: var(--err); }
 #ctl-actions button#act-resume { border-color: var(--ok); color: var(--ok); }
 .ctl-grid {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px;
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 10px;
 }
-.ctl-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.ctl-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
 .ctl-stat .lbl { font-size: 11px; color: var(--new); }
 .ctl-stat .val { font-size: 14px; font-weight: 600; }
 .ctl-stat .val.ok { color: var(--ok); }
 .ctl-stat .val.err { color: var(--err); }
 .ctl-stat .val.run { color: var(--run); }
 #ctl-config table { width: 100%; border-collapse: collapse; font-size: 13px; }
-#ctl-config th, #ctl-config td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+#ctl-config th, #ctl-config td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
 #ctl-config th { color: var(--new); font-size: 12px; font-weight: 600; }
 #ctl-config td .kv { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 #ctl-config .mini {
@@ -163,20 +170,28 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
     <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
     <span class="pill"><span class="dot stopped" id="a-dot"></span><span id="a-text">asr …</span></span>
   </div>
-  <h2>Wanted</h2>
-  <div id="wanted-list"></div>
-  <h2>Recent activity</h2>
-  <div id="recent-list"></div>
-  <h2>Control</h2>
-  <div id="ctl-status"><div class="muted">loading…</div></div>
-  <div id="ctl-actions">
-    <button id="act-wake" onclick="ctlAction('wake')">Wake now</button>
-    <button id="act-run-once" onclick="ctlAction('run-once')">Run once</button>
-    <button id="act-pause" onclick="ctlAction('pause')">Pause</button>
-    <button id="act-resume" onclick="ctlAction('resume')">Resume</button>
-  </div>
-  <div id="ctl-config"><div class="muted">loading…</div></div>
-  <div id="ctl-msg"></div>
+  <section class="sec" id="sec-wanted">
+    <h2 class="sec-head" data-sec="wanted">Wanted <span class="chev">▾</span></h2>
+    <div class="sec-body"><div id="wanted-list"></div></div>
+  </section>
+  <section class="sec" id="sec-recent">
+    <h2 class="sec-head" data-sec="recent">Recent activity <span class="chev">▾</span></h2>
+    <div class="sec-body"><div id="recent-list"></div></div>
+  </section>
+  <section class="sec" id="sec-control">
+    <h2 class="sec-head" data-sec="control">Control <span class="chev">▾</span></h2>
+    <div class="sec-body">
+      <div id="ctl-status"><div class="muted">loading…</div></div>
+      <div id="ctl-actions">
+        <button id="act-wake" onclick="ctlAction('wake')">Wake now</button>
+        <button id="act-run-once" onclick="ctlAction('run-once')">Run once</button>
+        <button id="act-pause" onclick="ctlAction('pause')">Pause</button>
+        <button id="act-resume" onclick="ctlAction('resume')">Resume</button>
+      </div>
+      <div id="ctl-config"><div class="muted">loading…</div></div>
+      <div id="ctl-msg"></div>
+    </div>
+  </section>
   <footer>polls every 15s · read-only</footer>
 </main>
 <script>
@@ -201,6 +216,32 @@ document.getElementById("theme-toggle").addEventListener("click", function () {
   localStorage.setItem(LS_THEME, theme);
   applyTheme(theme);
 });
+
+const LS_SECTIONS = "asr-dash-sections";
+const DEF_SECTIONS = { wanted: true, recent: true, control: false };
+function initSections() {
+  let s = {};
+  try { s = JSON.parse(localStorage.getItem(LS_SECTIONS) || "{}") || {}; } catch (e) { s = {}; }
+  const merged = Object.assign({}, DEF_SECTIONS, s);
+  for (const sec of document.querySelectorAll(".sec")) {
+    const name = sec.querySelector(".sec-head").dataset.sec;
+    const collapsed = merged[name] === false;
+    sec.classList.toggle("collapsed", collapsed);
+  }
+  document.querySelectorAll(".sec-head").forEach(function (h) {
+    h.addEventListener("click", function () {
+      const sec = h.parentElement;
+      const name = h.dataset.sec;
+      const collapsed = !sec.classList.contains("collapsed");
+      sec.classList.toggle("collapsed", collapsed);
+      const cur = {};
+      try { Object.assign(cur, JSON.parse(localStorage.getItem(LS_SECTIONS) || "{}")); } catch (e) {}
+      cur[name] = !collapsed;
+      localStorage.setItem(LS_SECTIONS, JSON.stringify(cur));
+    });
+  });
+}
+initSections();
 
 function relTime(ts) {
   if (!ts) return "";
