@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -41,6 +42,19 @@ MODEL_FALLBACKS = [
 MAX_WORKERS = int(os.environ.get("MAX_TRANSLATE_WORKERS", "1"))
 WAKE_EVENT = threading.Event()
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8085"))
+ASR_CACHE_DIR = os.environ.get(
+    "ASR_CACHE_DIR",
+    os.path.join(os.path.expanduser("~"), ".cache", "asr-pipeline", "asr"),
+)
+
+_stop_requested = False
+
+
+def _handle_sigterm(signum, frame):
+    global _stop_requested
+    _stop_requested = True
+    WAKE_EVENT.set()
+    log("SIGTERM received, finishing current pass then exiting")
 
 
 def load_config():
@@ -193,6 +207,37 @@ def extract_wav(path, stream_index, out_path):
     )
     if p.returncode != 0:
         raise RuntimeError(f"ffmpeg extract failed: {p.stderr.strip()}")
+
+
+def _media_fingerprint(path):
+    st = os.stat(path)
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def asr_cache_get(ep_id, asr_lang, media_path):
+    key = f"{ep_id}_{asr_lang}"
+    srt_path = os.path.join(ASR_CACHE_DIR, key + ".srt")
+    meta_path = os.path.join(ASR_CACHE_DIR, key + ".json")
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+        if meta.get("fingerprint") == _media_fingerprint(media_path):
+            with open(srt_path) as fh:
+                text = fh.read()
+            if text.strip():
+                return text
+    except Exception:
+        pass
+    return None
+
+
+def asr_cache_put(ep_id, asr_lang, media_path, text):
+    os.makedirs(ASR_CACHE_DIR, exist_ok=True)
+    key = f"{ep_id}_{asr_lang}"
+    with open(os.path.join(ASR_CACHE_DIR, key + ".srt"), "w") as fh:
+        fh.write(text)
+    with open(os.path.join(ASR_CACHE_DIR, key + ".json"), "w") as fh:
+        json.dump({"fingerprint": _media_fingerprint(media_path)}, fh)
 
 
 def asr_srt(cfg, wav_path, lang):
@@ -675,17 +720,23 @@ def run_pass():
                     os.makedirs(cfg["TMP_DIR"], exist_ok=True)
                     wav_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.wav")
                     srt_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.srt")
-                    extract_wav(media_path, decision["stream_index"], wav_path)
 
-                    t_asr = time.time()
-                    srt_text = asr_srt(cfg, wav_path, decision["asr_lang"])
-                    asr_elapsed = time.time() - t_asr
+                    cached_text = asr_cache_get(ep_id, decision["asr_lang"], media_path)
+                    if cached_text:
+                        srt_text = cached_text
+                        log(f"  {tag} [{src}->{lang}] ASR cache hit (skip extract+asr)")
+                    else:
+                        extract_wav(media_path, decision["stream_index"], wav_path)
+                        t_asr = time.time()
+                        srt_text = asr_srt(cfg, wav_path, decision["asr_lang"])
+                        asr_elapsed = time.time() - t_asr
+                        asr_cache_put(ep_id, decision["asr_lang"], media_path, srt_text)
+                        log(
+                            f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
+                        )
                     cues = parse_srt(srt_text)
                     if not cues:
                         raise RuntimeError("ASR returned no cues")
-                    log(
-                        f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
-                    )
                     futures.append(
                         pool.submit(
                             process_after_asr,
@@ -723,10 +774,13 @@ def run_pass():
             else:
                 failed += 1
 
-    try:
-        wanted_after = get_wanted(cfg).get("total", 0)
-    except Exception:
-        wanted_after = None
+    if processed == 0:
+        wanted_after = wanted_before  # nothing changed; skip redundant API call
+    else:
+        try:
+            wanted_after = get_wanted(cfg).get("total", 0)
+        except Exception:
+            wanted_after = None
     log(
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
         f"wanted_before={wanted_before} wanted_after={wanted_after}"
@@ -779,6 +833,7 @@ def main():
         log("another orchestrator instance running, exiting")
         return 0
     start_webhook_listener()
+    signal.signal(signal.SIGTERM, _handle_sigterm)
     consecutive_failures = 0
     while True:
         try:
@@ -786,6 +841,9 @@ def main():
         except Exception as exc:
             log(f"pass crashed: {exc}")
             stats = {"fetch_error": True}
+        if _stop_requested:
+            log("stop requested, exiting after pass")
+            return 0
         if stats.get("fetch_error"):
             consecutive_failures += 1
         else:
@@ -793,7 +851,9 @@ def main():
         remaining = stats.get("wanted_after")
         if remaining is None:
             remaining = stats.get("wanted_before", 0)
-        busy = (remaining or 0) > 0 or (stats.get("failed") or 0) > 0
+        processed = stats.get("processed") or 0
+        failed = stats.get("failed") or 0
+        busy = (processed > 0 and (remaining or 0) > 0) or failed > 0
         if consecutive_failures >= 3:
             delay = 900  # Bazarr/API down - stop hot-looping
         elif busy:
