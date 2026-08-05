@@ -838,12 +838,13 @@ def run_pass():
                         srt_text = asr_srt(cfg, wav_path, decision["asr_lang"])
                         asr_elapsed = time.time() - t_asr
                         asr_cache_put(ep_id, decision["asr_lang"], media_path, srt_text)
-                        log(
-                            f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
-                        )
                     cues = parse_srt(srt_text)
                     if not cues:
                         raise RuntimeError("ASR returned no cues")
+                    if not cached_text:
+                        log(
+                            f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
+                        )
                     futures.append(
                         pool.submit(
                             process_after_asr,
