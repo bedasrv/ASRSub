@@ -399,7 +399,7 @@ def get_prior_context(cfg, series_id, episode_id):
         lines = []
         seen = set()
         for prev in sorted(prev_eps, key=lambda e: -e["episodeNumber"]):
-            if len(lines) >= 40:
+            if len(lines) >= 20:
                 break
             try:
                 sr = requests.get(
@@ -443,7 +443,7 @@ def get_prior_context(cfg, series_id, episode_id):
                             break
             except Exception:
                 continue
-        return lines[:40]
+        return lines[:20]
     except Exception:
         return []
 
@@ -466,7 +466,7 @@ def _parse_numbered_response(raw):
 
 def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None):
     if context_lines:
-        context_lines = context_lines[:40]
+        context_lines = context_lines[:20]
     n = len(lines)
     system = (
         f"Translate each line into {target_lang}. Reply as numbered list, "
