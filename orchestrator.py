@@ -47,6 +47,11 @@ ASR_CACHE_DIR = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".cache", "asr-pipeline", "asr"),
 )
 
+TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
+TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-1.8B-Q4_K_M.gguf")
+LOCAL_CHUNK_SIZE = 100
+HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
+
 _stop_requested = False
 
 
@@ -309,15 +314,29 @@ def extract_json_array(raw):
     return None
 
 
-def post_chat(cfg, messages, model, key):
-    url = cfg["TRANSLATE_BASE"].rstrip("/") + "/chat/completions"
+def post_chat(cfg, messages, model, key, local=False):
+    url = (cfg.get("TRANSLATE_BASE") or TRANSLATE_BASE).rstrip(
+        "/"
+    ) + "/chat/completions"
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-        "thinking": {"type": "enabled", "effort": "max"},
-    }
+    if local:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.7,
+            "top_k": 20,
+            "top_p": 0.6,
+            "repeat_penalty": 1.0,
+            "max_tokens": 4096,
+            "stop": HY_STOP_TOKENS,
+        }
+    else:
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.3,
+            "thinking": {"type": "enabled", "effort": "max"},
+        }
     for attempt in range(3):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
@@ -413,9 +432,81 @@ def get_prior_context(cfg, series_id, episode_id):
         return []
 
 
+def is_local_translate(cfg):
+    base = cfg.get("TRANSLATE_BASE") or TRANSLATE_BASE
+    return "127.0.0.1" in base or "localhost" in base
+
+
+def _parse_numbered_response(raw):
+    if not raw:
+        return None
+    parsed = {}
+    for line in raw.splitlines():
+        m = re.match(r"^(\d+)\.\s*(.+)$", line.strip())
+        if m:
+            parsed[int(m.group(1))] = m.group(2).strip()
+    return parsed
+
+
+def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None):
+    n = len(lines)
+    system = (
+        f"Translate each line into {target_lang}. Reply as numbered list, "
+        f"e.g. 1. ... 2. ... 3. ..., exactly {n} lines, no extra text."
+    )
+    if context_lines:
+        system += (
+            "\n\nUse these previously translated lines from earlier episodes for "
+            "consistent names, terms, and style:\n"
+            + "\n".join(f"REF: {l}" for l in context_lines)
+        )
+    prompt = system + "\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(lines, 1))
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+    model = cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL
+    for _ in range(3):  # initial + up to 2 corrective retries
+        raw = post_chat(cfg, messages, model, key, local=True)
+        if raw is None:
+            log("    [translate] local endpoint returned nothing")
+            return None
+        parsed = _parse_numbered_response(raw)
+        if parsed is not None and len(parsed) == n:
+            return [parsed.get(i, "") for i in range(1, n + 1)]
+        log(
+            f"    [translate] local count mismatch got {len(parsed) if parsed else 0}, want {n}"
+        )
+        messages.append({"role": "assistant", "content": raw})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"You forgot line numbering or skipped lines. Reply as numbered list, "
+                    f"e.g. 1. ... 2. ... 3. ..., exactly {n} lines, no extra text."
+                ),
+            }
+        )
+    log("    [translate] local unparseable / count mismatch after retry")
+    return None
+
+
+def _local_translate_batch(cfg, lines, target_lang, key, context_lines=None):
+    out = []
+    for start in range(0, len(lines), LOCAL_CHUNK_SIZE):
+        chunk = lines[start : start + LOCAL_CHUNK_SIZE]
+        translated = _local_chat_chunk(cfg, chunk, target_lang, key, context_lines)
+        if translated is None:
+            return None
+        out.extend(translated)
+    return out
+
+
 def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None):
-    models = [cfg["TRANSLATE_MODEL"]] + [
-        m for m in MODEL_FALLBACKS if m != cfg["TRANSLATE_MODEL"]
+    if is_local_translate(cfg):
+        return _local_translate_batch(cfg, lines, target_lang, key, context_lines)
+    models = [cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL] + [
+        m for m in MODEL_FALLBACKS if m != cfg.get("TRANSLATE_MODEL")
     ]
     system = TRANSLATE_PROMPT.format(target_language=target_lang)
     if context_lines:
