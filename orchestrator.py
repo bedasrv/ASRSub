@@ -33,7 +33,11 @@ TRANSLATE_PROMPT = (
 
 BATCH_SIZE = 20
 TIMEOUT = 900
-MODEL_FALLBACKS = []
+MODEL_FALLBACKS = [
+    m.strip()
+    for m in os.environ.get("TRANSLATE_FALLBACK_MODELS", "").split(",")
+    if m.strip()
+]
 MAX_WORKERS = int(os.environ.get("MAX_TRANSLATE_WORKERS", "1"))
 WAKE_EVENT = threading.Event()
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8085"))
@@ -86,17 +90,6 @@ def append_state(entry):
     entry["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(STATE_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def is_done(entries, ep_id, lang):
-    for e in entries:
-        if (
-            e.get("sonarrEpisodeId") == ep_id
-            and e.get("language") == lang
-            and e.get("status") == "done"
-        ):
-            return True
-    return False
 
 
 # ---------- remote APIs ----------
@@ -422,11 +415,20 @@ def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None):
     return None
 
 
-def translate_texts(cfg, cues, target_lang, key, series_id=None, episode_id=None):
+def translate_texts(
+    cfg, cues, target_lang, key, series_id=None, episode_id=None, prior_cache=None
+):
     lines = [c["text"] for c in cues]
-    context_lines = []
-    if series_id and episode_id:
-        context_lines = get_prior_context(cfg, series_id, episode_id)
+    if series_id and episode_id and prior_cache is not None:
+        if series_id not in prior_cache:
+            prior_cache[series_id] = get_prior_context(cfg, series_id, episode_id)
+        context_lines = prior_cache[series_id]
+    else:
+        context_lines = (
+            get_prior_context(cfg, series_id, episode_id)
+            if series_id and episode_id
+            else []
+        )
     out = chat_translate_batch(cfg, lines, target_lang, key, context_lines)
     if out is None or len(out) != len(lines):
         return None
@@ -437,20 +439,34 @@ def translate_texts(cfg, cues, target_lang, key, series_id=None, episode_id=None
 
 
 def upload_srt(cfg, series_id, ep_id, lang, srt_bytes):
-    r = requests.post(
-        cfg["BAZARR_URL"].rstrip("/") + "/episodes/subtitles",
-        params={
-            "seriesid": series_id,
-            "episodeid": ep_id,
-            "language": lang,
-            "forced": "false",
-            "hi": "false",
-        },
-        headers={"X-API-KEY": cfg["BAZARR_API_KEY"]},
-        files={"file": ("sub.srt", srt_bytes, "application/x-subrip")},
-        timeout=120,
-    )
-    return r.status_code
+    url = cfg["BAZARR_URL"].rstrip("/") + "/episodes/subtitles"
+    params = {
+        "seriesid": series_id,
+        "episodeid": ep_id,
+        "language": lang,
+        "forced": "false",
+        "hi": "false",
+    }
+    headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
+    files = {"file": ("sub.srt", srt_bytes, "application/x-subrip")}
+    last_code = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url, params=params, headers=headers, files=files, timeout=120
+            )
+            last_code = r.status_code
+            if r.status_code == 204:
+                return 204
+            log(
+                f"    [upload] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]}"
+            )
+        except requests.RequestException as exc:
+            last_code = None
+            log(f"    [upload] network error (attempt {attempt + 1}): {exc}")
+        if attempt < 2:
+            time.sleep(5 * (attempt + 1))
+    return last_code
 
 
 def process_after_asr(
@@ -467,6 +483,7 @@ def process_after_asr(
     info,
     wav_path,
     srt_path,
+    prior_cache=None,
 ):
     try:
         if decision["needs_translate"]:
@@ -480,6 +497,7 @@ def process_after_asr(
                 key,
                 info.get("seriesId") or info.get("sonarrSeriesId"),
                 ep_id,
+                prior_cache,
             )
             if texts is None or len(texts) != len(cues):
                 raise RuntimeError("translation failed / count mismatch")
@@ -545,6 +563,18 @@ def run_pass():
 
     entries = load_state()
 
+    done_keys = set()
+    consec_errors = {}
+    last_entry = {}
+    for e in entries:
+        k = (e.get("sonarrEpisodeId"), e.get("language"))
+        last_entry[k] = e
+        if e.get("status") == "error":
+            consec_errors[k] = consec_errors.get(k, 0) + 1
+        else:
+            consec_errors[k] = 0
+    done_keys = {k for k, e in last_entry.items() if e.get("status") == "done"}
+
     try:
         wanted = get_wanted(cfg)
     except Exception as exc:
@@ -572,6 +602,7 @@ def run_pass():
         f"(max={cfg['MAX_EPS_PER_RUN']})"
     )
 
+    prior_cache = {}
     futures = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         for item in candidates:
@@ -580,10 +611,24 @@ def run_pass():
             missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
             langs = sorted(missing & target_langs)
             for lang in langs:
-                if is_done(entries, ep_id, lang):
+                if (ep_id, lang) in done_keys:
                     log(f"skip: S?E? {series} [{lang}] already done (state)")
                     skipped += 1
                     continue
+                if consec_errors.get((ep_id, lang), 0) >= 2:
+                    le = last_entry.get((ep_id, lang)) or {}
+                    last_ts = le.get("ts", "")
+                    try:
+                        last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                        age_s = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    except Exception:
+                        age_s = 0
+                    if age_s < 1800:
+                        log(
+                            f"park: {series} [{lang}] parked 30min after consecutive errors"
+                        )
+                        skipped += 1
+                        continue
                 processed += 1
                 t0 = time.time()
                 try:
@@ -657,6 +702,7 @@ def run_pass():
                             info,
                             wav_path,
                             srt_path,
+                            prior_cache=prior_cache,
                         )
                     )
                 except Exception as exc:
