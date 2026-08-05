@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AI subtitle pipeline orchestrator: wanted list -> ASR -> LLM translate -> Bazarr upload.
 
-Single pass per invocation (systemd timer drives it). Idempotent via JSONL state file.
+Self-looping daemon (systemd Restart=always; flock guards single instance). Idempotent via JSONL state file.
 """
 
 import fcntl
@@ -10,10 +10,15 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import requests
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_LOG_LOCK = threading.Lock()
 
 ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
 STATE_FILE = os.environ.get("STATE_FILE", "/home/user/.config/asr-pipeline/state.jsonl")
@@ -27,8 +32,11 @@ TRANSLATE_PROMPT = (
 )
 
 BATCH_SIZE = 20
-TIMEOUT = 3600
+TIMEOUT = 900
 MODEL_FALLBACKS = []
+MAX_WORKERS = int(os.environ.get("MAX_TRANSLATE_WORKERS", "1"))
+WAKE_EVENT = threading.Event()
+WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8085"))
 
 
 def load_config():
@@ -52,7 +60,8 @@ def load_config():
 
 def log(msg):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{ts} {msg}", flush=True)
+    with _LOG_LOCK:
+        print(f"{ts} {msg}", flush=True)
 
 
 # ---------- state ----------
@@ -271,12 +280,13 @@ def post_chat(cfg, messages, model, key):
         "temperature": 0.3,
         "thinking": {"type": "enabled", "effort": "max"},
     }
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             r = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
         except requests.RequestException as exc:
             log(f"    [translate] network error (attempt {attempt + 1}): {exc}")
-            time.sleep(2)
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
             continue
         if r.status_code == 200:
             try:
@@ -285,10 +295,11 @@ def post_chat(cfg, messages, model, key):
                 return None
         if r.status_code == 404:
             return None  # signal model fallback
+        # 5xx/429: server overload or rate limit - do not hammer; defer to next pass
         log(
-            f"    [translate] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]}"
+            f"    [translate] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]} - deferring to next pass"
         )
-        time.sleep(2)
+        return None
     return None
 
 
@@ -442,18 +453,88 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes):
     return r.status_code
 
 
+def process_after_asr(
+    cfg,
+    key,
+    ep_id,
+    lang,
+    series,
+    tag,
+    src,
+    t0,
+    cues,
+    decision,
+    info,
+    wav_path,
+    srt_path,
+):
+    try:
+        if decision["needs_translate"]:
+            t_tr = time.time()
+            if not key:
+                raise RuntimeError("translate needed but TRANSLATE_API_KEY empty")
+            texts = translate_texts(
+                cfg,
+                cues,
+                lang,
+                key,
+                info.get("seriesId") or info.get("sonarrSeriesId"),
+                ep_id,
+            )
+            if texts is None or len(texts) != len(cues):
+                raise RuntimeError("translation failed / count mismatch")
+            tr_elapsed = time.time() - t_tr
+            log(
+                f"  {tag} [{src}->{lang}] translate {tr_elapsed:.0f}s, {len(texts)} lines"
+            )
+        else:
+            texts = [c["text"] for c in cues]
+
+        write_srt(cues, texts, srt_path)
+        with open(srt_path, "rb") as fh:
+            srt_bytes = fh.read()
+        code = upload_srt(
+            cfg,
+            info.get("seriesId") or info.get("sonarrSeriesId"),
+            ep_id,
+            lang,
+            srt_bytes,
+        )
+        if code != 204:
+            raise RuntimeError(f"upload HTTP {code} (expected 204)")
+        elapsed = round(time.time() - t0, 1)
+        append_state(
+            {
+                "sonarrEpisodeId": ep_id,
+                "language": lang,
+                "status": "done",
+                "elapsed_s": elapsed,
+            }
+        )
+        log(f"done: {tag} {series} [{src}->{lang}] in {elapsed}s (upload 204)")
+        for f in (wav_path, srt_path):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        return "done"
+    except Exception as exc:
+        append_state(
+            {
+                "sonarrEpisodeId": ep_id,
+                "language": lang,
+                "status": "error",
+                "elapsed_s": round(time.time() - t0, 1),
+            }
+        )
+        log(f"fail: {series} [{lang}] {exc}")
+        return "failed"
+
+
 # ---------- main ----------
 
 
-def main():
-    lock_path = "/home/user/.config/asr-pipeline/orchestrator.lock"
-    lock_fd = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        log("another orchestrator instance running, exiting")
-        return 0
-
+def run_pass():
     cfg = load_config()
     target_langs = set(cfg["TARGET_LANGS"])
     key = cfg.get("TRANSLATE_API_KEY", "")
@@ -468,7 +549,7 @@ def main():
         wanted = get_wanted(cfg)
     except Exception as exc:
         log(f"ERROR fetching wanted list: {exc}")
-        return 0
+        return {"fetch_error": True}
     total = wanted.get("total", 0)
     wanted_before = total
 
@@ -491,44 +572,94 @@ def main():
         f"(max={cfg['MAX_EPS_PER_RUN']})"
     )
 
-    for item in candidates:
-        ep_id = item["sonarrEpisodeId"]
-        series = item.get("seriesTitle", "?")
-        missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
-        langs = sorted(missing & target_langs)
-        for lang in langs:
-            if is_done(entries, ep_id, lang):
-                log(f"skip: S?E? {series} [{lang}] already done (state)")
-                skipped += 1
-                continue
-            processed += 1
-            t0 = time.time()
-            try:
-                info = get_episode(cfg, ep_id)
-                season = info.get("seasonNumber", "?")
-                episode_num = info.get("episodeNumber", "?")
-                tag = (
-                    f"S{season:02d}E{episode_num:02d}"
-                    if isinstance(season, int) and isinstance(episode_num, int)
-                    else f"S{season}E{episode_num}"
-                )
-                ef = info.get("episodeFile") or {}
-                if not info.get("hasFile") or not ef.get("path"):
-                    log(f"skip: {tag} {series} [{lang}] hasFile=false or no path")
+    futures = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for item in candidates:
+            ep_id = item["sonarrEpisodeId"]
+            series = item.get("seriesTitle", "?")
+            missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
+            langs = sorted(missing & target_langs)
+            for lang in langs:
+                if is_done(entries, ep_id, lang):
+                    log(f"skip: S?E? {series} [{lang}] already done (state)")
                     skipped += 1
                     continue
-                container_path = ef["path"]
-                media_path = map_path(container_path)
-                if not os.path.isfile(media_path):
-                    log(
-                        f"skip: {tag} {series} [{lang}] file missing on NFS: {media_path}"
+                processed += 1
+                t0 = time.time()
+                try:
+                    info = get_episode(cfg, ep_id)
+                    season = info.get("seasonNumber", "?")
+                    episode_num = info.get("episodeNumber", "?")
+                    tag = (
+                        f"S{season:02d}E{episode_num:02d}"
+                        if isinstance(season, int) and isinstance(episode_num, int)
+                        else f"S{season}E{episode_num}"
                     )
-                    skipped += 1
-                    continue
-                streams = probe_audio(media_path)
-                decision = choose_source(streams, lang)
-                if decision is None:
-                    log(f"fail: {tag} {series} [{lang}] no audio streams")
+                    ef = info.get("episodeFile") or {}
+                    if not info.get("hasFile") or not ef.get("path"):
+                        log(f"skip: {tag} {series} [{lang}] hasFile=false or no path")
+                        skipped += 1
+                        continue
+                    container_path = ef["path"]
+                    media_path = map_path(container_path)
+                    if not os.path.isfile(media_path):
+                        log(
+                            f"skip: {tag} {series} [{lang}] file missing on NFS: {media_path}"
+                        )
+                        skipped += 1
+                        continue
+                    streams = probe_audio(media_path)
+                    decision = choose_source(streams, lang)
+                    if decision is None:
+                        log(f"fail: {tag} {series} [{lang}] no audio streams")
+                        failed += 1
+                        append_state(
+                            {
+                                "sonarrEpisodeId": ep_id,
+                                "language": lang,
+                                "status": "error",
+                                "elapsed_s": round(time.time() - t0, 1),
+                            }
+                        )
+                        continue
+                    src = decision["src_lang"]
+                    log(
+                        f"proc: {tag} {series} [{src}->{lang}] source_stream={decision['stream_index']} asr_lang={decision['asr_lang']} needs_translate={decision['needs_translate']}"
+                    )
+
+                    os.makedirs(cfg["TMP_DIR"], exist_ok=True)
+                    wav_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.wav")
+                    srt_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.srt")
+                    extract_wav(media_path, decision["stream_index"], wav_path)
+
+                    t_asr = time.time()
+                    srt_text = asr_srt(cfg, wav_path, decision["asr_lang"])
+                    asr_elapsed = time.time() - t_asr
+                    cues = parse_srt(srt_text)
+                    if not cues:
+                        raise RuntimeError("ASR returned no cues")
+                    log(
+                        f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
+                    )
+                    futures.append(
+                        pool.submit(
+                            process_after_asr,
+                            cfg,
+                            key,
+                            ep_id,
+                            lang,
+                            series,
+                            tag,
+                            src,
+                            t0,
+                            cues,
+                            decision,
+                            info,
+                            wav_path,
+                            srt_path,
+                        )
+                    )
+                except Exception as exc:
                     failed += 1
                     append_state(
                         {
@@ -538,87 +669,13 @@ def main():
                             "elapsed_s": round(time.time() - t0, 1),
                         }
                     )
-                    continue
-                src = decision["src_lang"]
-                log(
-                    f"proc: {tag} {series} [{src}->{lang}] source_stream={decision['stream_index']} asr_lang={decision['asr_lang']} needs_translate={decision['needs_translate']}"
-                )
+                    log(f"fail: {series} [{lang}] {exc}")
 
-                os.makedirs(cfg["TMP_DIR"], exist_ok=True)
-                wav_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.wav")
-                srt_path = os.path.join(cfg["TMP_DIR"], f"{ep_id}_{lang}.srt")
-                extract_wav(media_path, decision["stream_index"], wav_path)
-
-                t_asr = time.time()
-                srt_text = asr_srt(cfg, wav_path, decision["asr_lang"])
-                asr_elapsed = time.time() - t_asr
-                cues = parse_srt(srt_text)
-                if not cues:
-                    raise RuntimeError("ASR returned no cues")
-                log(f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues")
-
-                if decision["needs_translate"]:
-                    t_tr = time.time()
-                    if not key:
-                        raise RuntimeError(
-                            "translate needed but TRANSLATE_API_KEY empty"
-                        )
-                    texts = translate_texts(
-                        cfg,
-                        cues,
-                        lang,
-                        key,
-                        info.get("seriesId") or item.get("sonarrSeriesId"),
-                        ep_id,
-                    )
-                    if texts is None or len(texts) != len(cues):
-                        raise RuntimeError("translation failed / count mismatch")
-                    tr_elapsed = time.time() - t_tr
-                    log(
-                        f"  {tag} [{src}->{lang}] translate {tr_elapsed:.0f}s, {len(texts)} lines"
-                    )
-                else:
-                    texts = [c["text"] for c in cues]
-
-                write_srt(cues, texts, srt_path)
-                with open(srt_path, "rb") as fh:
-                    srt_bytes = fh.read()
-                code = upload_srt(
-                    cfg,
-                    info.get("seriesId") or item.get("sonarrSeriesId"),
-                    ep_id,
-                    lang,
-                    srt_bytes,
-                )
-                if code != 204:
-                    raise RuntimeError(f"upload HTTP {code} (expected 204)")
-                elapsed = round(time.time() - t0, 1)
-                append_state(
-                    {
-                        "sonarrEpisodeId": ep_id,
-                        "language": lang,
-                        "status": "done",
-                        "elapsed_s": elapsed,
-                    }
-                )
+        for fut in as_completed(futures):
+            if fut.result() == "done":
                 done += 1
-                log(f"done: {tag} {series} [{src}->{lang}] in {elapsed}s (upload 204)")
-                for f in (wav_path, srt_path):
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
-            except Exception as exc:
+            else:
                 failed += 1
-                append_state(
-                    {
-                        "sonarrEpisodeId": ep_id,
-                        "language": lang,
-                        "status": "error",
-                        "elapsed_s": round(time.time() - t0, 1),
-                    }
-                )
-                log(f"fail: {series} [{lang}] {exc}")
 
     try:
         wanted_after = get_wanted(cfg).get("total", 0)
@@ -628,7 +685,80 @@ def main():
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
         f"wanted_before={wanted_before} wanted_after={wanted_after}"
     )
-    return 0
+    return {
+        "processed": processed,
+        "done": done,
+        "skipped": skipped,
+        "failed": failed,
+        "wanted_before": wanted_before,
+        "wanted_after": wanted_after,
+    }
+
+
+class _WakeHandler(BaseHTTPRequestHandler):
+    def _ok(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+        WAKE_EVENT.set()
+
+    def do_GET(self):
+        self._ok()
+
+    def do_POST(self):
+        self._ok()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_webhook_listener():
+    try:
+        srv = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), _WakeHandler)
+    except OSError as exc:
+        log(
+            f"webhook listener unavailable on :{WEBHOOK_PORT} ({exc}); continuing without it"
+        )
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"webhook listener on :{WEBHOOK_PORT} (any request wakes the loop)")
+
+
+def main():
+    lock_path = "/home/user/.config/asr-pipeline/orchestrator.lock"
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("another orchestrator instance running, exiting")
+        return 0
+    start_webhook_listener()
+    consecutive_failures = 0
+    while True:
+        try:
+            stats = run_pass()
+        except Exception as exc:
+            log(f"pass crashed: {exc}")
+            stats = {"fetch_error": True}
+        if stats.get("fetch_error"):
+            consecutive_failures += 1
+        else:
+            consecutive_failures = 0
+        remaining = stats.get("wanted_after")
+        if remaining is None:
+            remaining = stats.get("wanted_before", 0)
+        busy = (remaining or 0) > 0 or (stats.get("failed") or 0) > 0
+        if consecutive_failures >= 3:
+            delay = 900  # Bazarr/API down - stop hot-looping
+        elif busy:
+            delay = 60  # backlog or failures - re-check soon
+        else:
+            delay = 900  # idle
+        log(
+            f"sleeping {delay}s until next pass (busy={busy}, consecutive_failures={consecutive_failures})"
+        )
+        WAKE_EVENT.wait(timeout=delay)
+        WAKE_EVENT.clear()
 
 
 if __name__ == "__main__":
