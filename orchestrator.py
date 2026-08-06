@@ -849,12 +849,43 @@ def process_after_asr(
         )
         log(f"fail: {series} [{lang}] {exc}")
         notify_hermes(cfg, ep_id, lang, series, tag, exc)
-        _paused = True
-        log("[pipeline] PAUSED on terminal error - fix first, resume via pctl resume")
+        halt_on_error(cfg, "process_episode", f"{series} [{lang}] {tag}", exc)
         return "failed"
 
 
 # ---------- main ----------
+
+
+def halt_on_error(cfg, stage, ep_desc, exc, extra=None):
+    global _paused
+    _paused = True
+    rep = {
+        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "stage": stage,
+        "episode": ep_desc,
+        "error": str(exc)[:500] or type(exc).__name__,
+        "extra": extra or {},
+    }
+    report_dir = os.path.join(os.path.expanduser("~"), ".config", "asr-pipeline")
+    os.makedirs(report_dir, exist_ok=True)
+    dst = os.path.join(report_dir, "last_error.json")
+    tmp = dst + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(rep, fh, indent=2)
+    os.replace(tmp, dst)
+    try:
+        hist = os.path.join(report_dir, "error_history")
+        os.makedirs(hist, exist_ok=True)
+        import shutil
+
+        shutil.copy2(
+            dst, os.path.join(hist, f"error_{time.strftime('%Y%m%d_%H%M%S')}.json")
+        )
+    except Exception:
+        pass
+    log(
+        f"[pipeline] PAUSED on error - fix first, resume via pctl resume (report: {dst})"
+    )
 
 
 def run_pass():
@@ -971,9 +1002,11 @@ def run_pass():
                             tag,
                             RuntimeError("no audio streams"),
                         )
-                        _paused = True
-                        log(
-                            "[pipeline] PAUSED on terminal error - fix first, resume via pctl resume"
+                        halt_on_error(
+                            cfg,
+                            "no_audio_streams",
+                            f"{series} [{lang}] {tag}",
+                            RuntimeError("no audio streams"),
                         )
                         failed += 1
                         append_state(
@@ -1042,9 +1075,8 @@ def run_pass():
                     )
                     log(f"fail: {series} [{lang}] {exc}")
                     notify_hermes(cfg, ep_id, lang, series, tag, exc)
-                    _paused = True
-                    log(
-                        "[pipeline] PAUSED on terminal error - fix first, resume via pctl resume"
+                    halt_on_error(
+                        cfg, "process_submit", f"{series} [{lang}] {tag}", exc
                     )
 
         for fut in as_completed(futures):
@@ -1198,6 +1230,23 @@ class ControlHandler(BaseHTTPRequestHandler):
         elif path == "/resume":
             _paused = False
             WAKE_EVENT.set()
+            try:
+                report_dir = os.path.join(
+                    os.path.expanduser("~"), ".config", "asr-pipeline"
+                )
+                dst = os.path.join(report_dir, "last_error.json")
+                if os.path.exists(dst):
+                    hist = os.path.join(report_dir, "error_history")
+                    os.makedirs(hist, exist_ok=True)
+                    os.replace(
+                        dst,
+                        os.path.join(
+                            hist, f"error_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                        ),
+                    )
+                    log("cleared error report")
+            except Exception:
+                pass
             self._send_json(200, {"ok": True, "paused": False})
         elif path == "/run-once":
             _run_once_requested = True
@@ -1233,6 +1282,7 @@ def main():
         log("another orchestrator instance running, exiting")
         return 0
     global _consecutive_failures, _last_pass_stats, _paused, _run_once_requested
+    cfg = load_config()
     start_webhook_listener()
     signal.signal(signal.SIGTERM, _handle_sigterm)
     _consecutive_failures = 0
@@ -1245,7 +1295,7 @@ def main():
         try:
             stats = run_pass()
         except Exception as exc:
-            log(f"pass crashed: {exc}")
+            halt_on_error(cfg, "pass", "run_pass", exc)
             stats = {"fetch_error": True}
         _last_pass_stats = stats
         _run_once_requested = False
