@@ -57,6 +57,9 @@ TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-1.8B-Q4_K_M.gguf")
 LOCAL_CHUNK_SIZE = 40
 LANG_NAMES = {"id": "Indonesian", "en": "English"}
+KANA_RE = re.compile(r"[\u3040-\u30ff]")
+HANZI_RE = re.compile(r"[\u3400-\u9fff]")
+LATIN_RE = re.compile(r"[A-Za-z]")
 CTX_OVERFLOW = "__CTX_OVERFLOW__"
 HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
 
@@ -348,7 +351,7 @@ def post_chat(cfg, messages, model, key, local=False):
         payload = {
             "model": model,
             "messages": messages,
-            "temperature": 0.7,
+            "temperature": 0.1,
             "top_k": 20,
             "top_p": 0.6,
             "repeat_penalty": 1.0,
@@ -508,6 +511,24 @@ def sanitize_lines(lines, max_repeat=10):
     return out
 
 
+def guard_foreign_lines(lines):
+    """Replace foreign-script lines (Chinese w/o kana, mostly-latin English) with a
+    clean Japanese placeholder so the 1.8B model does not echo the whole chunk.
+    Returns (guarded_lines, [(original_index, original_text), ...]) for swap-back."""
+    out, foreign = [], []
+    for i, l in enumerate(lines):
+        latin_chars = LATIN_RE.findall(l)
+        latin_ratio = len(latin_chars) / max(len(l), 1)
+        if (HANZI_RE.search(l) and not KANA_RE.search(l)) or (
+            latin_ratio > 0.5 and not KANA_RE.search(l)
+        ):
+            foreign.append((i, l))
+            out.append("\uff08\u6b4c\u8a5e\uff09")  # （歌詞）
+        else:
+            out.append(l)
+    return out, foreign
+
+
 def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0):
     if context_lines:
         context_lines = context_lines[:20]
@@ -627,7 +648,13 @@ def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None):
     if is_local_translate(cfg):
         # local 1.8B model echoes target-language REF lines verbatim (verified
         # 12-40/100 echo at any ref count); prior context only for cloud path
-        return _local_translate_batch(cfg, lines, target_lang, key, None)
+        lines, foreign = guard_foreign_lines(lines)
+        out = _local_translate_batch(cfg, lines, target_lang, key, None)
+        if out is None:
+            return None
+        for idx, orig in foreign:
+            out[idx] = orig
+        return out
     models = [cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL] + [
         m for m in MODEL_FALLBACKS if m != cfg.get("TRANSLATE_MODEL")
     ]
