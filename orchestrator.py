@@ -56,6 +56,7 @@ ASR_CACHE_DIR = os.environ.get(
 TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-1.8B-Q4_K_M.gguf")
 LOCAL_CHUNK_SIZE = 100
+CTX_OVERFLOW = "__CTX_OVERFLOW__"
 HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
 
 _stop_requested = False
@@ -65,6 +66,7 @@ _last_pass_stats = None
 _started_at = datetime.now(timezone.utc)
 _consecutive_failures = 0
 _HELP_COOLDOWN = {}
+_GLOBAL_HELP_LAST = 0.0
 
 
 def _handle_sigterm(signum, frame):
@@ -374,6 +376,17 @@ def post_chat(cfg, messages, model, key, local=False):
                 return None
         if r.status_code == 404:
             return None  # signal model fallback
+        if (
+            local
+            and r.status_code == 400
+            and "exceeds the available context size" in r.text
+        ):
+            # deterministic context overflow: retrying the same size always fails.
+            # Signal the caller to split the chunk instead of deferring.
+            log(
+                f"    [translate] HTTP 400 context overflow (attempt {attempt + 1}): {r.text[:200]} - splitting chunk"
+            )
+            return CTX_OVERFLOW
         # 5xx/429: server overload or rate limit - do not hammer; defer to next pass
         log(
             f"    [translate] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]} - deferring to next pass"
@@ -494,7 +507,7 @@ def sanitize_lines(lines, max_repeat=10):
     return out
 
 
-def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None):
+def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0):
     if context_lines:
         context_lines = context_lines[:20]
     n = len(lines)
@@ -516,6 +529,25 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None):
     model = cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL
     for _ in range(3):  # initial + up to 2 corrective retries
         raw = post_chat(cfg, messages, model, key, local=True)
+        if raw == CTX_OVERFLOW:
+            if depth >= 2 or n <= 1:
+                log("    [translate] context overflow even after splitting; giving up")
+                return None
+            mid = n // 2
+            log(
+                f"    [translate] context overflow on {n}-line chunk; splitting in half ({mid}+{n - mid})"
+            )
+            left = _local_chat_chunk(
+                cfg, lines[:mid], target_lang, key, context_lines, depth + 1
+            )
+            if left is None:
+                return None
+            right = _local_chat_chunk(
+                cfg, lines[mid:], target_lang, key, context_lines, depth + 1
+            )
+            if right is None:
+                return None
+            return left + right
         if raw is None:
             log("    [translate] local endpoint returned nothing")
             return None
@@ -657,13 +689,18 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes):
 
 
 def notify_hermes(cfg, ep_id, lang, series, tag, exc):
+    global _GLOBAL_HELP_LAST
     try:
         url = cfg.get("HERMES_WEBHOOK_URL", "")
         secret = cfg.get("HERMES_WEBHOOK_SECRET", "")
         if not url or not secret:
             return
+        now = time.time()
         last = _HELP_COOLDOWN.get((ep_id, lang), 0)
-        if time.time() - last < 1800:
+        if now - last < 1800:
+            return
+        if now - _GLOBAL_HELP_LAST < 600:
+            log("help: throttled (global)")
             return
         payload = {
             "event_type": "pipeline_error",
@@ -685,6 +722,7 @@ def notify_hermes(cfg, ep_id, lang, series, tag, exc):
         r = requests.post(url, data=body, headers=headers, timeout=10)
         if r.status_code in (200, 202):
             _HELP_COOLDOWN[(ep_id, lang)] = time.time()
+            _GLOBAL_HELP_LAST = time.time()
             log(f"help: {tag} {series} [{lang}] notified Hermes")
         else:
             log(f"help: notify failed: HTTP {r.status_code}")
