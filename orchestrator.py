@@ -595,9 +595,19 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0)
                         return None
                     return left + right
                 log(
-                    f"    [translate] output is source echo (CJK), not {target_lang} even after splitting; failing"
+                    f"    [translate] echo at max split depth; corrective retry (attempt in loop)"
                 )
-                return None
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Do not repeat or echo the source text. Translate each numbered line "
+                            f"into {lang_name}, exactly {n} lines, no extra text."
+                        ),
+                    }
+                )
+                continue
             return [parsed.get(i, "") for i in range(1, n + 1)]
         if parsed is not None and len(parsed) < n and depth < 2 and n > 1:
             mid = n // 2
