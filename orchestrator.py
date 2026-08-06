@@ -557,8 +557,24 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0)
         if parsed is not None and len(parsed) == n:
             first10 = [parsed.get(i, "") for i in range(1, min(11, n + 1))]
             if any(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", t) for t in first10):
+                if depth < 2 and n > 1:
+                    mid = n // 2
+                    log(
+                        f"    [translate] output is source echo (CJK), not {target_lang}; splitting in half ({mid}+{n - mid})"
+                    )
+                    left = _local_chat_chunk(
+                        cfg, lines[:mid], target_lang, key, context_lines, depth + 1
+                    )
+                    if left is None:
+                        return None
+                    right = _local_chat_chunk(
+                        cfg, lines[mid:], target_lang, key, context_lines, depth + 1
+                    )
+                    if right is None:
+                        return None
+                    return left + right
                 log(
-                    f"    [translate] output is source echo (CJK), not {target_lang} - failing"
+                    f"    [translate] output is source echo (CJK), not {target_lang} even after splitting; failing"
                 )
                 return None
             return [parsed.get(i, "") for i in range(1, n + 1)]
