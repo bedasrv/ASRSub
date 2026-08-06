@@ -55,7 +55,7 @@ ASR_CACHE_DIR = os.environ.get(
 
 TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-1.8B-Q4_K_M.gguf")
-LOCAL_CHUNK_SIZE = 100
+LOCAL_CHUNK_SIZE = 40
 CTX_OVERFLOW = "__CTX_OVERFLOW__"
 HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
 
@@ -554,6 +554,22 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0)
         parsed = _parse_numbered_response(raw)
         if parsed is not None and len(parsed) == n:
             return [parsed.get(i, "") for i in range(1, n + 1)]
+        if parsed is not None and len(parsed) < n and depth < 2 and n > 1:
+            mid = n // 2
+            log(
+                f"    [translate] output truncated (got {len(parsed)}, want {n}) on {n}-line chunk; splitting in half ({mid}+{n - mid})"
+            )
+            left = _local_chat_chunk(
+                cfg, lines[:mid], target_lang, key, context_lines, depth + 1
+            )
+            if left is None:
+                return None
+            right = _local_chat_chunk(
+                cfg, lines[mid:], target_lang, key, context_lines, depth + 1
+            )
+            if right is None:
+                return None
+            return left + right
         log(
             f"    [translate] local count mismatch got {len(parsed) if parsed else 0}, want {n}"
         )
