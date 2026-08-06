@@ -56,6 +56,7 @@ ASR_CACHE_DIR = os.environ.get(
 TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-1.8B-Q4_K_M.gguf")
 LOCAL_CHUNK_SIZE = 40
+LANG_NAMES = {"id": "Indonesian", "en": "English"}
 CTX_OVERFLOW = "__CTX_OVERFLOW__"
 HY_STOP_TOKENS = ["<｜hy_place▁holder▁no▁2｜>", "<｜hy_end▁of▁sentence｜>"]
 
@@ -511,8 +512,9 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0)
     if context_lines:
         context_lines = context_lines[:20]
     n = len(lines)
+    lang_name = LANG_NAMES.get(target_lang, target_lang)
     system = (
-        f"Translate each line into {target_lang}. Reply as numbered list, "
+        f"Translate each line into {lang_name}. Reply as numbered list, "
         f"e.g. 1. ... 2. ... 3. ..., exactly {n} lines, no extra text."
     )
     if context_lines:
@@ -553,6 +555,12 @@ def _local_chat_chunk(cfg, lines, target_lang, key, context_lines=None, depth=0)
             return None
         parsed = _parse_numbered_response(raw)
         if parsed is not None and len(parsed) == n:
+            first10 = [parsed.get(i, "") for i in range(1, min(11, n + 1))]
+            if any(re.search(r"[\u3040-\u30ff\u3400-\u9fff]", t) for t in first10):
+                log(
+                    f"    [translate] output is source echo (CJK), not {target_lang} - failing"
+                )
+                return None
             return [parsed.get(i, "") for i in range(1, n + 1)]
         if parsed is not None and len(parsed) < n and depth < 2 and n > 1:
             mid = n // 2
@@ -762,6 +770,7 @@ def process_after_asr(
     srt_path,
     prior_cache=None,
 ):
+    global _paused
     try:
         if decision["needs_translate"]:
             t_tr = time.time()
@@ -824,6 +833,8 @@ def process_after_asr(
         )
         log(f"fail: {series} [{lang}] {exc}")
         notify_hermes(cfg, ep_id, lang, series, tag, exc)
+        _paused = True
+        log("[pipeline] PAUSED on terminal error - fix first, resume via pctl resume")
         return "failed"
 
 
@@ -831,6 +842,7 @@ def process_after_asr(
 
 
 def run_pass():
+    global _paused
     cfg = load_config()
     target_langs = set(cfg["TARGET_LANGS"])
     key = cfg.get("TRANSLATE_API_KEY", "")
@@ -943,6 +955,10 @@ def run_pass():
                             tag,
                             RuntimeError("no audio streams"),
                         )
+                        _paused = True
+                        log(
+                            "[pipeline] PAUSED on terminal error - fix first, resume via pctl resume"
+                        )
                         failed += 1
                         append_state(
                             {
@@ -1010,6 +1026,10 @@ def run_pass():
                     )
                     log(f"fail: {series} [{lang}] {exc}")
                     notify_hermes(cfg, ep_id, lang, series, tag, exc)
+                    _paused = True
+                    log(
+                        "[pipeline] PAUSED on terminal error - fix first, resume via pctl resume"
+                    )
 
         for fut in as_completed(futures):
             if fut.result() == "done":
