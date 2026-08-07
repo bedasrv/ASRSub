@@ -43,3 +43,7 @@ outputs/
 
 # Systemd / deployment local files
 *.service
+
+# Eval harness local data (downloaded corpora, wavs, hf cache)
+benchmarks/data/
+benchmarks/results/*.sys.txt

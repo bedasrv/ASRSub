@@ -1,0 +1,301 @@
+{
+  "task": "real pipeline output DxD S03E07 (ASR Japanese -> translated Indonesian SRT), 30 random cues",
+  "n": 30,
+  "backend": "https://opencode.ai/zen/go/v1/chat/completions",
+  "naturalness_mean": 4.5,
+  "fidelity_mean": 3.63,
+  "worst3_naturalness": [
+    {
+      "i": 12,
+      "src": "あっ、魔法陣、",
+      "hyp": "（Lirik lagu)",
+      "naturalness": 1,
+      "fidelity": 1,
+      "note": "placeholder/caption, not a translation"
+    },
+    {
+      "i": 216,
+      "src": "アーシア先輩は誰にも渡しません",
+      "hyp": "Senior Arshia tidak akan memberikannya kepada siapa pun.",
+      "naturalness": 3,
+      "fidelity": 1,
+      "note": "Subject/object reversed; should be 'I won't give Senior Arshia to anyone'"
+    },
+    {
+      "i": 140,
+      "src": "崖乗ったら?",
+      "hyp": "Bagaimana jika kita terjebak di tebing?",
+      "naturalness": 3,
+      "fidelity": 2,
+      "note": "Misinterprets '乗ったら' as 'terjebak'"
+    }
+  ],
+  "worst3_fidelity": [
+    {
+      "i": 12,
+      "src": "あっ、魔法陣、",
+      "hyp": "（Lirik lagu)",
+      "naturalness": 1,
+      "fidelity": 1,
+      "note": "placeholder/caption, not a translation"
+    },
+    {
+      "i": 216,
+      "src": "アーシア先輩は誰にも渡しません",
+      "hyp": "Senior Arshia tidak akan memberikannya kepada siapa pun.",
+      "naturalness": 3,
+      "fidelity": 1,
+      "note": "Subject/object reversed; should be 'I won't give Senior Arshia to anyone'"
+    },
+    {
+      "i": 287,
+      "src": "とっとといかぬか",
+      "hyp": "Sungguh menyebalkan…",
+      "naturalness": 4,
+      "fidelity": 1,
+      "note": "Meaning lost; should be 'Hurry up and go!'"
+    }
+  ],
+  "lines": [
+    {
+      "i": 3,
+      "src": "ううっ!",
+      "hyp": "Uhhh…",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "natural interjection, equivalent meaning"
+    },
+    {
+      "i": 12,
+      "src": "あっ、魔法陣、",
+      "hyp": "（Lirik lagu)",
+      "naturalness": 1,
+      "fidelity": 1,
+      "note": "placeholder/caption, not a translation"
+    },
+    {
+      "i": 13,
+      "src": "アスタロト",
+      "hyp": "Astalot",
+      "naturalness": 4,
+      "fidelity": 2,
+      "note": "name mistransliterated: Astaroth to Astalot"
+    },
+    {
+      "i": 15,
+      "src": "ディオドラアスタロトです",
+      "hyp": "Saya Diodora Astalot.",
+      "naturalness": 5,
+      "fidelity": 3,
+      "note": "natural sentence but name error Astalot"
+    },
+    {
+      "i": 16,
+      "src": "単刀直入に言います",
+      "hyp": "Untuk langsung ke intinya…",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "idiomatic and faithful"
+    },
+    {
+      "i": 44,
+      "src": "負けるわけねえだろ",
+      "hyp": "Tidak mungkin aku kalah, kan?",
+      "naturalness": 5,
+      "fidelity": 4,
+      "note": "adds tag 'kan?', slight nuance shift"
+    },
+    {
+      "i": 47,
+      "src": "存分に見せてやるさ",
+      "hyp": "Akan kubuktikan betapa hebatnya kekuatan itu.",
+      "naturalness": 4,
+      "fidelity": 3,
+      "note": "adds 'that power', changes show to prove"
+    },
+    {
+      "i": 52,
+      "src": "アーシア 心配いらないよ",
+      "hyp": "Arshia, jangan khawatir.",
+      "naturalness": 5,
+      "fidelity": 3,
+      "note": "name Arshia should be Asia"
+    },
+    {
+      "i": 57,
+      "src": "ええ 何のお返しもできないのが申し訳ないくらいで",
+      "hyp": "Iya, rasanya sangat bersalah karena tidak bisa membalas budi apa-apa.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "good equivalent"
+    },
+    {
+      "i": 71,
+      "src": "それとも 女の子を知った?",
+      "hyp": "Atau mungkin karena bertemu dengan seorang gadis?",
+      "naturalness": 5,
+      "fidelity": 4,
+      "note": "'bertemu' shifts from knowing a girl to meeting one"
+    },
+    {
+      "i": 81,
+      "src": "そういうのは バーリに頼めばいいだろ!",
+      "hyp": "Untuk hal seperti itu, cukup minta tolong pada Barri saja!",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "natural and accurate"
+    },
+    {
+      "i": 101,
+      "src": "私のアイディアなの",
+      "hyp": "Itu ideku sendiri.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "natural, slight emphasis only"
+    },
+    {
+      "i": 111,
+      "src": "騒いでるの",
+      "hyp": "Mereka sedang ribut, ya.",
+      "naturalness": 4,
+      "fidelity": 4,
+      "note": "adds 'ya' and subject but acceptable"
+    },
+    {
+      "i": 112,
+      "src": "今一世くんに喜んでもらおうとしているのですわ",
+      "hyp": "Sekarang kita sedang berusaha membuat Ichiro senang, kok.",
+      "naturalness": 4,
+      "fidelity": 2,
+      "note": "Issei mistranslated as Ichiro"
+    },
+    {
+      "i": 114,
+      "src": "仲間外れにしちゃって怒ってる",
+      "hyp": "Dia marah karena merasa ditinggalkan.",
+      "naturalness": 5,
+      "fidelity": 4,
+      "note": "slightly softens 'excluded' to 'left behind'"
+    },
+    {
+      "i": 119,
+      "src": "はい 似合ってます",
+      "hyp": "Iya, memang lebih cocok.",
+      "naturalness": 4,
+      "fidelity": 4,
+      "note": "Adds 'memang lebih' not in source"
+    },
+    {
+      "i": 125,
+      "src": "すごいわ",
+      "hyp": "Luar biasa!",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "Perfect equivalent"
+    },
+    {
+      "i": 140,
+      "src": "崖乗ったら?",
+      "hyp": "Bagaimana jika kita terjebak di tebing?",
+      "naturalness": 3,
+      "fidelity": 2,
+      "note": "Misinterprets '乗ったら' as 'terjebak'"
+    },
+    {
+      "i": 142,
+      "src": "いいのよ お互いいいストレス発散になるし",
+      "hyp": "Tidak apa-apa, kok. Kedua belah pihak bisa saling meluapkan stres masing-masing.",
+      "naturalness": 4,
+      "fidelity": 4,
+      "note": "Slightly formal but conveys meaning well"
+    },
+    {
+      "i": 214,
+      "src": "伊勢さんもしゲームに負けたら",
+      "hyp": "Kalau Ise-san kalah dalam permainan…",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "Accurate and natural"
+    },
+    {
+      "i": 216,
+      "src": "アーシア先輩は誰にも渡しません",
+      "hyp": "Senior Arshia tidak akan memberikannya kepada siapa pun.",
+      "naturalness": 3,
+      "fidelity": 1,
+      "note": "Subject/object reversed; should be 'I won't give Senior Arshia to anyone'"
+    },
+    {
+      "i": 229,
+      "src": "単なるざれ事ではなさそうだ",
+      "hyp": "Ternyata bukan sekadar gosip biasa.",
+      "naturalness": 5,
+      "fidelity": 3,
+      "note": "Fluent but 'gosip' slightly shifts from 'zaregoto' (joke/banter)"
+    },
+    {
+      "i": 258,
+      "src": "そこで カオスブリゲードたちに 殺されるんだよ",
+      "hyp": "Di sana, kalian akan dibunuh oleh Kaos Brigade.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "Accurate and natural"
+    },
+    {
+      "i": 279,
+      "src": "うほほほほほほほ",
+      "hyp": "Hahahahahahahahah.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "Appropriate laughter equivalent"
+    },
+    {
+      "i": 287,
+      "src": "とっとといかぬか",
+      "hyp": "Sungguh menyebalkan…",
+      "naturalness": 4,
+      "fidelity": 1,
+      "note": "Meaning lost; should be 'Hurry up and go!'"
+    },
+    {
+      "i": 301,
+      "src": "アザゼル先生",
+      "hyp": "Tuan Azazel",
+      "naturalness": 5,
+      "fidelity": 4,
+      "note": "Tuan Azazel loses sensei nuance"
+    },
+    {
+      "i": 302,
+      "src": "言いたいこともあるだろうが とにかく聞け",
+      "hyp": "Mungkin ada hal yang ingin kamu katakan, tapi dengarkan saja dulu.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "natural and faithful"
+    },
+    {
+      "i": 308,
+      "src": "作戦上 お前たちに事情を 知らせるわけにはいかなかったんだ",
+      "hyp": "Dari segi strategi, kami tidak bisa memberitahukan kalian tentang situasi ini.",
+      "naturalness": 5,
+      "fidelity": 5,
+      "note": "natural and faithful"
+    },
+    {
+      "i": 327,
+      "src": "私たちはアーシアを救うわ",
+      "hyp": "Kita akan menyelamatkan Arsha.",
+      "naturalness": 5,
+      "fidelity": 3,
+      "note": "name error: Arsha should be Asia"
+    },
+    {
+      "i": 332,
+      "src": "存分に暴れてこい",
+      "hyp": "Silakan marah sepuasnya.",
+      "naturalness": 5,
+      "fidelity": 2,
+      "note": "暴れる rendered as angry instead of rampage"
+    }
+  ]
+}
