@@ -481,7 +481,7 @@ def _parse_numbered_response(raw):
         return None
     parsed = {}
     for line in raw.splitlines():
-        m = re.match(r"^(\d+)\.\s*(.+)$", line.strip())
+        m = re.match(r"^(\d+)[.．…]?\s*(.+)$", line.strip())
         if m:
             parsed[int(m.group(1))] = m.group(2).strip()
     return parsed
