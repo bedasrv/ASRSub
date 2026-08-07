@@ -3,8 +3,14 @@
 Replaces the dead FunASR :9000 path. Runs faster-whisper large-v3-turbo int8
 with Silero VAD (ja, condition_on_previous_text=False) and splits long whisper
 segments into <=MAX_CUE_MS cues on internal silence/VAD boundaries.
+
+VAD is configured with a VadOptions INSTANCE (faster_whisper.transcribe):
+passing a plain dict silently overrides max_speech_duration_s with
+chunk_length (default 30s), so the 8s cap never applied. When the installed
+faster-whisper lacks VadOptions, fall back to chunk_length=8 + dict.
 """
 
+import dataclasses
 import os
 import threading
 
@@ -13,11 +19,31 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
 WHISPER_COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
 WHISPER_BEAM = int(os.environ.get("WHISPER_BEAM", "5"))
-VAD_MIN_SILENCE_MS = int(os.environ.get("VAD_MIN_SILENCE_MS", "500"))
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))
+VAD_MIN_SILENCE_MS = int(os.environ.get("VAD_MIN_SILENCE_MS", "200"))
+VAD_MAX_SPEECH_S = float(os.environ.get("VAD_MAX_SPEECH_S", "8"))
+VAD_MIN_SILENCE_AT_MAX = float(os.environ.get("VAD_MIN_SILENCE_AT_MAX", "98"))
+VAD_SPEECH_PAD_MS = int(os.environ.get("VAD_SPEECH_PAD_MS", "250"))
+SPLIT_MIN_SILENCE_MS = int(os.environ.get("SPLIT_MIN_SILENCE_MS", "500"))
 HARD_GAP_MS = int(os.environ.get("HARD_GAP_MS", "1500"))
 INITIAL_PROMPT = os.environ.get(
     "WHISPER_INITIAL_PROMPT", "こんにちは。これはアニメの台詞です。"
 )
+
+_VAD_KWARGS = {
+    "threshold": VAD_THRESHOLD,
+    "min_silence_duration_ms": VAD_MIN_SILENCE_MS,
+    "max_speech_duration_s": VAD_MAX_SPEECH_S,
+    "min_silence_at_max_speech": VAD_MIN_SILENCE_AT_MAX,
+    "speech_pad_ms": VAD_SPEECH_PAD_MS,
+}
+
+try:
+    from faster_whisper.transcribe import VadOptions
+
+    _VAD_OPTIONS_CLS = VadOptions
+except ImportError:
+    _VAD_OPTIONS_CLS = None
 
 _model = None
 _model_lock = threading.Lock()
@@ -81,7 +107,7 @@ def _split_segment(words, seg_start_ms, seg_end_ms):
             elif span_with > MAX_CUE_MS:
                 cut = None
                 for i in range(len(cur) - 1, 0, -1):
-                    if _word_gap_ms(cur[i - 1], cur[i]) >= VAD_MIN_SILENCE_MS:
+                    if _word_gap_ms(cur[i - 1], cur[i]) >= SPLIT_MIN_SILENCE_MS:
                         cut = i
                         break
                 if cut is not None:
@@ -96,20 +122,49 @@ def _split_segment(words, seg_start_ms, seg_end_ms):
     return cues
 
 
+def vad_parameters():
+    """VadOptions instance (real 8s speech cap) or None when faster-whisper
+    lacks it. Kwargs are filtered to the dataclass fields available in the
+    installed version (e.g. min_silence_at_max_speech missing in 1.2.1)."""
+    if _VAD_OPTIONS_CLS is None:
+        return None
+    fields = {f.name for f in dataclasses.fields(_VAD_OPTIONS_CLS)}
+    kwargs = {k: v for k, v in _VAD_KWARGS.items() if k in fields}
+    return _VAD_OPTIONS_CLS(**kwargs)
+
+
+def ensure_contiguous(cues):
+    """Post-pass: never overlap — next.start = max(next.start, prev.end).
+    Cues are sorted by start; returns the same list, sorted + clamped."""
+    cues.sort(key=lambda c: c["start"])
+    for i in range(1, len(cues)):
+        if cues[i]["start"] < cues[i - 1]["end"]:
+            cues[i]["start"] = cues[i - 1]["end"]
+    return cues
+
+
 def transcribe_cues(wav_path, language="ja"):
     """Transcribe wav with faster-whisper + VAD; return cue dicts
-    {start_ms, end_ms, text} with all segments split to <=MAX_CUE_MS."""
+    {start_ms, end_ms, text} with all segments split to <=MAX_CUE_MS and
+    non-overlapping boundaries."""
     model = get_model()
-    segments, _info = model.transcribe(
-        wav_path,
+    kwargs = dict(
         language=language,
         vad_filter=True,
-        vad_parameters=dict(min_silence_duration_ms=VAD_MIN_SILENCE_MS),
         condition_on_previous_text=False,
         beam_size=WHISPER_BEAM,
         word_timestamps=True,
         initial_prompt=INITIAL_PROMPT,
     )
+    vp = vad_parameters()
+    if vp is not None:
+        kwargs["vad_parameters"] = vp
+    else:
+        # old faster-whisper: dict silently overrides max_speech_duration_s
+        # with chunk_length (30s default), so cap chunks explicitly.
+        kwargs["vad_parameters"] = dict(min_silence_duration_ms=VAD_MIN_SILENCE_MS)
+        kwargs["chunk_length"] = VAD_MAX_SPEECH_S
+    segments, _info = model.transcribe(wav_path, **kwargs)
     cues = []
     for seg in segments:
         text = (seg.text or "").strip()
@@ -124,4 +179,4 @@ def transcribe_cues(wav_path, language="ja"):
         elif sum(len(c["text"]) for c in split) < len(text) * 0.6:
             split = [{"start": s_ms, "end": e_ms, "text": text}]
         cues.extend(split)
-    return cues
+    return ensure_contiguous(cues)

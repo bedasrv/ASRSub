@@ -3,8 +3,9 @@
 
 Runs the full v2 chain on ONE video the way run_pass would: probe/choose
 source -> ffmpeg extract -> faster-whisper+VAD -> segment split -> 7B
-merge-aware translate (with glossary) -> write <base>.<lang>.ai.srt with
-AI marker -> validate (timing, CJK, empties, >8s spans, name drift).
+merge-aware translate (with glossary) -> write <base>.<lang>.srt with AI
+marker as a REAL first cue -> validate (timing, CJK, empties, >8s spans,
+name drift, marker cue).
 
 Usage (on the PC):
   LD_LIBRARY_PATH=/usr/local/lib/ollama/cuda_v12 \
@@ -61,14 +62,20 @@ def parse_srt_file(path):
 def validate(path, out_base, lang):
     issues = []
     first_line = open(path, encoding="utf-8").readline().strip()
-    if first_line != o.AI_MARKER:
-        issues.append(f"first line is not AI marker: {first_line!r}")
-    if not path.endswith(f".{lang}.ai.srt"):
-        issues.append(f"filename does not end .{lang}.ai.srt: {path}")
+    if first_line == o.AI_MARKER:
+        issues.append("bare AI marker header line (must be a real cue)")
+    if not first_line.isdigit():
+        issues.append(f"first line is not a cue index: {first_line!r}")
+    if not path.endswith(f".{lang}.srt"):
+        issues.append(f"filename does not end .{lang}.srt: {path}")
     cues = parse_srt_file(path)
     if not cues:
         issues.append("no cues parsed")
         return issues, cues
+    if cues[0]["text"] != o.AI_MARKER:
+        issues.append(f"first cue text is not AI marker: {cues[0]['text']!r}")
+    elif cues[0]["start"] != 0:
+        issues.append(f"marker cue does not start at 0: {cues[0]['start']}")
     prev_end = -1
     timing_violations = 0
     empties = 0
@@ -105,7 +112,7 @@ def validate(path, out_base, lang):
     print(f"  empty cues: {empties}")
     print(f"  CJK lines: {len(cjk_lines)}")
     print(f"  cues >8s: {len(long_spans)}")
-    print(f"  first line: {first_line}")
+    print(f"  first cue: {cues[0]['start']}->{cues[0]['end']} {cues[0]['text']}")
     print(f"  file: {path}")
     return issues, cues
 
@@ -123,7 +130,7 @@ def main(argv):
         print(f"ERROR: video not found: {args.video}", file=sys.stderr)
         return 1
 
-    out_path = f"{args.out}.{args.lang}.ai.srt"
+    out_path = f"{args.out}.{args.lang}.srt"
     wav = f"/tmp/smoke_v2_{os.getpid()}.wav"
     t0 = time.time()
     try:
