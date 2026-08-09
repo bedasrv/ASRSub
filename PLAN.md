@@ -103,6 +103,27 @@ merge into `main` when their track is done and verified.
   movies use `POST /api/movies/subtitles` (radarrid) — not used (Sonarr-only).
   No comment/history field on upload → AI provenance lives only in the SRT
   marker cue.
+
+  **SenseVoice backend (ASR_BACKEND=sensevoice; validated 2026-08-10)**
+  SenseVoiceSmall + fsmn-vad as an alternative ASR backend, replacing the
+  whisper path only when ASR_BACKEND=sensevoice (whisper path untouched).
+  VAD recipe empirically validated on PC (Frieren S02E01 180s slice, funasr
+  1.4.0, sensevoice venv; monster 17.5-21s spans → max 4.68s):
+  `vad_kwargs={"max_single_segment_time": 5000, "max_end_silence_time": 400,
+  "speech_pad_ms": 150, "min_speech_duration_ms": 250}` passed at AutoModel()
+  CONSTRUCTION — never raw kwargs to inference() (crashes with
+  chunk_size=None → frontend.fs NoneType). funasr 1.4.0 `res[0]["sentence_info"]`
+  does NOT exist; the working path is generate(output_timestamp=True,
+  merge_vad=False) + per-window char timestamps + bucket chunks into fsmn-vad
+  windows. 400ms max_end_silence splits inside rapid dialogue (gaps 300-900ms)
+  → 41% sub-1s fragments; neither the doc's 200ms rule nor _merge_tiny's
+  0.6s-gap rule resolves them. Rewrite implements `_min_dur_postpass`:
+  extend to 1.0s when the gap allows (≥150ms after extension), else merge
+  with the closer neighbor (tie → previous) capped at 6.0s, else drop the
+  fragment (last resort, unreachable in practice) — never emits <1s cues.
+  SenseVoice language codes: ja/zh/en/ko/yue (ASR lang stays "ja").
+  `pipeline/sensevoice.py` vendors the logic (main-worktree adapter is
+  `~/benchmark/adapters/sensevoice.py`).
 - **dashboard**: v2 UI, single page, collapsible sections (user preference —
   no nav bars/tabs/hamburger). Informative+interactive: live per-episode
   progress, llama-server health + nvidia-smi VRAM/GPU stats, queue depth,

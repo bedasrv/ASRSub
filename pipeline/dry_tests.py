@@ -9,6 +9,7 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - vad_options_instance: VadOptions (not dict) carries the 8s speech cap
   - contiguity_post_pass: next.start = max(next.start, prev.end)
   - write_srt_marker_cue: AI marker is a real timestamped first cue
+  - sensevoice_min_dur_postpass: no <1s cues (extend / merge / drop ladder)
 """
 
 import os
@@ -262,6 +263,62 @@ def test_contiguity_post_pass():
         assert out[i]["start"] >= out[i - 1]["end"], out
     assert out is cues, "must be the same list object, sorted in place"
     print("PASS contiguity_post_pass")
+
+
+def test_sensevoice_min_dur_postpass():
+    """(a) extend to 1s when gap allows; (b) merge forward on tight gap;
+    (c) two 0.3s cues -> merged then extended >=1s; (d) 5.9s+0.4s pair:
+    cap 6s respected, short one extended; (e) closer neighbor preferred;
+    (f) tie -> previous; (g) unresolvable fragment dropped. Invariant: no
+    cue < 1s ever emitted."""
+    import pipeline.sensevoice as psv
+
+    def c(s, e, t):
+        return {"start": s, "end": e, "text": t}
+
+    def check(label, out):
+        assert all(o["end"] - o["start"] >= 1000 for o in out), (label, out)
+        return out
+
+    # (a) 0.4s cue, 2.0s gap after -> extended to 1.0s, gap >= 150ms kept
+    out = check("a", psv._min_dur_postpass([c(0, 400, "a"), c(2400, 3600, "b")]))
+    assert out[0] == {"start": 0, "end": 1000, "text": "a"}, out
+    assert out[1]["start"] - out[0]["end"] >= 150
+
+    # (b) 0.4s cue, 0.3s gap to next -> merged forward
+    out = check("b", psv._min_dur_postpass([c(0, 400, "a"), c(700, 2700, "bb")]))
+    assert len(out) == 1 and out[0]["text"] == "a bb" and out[0]["end"] == 2700, out
+
+    # (c) two 0.3s cues, 0.1s gap -> merged pair (0.7s) then extended to 1.0s
+    out = check("c", psv._min_dur_postpass([c(0, 300, "x"), c(400, 700, "y")]))
+    assert len(out) == 1 and out[0]["text"] == "x y" and out[0]["end"] == 1000, out
+
+    # (d) 5.9s + 0.4s pair -> NO merge over 6s cap; short cue extended instead
+    out = check("d", psv._min_dur_postpass([c(0, 5900, "long"), c(6200, 6600, "z")]))
+    assert len(out) == 2, out
+    assert out[0]["end"] - out[0]["start"] == 5900 and out[0]["text"] == "long", out
+    assert out[1]["start"] == 6200 and out[1]["end"] == 7200, out
+
+    # (e) closer neighbor preferred (prev gap 200 vs next gap 300; extension
+    #     impossible since next is only 300ms away) -> previous absorbs tiny
+    out = check("e", psv._min_dur_postpass([c(0, 2000, "p"), c(2200, 2600, "tiny"), c(2900, 4300, "n")]))
+    assert out[0]["text"] == "p tiny" and out[0]["end"] == 2600, out
+    assert len(out) == 2
+
+    # (f) equal gaps -> previous wins
+    out = check("f", psv._min_dur_postpass([c(0, 2000, "p"), c(2150, 2450, "tiny"), c(2600, 4000, "n")]))
+    assert out[0]["text"] == "p tiny", out
+
+    # (g) 0.2s fragment between 5.9s neighbors, gaps 200/50 -> no merge fits
+    #     (previous span 6300 > 6000, next span 6250 > 6000), clamp extend
+    #     impossible -> dropped; no <1s cue in output
+    out = check("g", psv._min_dur_postpass([c(0, 5900, "long"), c(6100, 6300, "tiny"), c(6350, 12350, "next")]))
+    assert len(out) == 2 and all("tiny" != o["text"] for o in out), out
+
+    # (h) trailing short cue extends freely even with a 5.9s neighbor before
+    out = check("h", psv._min_dur_postpass([c(0, 5900, "long"), c(6100, 6500, "tail")]))
+    assert out[1]["end"] - out[1]["start"] == 1000 and out[1]["text"] == "tail", out
+    print("PASS sensevoice_min_dur_postpass")
 
 
 def test_write_srt_marker_cue():
