@@ -185,6 +185,129 @@ def load_state():
 
 STATE_COMPACT_LINES = 2000
 STATE_COMPACT_DAYS = 14
+STATE_GC_AGE = 24 * 3600  # fileless rows older than this are pruned
+STATE_GC_CAP = 500  # max unique episode ids queried per GC sweep
+STATE_GC_CHUNK = 200  # per-call cap when a sweep must be chunked
+
+# Session-memoized Sonarr knowledge for orphan GC. Never re-queried within one
+# daemon lifetime. Value = {"monitored": bool, "hasFile": bool} for episodes
+# known to Sonarr, None for ghosts (deleted from Sonarr). state.jsonl is only
+# ever written by this daemon (append_state / _compact_state / gc_state), so
+# no cross-process race on these writes.
+_GC_KNOWN = {}
+
+
+def fetch_sonarr_episode_map(cfg):
+    """One series-list call + one episode-list call per series (~15 series ->
+    ~16 calls instead of one call per episode). Returns
+    {episode_id: {"monitored": bool, "hasFile": bool}} for every episode
+    Sonarr knows; raises on HTTP failure, returns None when the response
+    shape is unusable (never a partial/empty map that would look like every
+    episode is a ghost)."""
+    base = cfg["SONARR_URL"].rstrip("/")
+    headers = {"X-Api-Key": cfg["SONARR_API_KEY"]}
+    r = requests.get(base + "/series", headers=headers, timeout=60)
+    r.raise_for_status()
+    series = r.json()
+    if not isinstance(series, list):
+        return None
+    info = {}
+    for s in series:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("id")
+        if sid is None:
+            continue
+        r2 = requests.get(
+            base + "/episode", params={"seriesId": sid}, headers=headers, timeout=60
+        )
+        r2.raise_for_status()
+        eps = r2.json()
+        if not isinstance(eps, list):
+            return None
+        for e in eps:
+            if not isinstance(e, dict):
+                continue
+            eid = e.get("id")
+            if isinstance(eid, int):
+                info[eid] = {
+                    "monitored": bool(e.get("monitored")),
+                    "hasFile": bool(e.get("hasFile")),
+                }
+    return info
+
+
+def mark_ghost(eid):
+    """Record that Sonarr returned 404 for this episode id (get_episode in
+    run_pass/consume_actions) so the next GC sweep prunes its state rows."""
+    if isinstance(eid, int):
+        _GC_KNOWN[eid] = None
+
+
+def gc_state(cfg, entries, cap=STATE_GC_CAP, age=STATE_GC_AGE):
+    """Orphan GC over state entries.
+
+    Drops rows whose episode no longer exists in Sonarr (ghost) and rows for
+    episodes with no video file when the row is older than 24h (age guard;
+    unparseable ts is KEPT, same convention as _compact_state). Never drops
+    rows for monitored episodes that have video files (retryable), and leaves
+    unmonitored-but-fileless rows alone when fresh. Only checks episode ids
+    not yet queried this daemon lifetime (_GC_KNOWN). Rewrites state.jsonl
+    atomically (tmp + os.replace) when rows were dropped.
+
+    Returns (kept_entries, {"dropped", "ghost", "fileless"})."""
+    if not entries:
+        return entries, {"dropped": 0, "ghost": 0, "fileless": 0}
+    unique_ids = sorted(
+        {
+            e.get("sonarrEpisodeId")
+            for e in entries
+            if isinstance(e.get("sonarrEpisodeId"), int)
+        }
+    )
+    if not unique_ids:
+        return entries, {"dropped": 0, "ghost": 0, "fileless": 0}
+    todo = [i for i in unique_ids if i not in _GC_KNOWN][:cap]
+    if todo:
+        try:
+            info = fetch_sonarr_episode_map(cfg)
+        except Exception as exc:
+            log(f"GC: Sonarr scan failed ({exc}); skipping sweep, retry next pass")
+            return entries, {"dropped": 0, "ghost": 0, "fileless": 0}
+        if not info:
+            log("GC: Sonarr returned no episode map; skipping sweep")
+            return entries, {"dropped": 0, "ghost": 0, "fileless": 0}
+        for i in todo:
+            _GC_KNOWN[i] = info.get(i)  # absent => ghost
+    cutoff = time.time() - age
+    kept, ghost, fileless = [], 0, 0
+    for e in entries:
+        eid = e.get("sonarrEpisodeId")
+        if not isinstance(eid, int) or eid not in _GC_KNOWN:
+            kept.append(e)  # never checked yet: keep until a sweep resolves it
+            continue
+        st = _GC_KNOWN[eid]
+        if st is None:
+            ghost += 1
+            continue
+        if not st.get("hasFile"):
+            ts = e.get("ts", "")
+            try:
+                row_age = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                row_age = cutoff + 1  # unknown age: keep (cannot prove old)
+            if row_age < cutoff:
+                fileless += 1
+                continue
+        kept.append(e)
+    dropped = ghost + fileless
+    if dropped:
+        rewrite_jsonl(STATE_FILE, kept)
+        log(
+            f"state GC: dropped {dropped} rows ({ghost} ghost, {fileless} fileless) "
+            f"from {len(entries)} entries, {len(kept)} kept"
+        )
+    return kept, {"dropped": dropped, "ghost": ghost, "fileless": fileless}
 
 
 def _compact_state(entries):
@@ -314,6 +437,9 @@ def get_episode(cfg, ep_id):
         headers={"X-Api-Key": cfg["SONARR_API_KEY"]},
         timeout=60,
     )
+    if r.status_code == 404:
+        # ghost: episode deleted from Sonarr; GC prunes its state rows next sweep
+        mark_ghost(ep_id)
     r.raise_for_status()
     return r.json()
 
@@ -1665,12 +1791,22 @@ class ControlHandler(BaseHTTPRequestHandler):
         return True
 
     def _state_counts(self):
-        counts = {"done": 0, "error": 0, "pending": 0, "total": 0}
+        # Count the LATEST entry per (sonarrEpisodeId, language): state.jsonl
+        # is append-only, every failed attempt adds a row, so summing every row
+        # would report lifetime error counts instead of current state.
+        latest = {}
         for e in load_state():
-            counts["total"] += 1
+            key = (e.get("sonarrEpisodeId"), e.get("language"))
+            cur = latest.get(key)
+            if cur is None or (e.get("ts") or "") >= (cur.get("ts") or ""):
+                latest[key] = e
+        counts = {"done": 0, "error": 0, "pending": 0, "total": len(latest)}
+        for e in latest.values():
             st = e.get("status")
-            if st in counts:
+            if st == "done" or st == "error":
                 counts[st] += 1
+            else:
+                counts["pending"] += 1
         return counts
 
     def do_GET(self):
@@ -1797,6 +1933,11 @@ def main():
     start_webhook_listener()
     signal.signal(signal.SIGTERM, _handle_sigterm)
     _consecutive_failures = 0
+    # startup orphan GC: prune ghost/fileless state rows before the first pass
+    try:
+        gc_state(cfg, load_state())
+    except Exception as exc:
+        log(f"GC error at startup: {exc}")
     while True:
         if _paused and not _run_once_requested:
             if _stop_requested:
@@ -1826,6 +1967,13 @@ def main():
         processed = stats.get("processed") or 0
         failed = stats.get("failed") or 0
         busy = (processed > 0 and (remaining or 0) > 0) or failed > 0
+        # idle pass (nothing processed): sweep orphan GC for episode ids not
+        # yet checked this daemon lifetime; Sonarr down => logged, retried next
+        if processed == 0 and not _stop_requested:
+            try:
+                gc_state(cfg, load_state())
+            except Exception as exc:
+                log(f"GC error after idle pass: {exc}")
         if _consecutive_failures >= 3:
             delay = 900  # Bazarr/API down - stop hot-looping
         elif busy:

@@ -25,6 +25,13 @@ Endpoints (all JSON; errors as {"error": ...}):
     POST /api2/episode/{id}/unexclude remove an exclusion
     POST /api2/pause | resume | run-once | wake   proxy to the v1 ControlHandler on :8085
 
+retry/delete are validated against Sonarr BEFORE enqueueing (validate_retry_target):
+a ghost episode (Sonarr 404), an episode without a video file, or an unmonitored
+episode is rejected with 409 {"ok": false, "error": <reason>} and NOT enqueued —
+an unvalidated action would be consumed by the daemon as a silent no-op (Bazarr
+only wants monitored episodes WITH files). skip/exclude/unexclude are not
+validated.
+
 Auth: POST endpoints require X-API-Key == CONTROL_API_KEY (same rule as the v1
 ControlHandler in orchestrator.py). GET endpoints are read-only telemetry and
 are left open so the dashboard browser page never holds the token. The dashboard
@@ -120,6 +127,48 @@ def _http(method, url, headers=None, body=None, timeout=10):
             return exc.code, {"raw": raw}
     except Exception as exc:
         return 0, {"error": str(exc)}
+
+
+def _sonarr_ep_lookup(cfg, ep_id):
+    """GET Sonarr /api/v3/episode/{id} -> (status_code, episode dict|None).
+
+    The single HTTP path shared by _ep_detail (library details) and
+    validate_retry_target, so action validation does not add a new request
+    shape. 404 is returned as-is so callers can distinguish ghosts from
+    generic failures; unreachable Sonarr yields status 0."""
+    url_base = (cfg or {}).get("SONARR_URL", "").rstrip("/")
+    if not url_base:
+        return 0, None
+    code, data = _http(
+        "GET",
+        url_base + f"/episode/{ep_id}?format=json",
+        headers={"X-Api-Key": (cfg or {}).get("SONARR_API_KEY", "")},
+        timeout=10,
+    )
+    return code, data if isinstance(data, dict) else None
+
+
+def validate_retry_target(cfg, ep_id, lookup=None):
+    """Validate that a retry/delete action can actually be processed.
+
+    Returns (True, None) when the episode exists in Sonarr, is monitored and
+    has a video file; otherwise (False, <reason>). `lookup` overrides the
+    Sonarr fetch (test seam); default is _sonarr_ep_lookup."""
+    if lookup is None:
+        lookup = _sonarr_ep_lookup
+    code, data = lookup(cfg, ep_id)
+    if code == 404:
+        return False, "episode deleted from Sonarr; state will be pruned"
+    if code != 200 or not data:
+        return False, f"cannot verify episode in Sonarr (HTTP {code or 'error'})"
+    if not data.get("hasFile"):
+        return False, "episode has no video file; cannot process"
+    ef = data.get("episodeFile") or {}
+    if not ef.get("path"):
+        return False, "episode has no video file; cannot process"
+    if data.get("monitored") is False:
+        return False, "episode unmonitored in Sonarr; monitor it first"
+    return True, None
 
 
 class ApiError(Exception):
@@ -523,16 +572,8 @@ class ControlAPIv2:
             "quality": None,
             "media": None,
         }
-        cfg = self._env()
-        url_base = cfg.get("SONARR_URL", "").rstrip("/")
-        if not url_base:
-            self._cache[("ep", ep_id)] = (now, det)
-            return det
-        url = url_base + f"/episode/{ep_id}?format=json"
-        code, data = _http(
-            "GET", url, headers={"X-Api-Key": cfg.get("SONARR_API_KEY", "")}, timeout=10
-        )
-        if code == 200 and isinstance(data, dict):
+        code, data = _sonarr_ep_lookup(self._env(), ep_id)
+        if code == 200 and data:
             ef = data.get("episodeFile") or {}
             q = (ef.get("quality") or {}).get("quality") or {}
             mi = ef.get("mediaInfo") or {}
@@ -937,6 +978,10 @@ class ControlAPIv2:
         return 200, out
 
     def _append_action(self, kind, ep_id, body):
+        if kind in ("retry", "delete"):
+            ok, err = validate_retry_target(self._env(), ep_id)
+            if not ok:
+                return 409, {"ok": False, "error": err}
         lang = None
         if isinstance(body, dict) and isinstance(body.get("language"), str):
             lang = body["language"]

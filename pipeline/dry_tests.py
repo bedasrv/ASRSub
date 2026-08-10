@@ -20,6 +20,9 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - translate_offset_keys_clamped: m==n offset-numbered keys (2..n+1) clamped
   - delete_lang_scoped_action: language-scoped delete + null language = all
   - target_langs_json_list_override: TARGET_LANGS list override parses
+  - state_counts_latest_per_key: counts are latest-per-(episode, language)
+  - gc_state_orphans: ghost/fileless pruning, 24h age guard, session memoization
+  - validate_retry_target: retry/delete reject ghost/fileless/unmonitored
 """
 
 import json
@@ -31,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import orchestrator as o
+import control_api_v2 as api2
 import refine_subs
 
 
@@ -847,6 +851,149 @@ def test_delete_lang_scoped_action():
     assert (40, "en") not in keys, "null retry clears all state"
     assert len(refreshes) == 1, refreshes
     print("PASS delete_lang_scoped_action")
+
+
+def test_state_counts_latest_per_key():
+    """_state_counts must count the LATEST row per (sonarrEpisodeId, language),
+    not every row: old done + newer error for the same key counts the error
+    once; same episode different language counts separately."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    state_file = os.path.join(d, "state.jsonl")
+    t_old = "2026-08-01T00:00:00Z"
+    t_new = "2026-08-02T00:00:00Z"
+    with open(state_file, "w", encoding="utf-8") as fh:
+        rows = [
+            {"sonarrEpisodeId": 100, "language": "id", "status": "done", "ts": t_old},
+            {"sonarrEpisodeId": 100, "language": "id", "status": "error", "ts": t_new},
+            {"sonarrEpisodeId": 100, "language": "en", "status": "done", "ts": t_old},
+            {"sonarrEpisodeId": 300, "language": "id", "status": "error", "ts": t_old},
+            {"sonarrEpisodeId": 300, "language": "id", "status": "done", "ts": t_new},
+            {"sonarrEpisodeId": 200, "language": "id", "ts": t_new},
+        ]
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    saved = o.STATE_FILE
+    o.STATE_FILE = state_file
+    try:
+        counts = o.ControlHandler.__new__(o.ControlHandler)._state_counts()
+    finally:
+        o.STATE_FILE = saved
+    assert counts == {"done": 2, "error": 1, "pending": 1, "total": 4}, counts
+    print("PASS state_counts_latest_per_key", counts)
+
+
+def test_gc_state_orphans():
+    """gc_state drops ghost ids (absent from Sonarr map) immediately, drops
+    fileless rows only when older than 24h, keeps monitored-with-file rows
+    (even old), unmonitored-with-file rows, recent fileless rows and rows with
+    unparseable ts; rewrites state.jsonl atomically; never re-queries Sonarr
+    for ids checked earlier in the session (mark_ghost 404s included)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    state_file = os.path.join(d, "state.jsonl")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (datetime.now(timezone.utc) - timedelta(days=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    # 501 ghost (not in Sonarr), 502 fileless old -> dropped; 503 fileless
+    # recent -> kept; 504 normal old -> kept; 505 unmonitored-with-file ->
+    # kept; 506 fileless unparseable ts -> kept; 507 ghost via get_episode 404
+    rows = [
+        {"sonarrEpisodeId": 501, "language": "id", "status": "error", "ts": now},
+        {"sonarrEpisodeId": 502, "language": "id", "status": "error", "ts": old},
+        {"sonarrEpisodeId": 503, "language": "id", "status": "error", "ts": now},
+        {"sonarrEpisodeId": 504, "language": "id", "status": "done", "ts": old},
+        {"sonarrEpisodeId": 505, "language": "id", "status": "done", "ts": old},
+        {"sonarrEpisodeId": 506, "language": "id", "status": "error", "ts": "garbage-ts"},
+        {"sonarrEpisodeId": 507, "language": "id", "status": "error", "ts": now},
+    ]
+    with open(state_file, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    canned = {
+        502: {"monitored": True, "hasFile": False},
+        503: {"monitored": True, "hasFile": False},
+        504: {"monitored": True, "hasFile": True},
+        505: {"monitored": False, "hasFile": True},
+        506: {"monitored": True, "hasFile": False},
+    }
+    fetch_calls = []
+
+    def fake_fetch(cfg):
+        fetch_calls.append(1)
+        return dict(canned)
+
+    saved_state = o.STATE_FILE
+    saved_fetch = o.fetch_sonarr_episode_map
+    saved_mark = o.mark_ghost
+    o.STATE_FILE = state_file
+    o.fetch_sonarr_episode_map = fake_fetch
+    try:
+        o.mark_ghost(507)  # simulate a get_episode 404 during run_pass
+        cfg = build_cfg()
+        kept, stats = o.gc_state(cfg, o.load_state())
+        assert stats == {"dropped": 3, "ghost": 2, "fileless": 1}, stats
+        kept_ids = {e["sonarrEpisodeId"] for e in kept}
+        assert kept_ids == {503, 504, 505, 506}, kept_ids
+        assert len(fetch_calls) == 1
+        # second sweep: ids already checked this session -> no Sonarr query,
+        # known ghosts (from map or get_episode 404) still dropped
+        with open(state_file, "a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {"sonarrEpisodeId": 501, "language": "en", "status": "error", "ts": now}
+                )
+                + "\n"
+            )
+        kept2, stats2 = o.gc_state(cfg, o.load_state())
+        assert len(fetch_calls) == 1, "must not re-query Sonarr for known ids"
+        assert stats2 == {"dropped": 1, "ghost": 1, "fileless": 0}, stats2
+        on_disk = o.load_records_jsonl(state_file)
+        assert {e["sonarrEpisodeId"] for e in on_disk} == kept_ids, on_disk
+    finally:
+        o.STATE_FILE = saved_state
+        o.fetch_sonarr_episode_map = saved_fetch
+        o.mark_ghost = saved_mark
+    print("PASS gc_state_orphans", stats)
+
+
+def test_validate_retry_target():
+    """retry/delete validation: rejects ghost (404), fileless (hasFile=false
+    or no episodeFile.path), unmonitored, unreachable; allows healthy."""
+    def fake_lookup(cfg, ep_id):
+        by_id = {
+            1: (404, None),
+            2: (200, {"hasFile": False, "monitored": True}),
+            3: (200, {"hasFile": True, "monitored": True, "episodeFile": {}}),
+            4: (
+                200,
+                {"hasFile": True, "monitored": False, "episodeFile": {"path": "/x.mkv"}},
+            ),
+            5: (
+                200,
+                {"hasFile": True, "monitored": True, "episodeFile": {"path": "/x.mkv"}},
+            ),
+            6: (0, None),
+        }
+        return by_id.get(ep_id, (404, None))
+
+    cfg = build_cfg()
+    ok, err = api2.validate_retry_target(cfg, 1, lookup=fake_lookup)
+    assert not ok and "deleted from Sonarr" in err, (ok, err)
+    ok, err = api2.validate_retry_target(cfg, 2, lookup=fake_lookup)
+    assert not ok and "no video file" in err, (ok, err)
+    ok, err = api2.validate_retry_target(cfg, 3, lookup=fake_lookup)
+    assert not ok and "no video file" in err, (ok, err)
+    ok, err = api2.validate_retry_target(cfg, 4, lookup=fake_lookup)
+    assert not ok and "unmonitored" in err, (ok, err)
+    ok, err = api2.validate_retry_target(cfg, 5, lookup=fake_lookup)
+    assert ok and err is None, (ok, err)
+    ok, err = api2.validate_retry_target(cfg, 6, lookup=fake_lookup)
+    assert not ok and "cannot verify" in err, (ok, err)
+    print("PASS validate_retry_target")
 
 
 if __name__ == "__main__":

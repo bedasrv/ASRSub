@@ -876,17 +876,23 @@ async function batchAction(act) {
   if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) return;
   const btn = document.getElementById("batch-" + act);
   btnBusy(btn, true);
-  let ok = 0, failed = 0;
+  let ok = 0, failed = 0, firstErr = "";
   for (const id of ids) {
     try {
-      const { status } = await api("/api2/episode/" + id + "/" + act, {
+      const { status, data } = await api("/api2/episode/" + id + "/" + act, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
       });
-      if (status === 200) ok++; else failed++;
-    } catch (e) { failed++; }
+      if (status === 200 && !(data && data.ok === false)) ok++;
+      else {
+        failed++;
+        if (!firstErr) firstErr = (data && data.error) ? String(data.error) : "HTTP " + status;
+      }
+    } catch (e) { failed++; if (!firstErr) firstErr = e.message; }
   }
   btnBusy(btn, false);
-  toast(act + " batch: " + ok + " ok" + (failed ? ", " + failed + " failed" : ""), failed ? "err" : "ok");
+  let msg = act + " batch: " + ok + " ok" + (failed ? ", " + failed + " failed" : "");
+  if (firstErr) msg += " — " + esc(firstErr);
+  toast(msg, failed ? "err" : "ok");
   if (act === "exclude" || !failed) selectAll(false);
   pollLists();
   pollStatus();
@@ -907,7 +913,7 @@ async function episodeAction(act, id, btn, langOverride) {
       opts.body = JSON.stringify({ language: lang });
     }
     const { status, data } = await api("/api2/episode/" + id + "/" + act, opts);
-    if (status === 200) {
+    if (status === 200 && !(data && data.ok === false)) {
       toast("episode " + id + ": " + act + " recorded", "ok");
       if (act === "exclude" || act === "unexclude") selected[String(id)] = false;
       pollLists();
