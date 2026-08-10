@@ -205,20 +205,20 @@ def regenerate_asr(cfg, ep_id, video_path):
     wav = os.path.join(cfg["TMP_DIR"], f"refine_{ep_id}.wav")
     try:
         o.extract_wav(video_path, decision["stream_index"], wav)
-        text = o.asr_srt(cfg, wav, decision["asr_lang"])
+        cues = o.asr_cues(cfg, wav, decision["asr_lang"])
     finally:
         try:
             os.remove(wav)
         except OSError:
             pass
-    o.asr_cache_put(ep_id, decision["asr_lang"], video_path, text)
-    return text, True
+    o.asr_cache_put(ep_id, decision["asr_lang"], video_path, cues)
+    return cues, True
 
 
 def get_asr_text(cfg, ep_id, video_path, no_regen):
-    text = o.asr_cache_get(ep_id, ASR_LANG, video_path)
-    if text is not None:
-        return text, False
+    cues = o.asr_cache_get(ep_id, ASR_LANG, video_path)
+    if cues is not None:
+        return cues, False
     if no_regen:
         return None, False
     return regenerate_asr(cfg, ep_id, video_path)
@@ -308,8 +308,8 @@ def process_episode(cfg, ep_id, langs, dry_run, no_regen):
                 }
             )
             continue
-        asr_text, regen = get_asr_text(cfg, ep_id, video_path, no_regen)
-        if asr_text is None:
+        ja_cues, regen = get_asr_text(cfg, ep_id, video_path, no_regen)
+        if ja_cues is None:
             log(f"skip: {tag} [{lang}] ASR not in cache and --no-regen set")
             append_refine_state(
                 {
@@ -326,7 +326,6 @@ def process_episode(cfg, ep_id, langs, dry_run, no_regen):
                 }
             )
             continue
-        ja_cues = o.parse_srt(asr_text)
         tr_cues = o.parse_srt(
             open(srt_path, "r", encoding="utf-8", errors="replace").read()
         )

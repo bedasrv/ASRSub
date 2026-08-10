@@ -14,6 +14,8 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - actions_consume: skip/retry/delete semantics on temp state/actions files
   - state_compaction: >2000 lines -> latest-per-key + 14d cutoff, atomic
   - jellyfin_refresh: noop without key; item match + refresh POST with key
+  - refine_regenerate_uses_asr_cues: regenerate_asr -> asr_cues + cache cue list
+  - refine_cache_hit_uses_cues_directly: cache cues used as dicts, no parse_srt
 """
 
 import json
@@ -25,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import orchestrator as o
+import refine_subs
 
 
 def build_cfg():
@@ -625,6 +628,65 @@ def test_delete_lang_scoped():
     assert os.path.isfile(mkv), "video must stay"
     assert sorted(deleted) == sorted([id_srt, t_id]), deleted
     print("PASS delete_lang_scoped")
+
+
+
+def test_refine_regenerate_uses_asr_cues():
+    """regenerate_asr must use the v2 asr_cues() API (cue dicts; asr_srt was
+    deleted in rewrite) and cache the cues LIST via asr_cache_put."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    wav = os.path.join(d, "in.wav")
+    open(wav, "w").close()
+
+    fake_cues = [
+        {"start_ms": 0, "end_ms": 1000, "text": "hai."},
+        {"start_ms": 1000, "end_ms": 2500, "text": "sou desu."},
+    ]
+    saved_probe, saved_choose, saved_extract = o.probe_audio, o.choose_source, o.extract_wav
+    saved_asr_cues, saved_cache_put = o.asr_cues, o.asr_cache_put
+    o.probe_audio = lambda video_path: [{"index": 1, "language": "jpn", "codec": "aac"}]
+    o.choose_source = lambda streams, want: {"stream_index": 1, "asr_lang": "ja"}
+    o.extract_wav = lambda video_path, idx, out: None
+    o.asr_cues = lambda cfg, wav_path, lang: fake_cues
+    cached = []
+    o.asr_cache_put = lambda ep_id, asr_lang, media_path, cues: cached.append(
+        (ep_id, asr_lang, media_path, cues)
+    )
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        got = refine_subs.regenerate_asr(cfg, 42, "x.mkv")
+    finally:
+        o.probe_audio, o.choose_source, o.extract_wav = saved_probe, saved_choose, saved_extract
+        o.asr_cues, o.asr_cache_put = saved_asr_cues, saved_cache_put
+    assert got == (fake_cues, True), got
+    assert cached == [(42, "ja", "x.mkv", fake_cues)], cached
+    print("PASS refine_regenerate_uses_asr_cues")
+
+
+def test_refine_cache_hit_uses_cues_directly():
+    """cache hit returns the cue dict LIST untouched; the refine flow must
+    NOT call parse_srt on it (parse_srt expects SRT text with --> timestamps
+    and would AttributeError on a list)."""
+    fake_cues = [
+        {"start_ms": 0, "end_ms": 1000, "text": "hai."},
+        {"start_ms": 1000, "end_ms": 2500, "text": "sou desu."},
+    ]
+    saved_cache_get, saved_parse = o.asr_cache_get, o.parse_srt
+    o.asr_cache_get = lambda ep_id, asr_lang, media_path: fake_cues
+    parse_calls = []
+    o.parse_srt = lambda text: parse_calls.append(text) or [{"text": "WRONG"}]
+    try:
+        cues, regen = refine_subs.get_asr_text(build_cfg(), 42, "x.mkv", no_regen=True)
+    finally:
+        o.asr_cache_get, o.parse_srt = saved_cache_get, saved_parse
+    assert cues == fake_cues, cues
+    assert regen is False
+    assert parse_calls == [], "parse_srt must not be called on cache cues"
+    assert [c["text"] for c in cues] == ["hai.", "sou desu."]
+    print("PASS refine_cache_hit_uses_cues_directly")
 
 
 if __name__ == "__main__":
