@@ -52,6 +52,11 @@ def api2_config():
     return _resp(*api2.handle("GET", "/api2/config"))
 
 
+@app.post("/api2/config")
+def api2_config_set(body: dict = None):
+    return _resp(*api2.handle("POST", "/api2/config", body or {}, token=_token()))
+
+
 @app.get("/api2/health")
 def api2_health():
     return _resp(*api2.handle("GET", "/api2/health"))

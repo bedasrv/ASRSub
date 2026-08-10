@@ -13,6 +13,7 @@ Endpoints (all JSON; errors as {"error": ...}):
     GET  /api2/activity   state.jsonl tail + Bazarr history merged, newest first, episode titles
     GET  /api2/wanted     Bazarr wanted list with quality flags + missing langs + per-episode state
     GET  /api2/config     pipeline.env + config.overrides.json merged, secrets masked
+    POST /api2/config     set/unset overrides (JSON body key=value; null unsets)
     GET  /api2/health     {"ok": true}
     GET  /api2/exclusions  list persistent exclusion records (exclusions.jsonl)
     POST /api2/episode/{id}/retry     append a retry record to actions.jsonl (see schema below)
@@ -46,11 +47,13 @@ exclusions.jsonl schema (runtime file, never committed):
     keeps showing them (EXCLUDED badge) so the exclusion can be undone later.
 """
 
+import fcntl
 import glob
 import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -86,6 +89,8 @@ def _parse_ts(ts):
     ):
         try:
             d = datetime.strptime(ts, fmt)
+            if fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ"):
+                d = d.replace(tzinfo=timezone.utc)
             return d.timestamp()
         except ValueError:
             continue
@@ -145,6 +150,18 @@ class ControlAPIv2:
         if cfg:
             self.opts.update(cfg)
         self._cache = {}
+        self._excl_lock = threading.Lock()
+        self._post_handlers = (
+            self._h_retry,
+            self._h_skip,
+            self._h_delete,
+            self._h_exclude,
+            self._h_unexclude,
+            self._h_pause,
+            self._h_resume,
+            self._h_run_once,
+            self._h_wake,
+        )
         self.endpoints = {
             "/api2/status": self._h_status,
             "/api2/activity": self._h_activity,
@@ -177,9 +194,16 @@ class ControlAPIv2:
         route, params = self._match(path)
         if route is None:
             return 404, {"error": "not found"}
+        if route in self._post_handlers:
+            if method != "POST":
+                return 405, {"error": "method not allowed", "method": method, "path": path}
+        elif route != self._h_config and method != "GET":
+            return 405, {"error": "method not allowed", "method": method, "path": path}
         if method == "POST" and not self._check_token(token):
             return 401, {"error": "unauthorized"}
         try:
+            if method == "POST" and path == "/api2/config":
+                return self._h_config_set(body, **params)
             return route(body, **params)
         except ApiError as exc:
             return exc.code, {"error": exc.message}
@@ -616,6 +640,37 @@ class ControlAPIv2:
     def _h_config(self, body, id=None):
         return 200, self._mask(self._env())
 
+    def _read_overrides(self):
+        try:
+            with open(self.opts["OVERRIDE_FILE"], encoding="utf-8") as fh:
+                data = json.loads(fh.read())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_overrides(self, ov):
+        path = self.opts["OVERRIDE_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(ov, ensure_ascii=False, indent=2) + "\n")
+        os.replace(tmp, path)
+
+    def _h_config_set(self, body, id=None):
+        if not isinstance(body, dict):
+            raise ApiError(400, "body must be a JSON object")
+        ov = self._read_overrides()
+        applied = {}
+        for k, v in body.items():
+            if v is None:
+                ov.pop(str(k), None)
+                applied[str(k)] = None
+            else:
+                ov[str(k)] = str(v)
+                applied[str(k)] = str(v)
+        self._write_overrides(ov)
+        return 200, {"ok": True, "applied": self._mask(applied)}
+
     def _h_status(self, body, id=None):
         entries, latest, _lbl = self._state()
         refine = self._refine_latest()
@@ -785,7 +840,9 @@ class ControlAPIv2:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "a", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         except OSError as exc:
             raise ApiError(500, f"failed to write actions.jsonl: {exc}")
         return 200, {"ok": True, "record": rec}
@@ -840,9 +897,6 @@ class ControlAPIv2:
         reason = ""
         if isinstance(body, dict) and isinstance(body.get("reason"), str):
             reason = body["reason"]
-        for r in self._read_exclusions():
-            if r.get("episode_id") == id:
-                return 200, {"ok": True, "already_excluded": True, "record": r}
         wanted = self._bazarr_wanted()
         series_id = self._ep_series_id(id, wanted.get("data", []) or [])
         if series_id is None:
@@ -853,22 +907,27 @@ class ControlAPIv2:
             "reason": reason,
             "ts": _now_iso(),
         }
-        try:
-            recs = self._read_exclusions()
-            recs.append(rec)
-            self._write_exclusions(recs)
-        except OSError as exc:
-            raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+        with self._excl_lock:
+            for r in self._read_exclusions():
+                if r.get("episode_id") == id:
+                    return 200, {"ok": True, "already_excluded": True, "record": r}
+            try:
+                recs = self._read_exclusions()
+                recs.append(rec)
+                self._write_exclusions(recs)
+            except OSError as exc:
+                raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
         return 200, {"ok": True, "record": rec}
 
     def _h_unexclude(self, body, id=None):
-        recs = self._read_exclusions()
-        before = len(recs)
-        recs = [r for r in recs if r.get("episode_id") != id]
-        try:
-            self._write_exclusions(recs)
-        except OSError as exc:
-            raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+        with self._excl_lock:
+            recs = self._read_exclusions()
+            before = len(recs)
+            recs = [r for r in recs if r.get("episode_id") != id]
+            try:
+                self._write_exclusions(recs)
+            except OSError as exc:
+                raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
         return 200, {"ok": True, "removed": before - len(recs)}
 
     def _daemon_action(self, path):

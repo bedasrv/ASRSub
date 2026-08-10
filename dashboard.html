@@ -696,6 +696,7 @@ for (const act of ["retry", "skip", "delete", "exclude"]) {
 async function batchAction(act) {
   const ids = Object.keys(selected).filter(function (k) { return selected[k]; });
   if (!ids.length) return;
+  if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) { return; }
   const btn = document.getElementById("batch-" + act);
   btnBusy(btn, true);
   let ok = 0, failed = 0;
@@ -715,9 +716,19 @@ async function batchAction(act) {
 }
 
 async function episodeAction(act, id, btn) {
+  const ep = wantedEpisodes[String(id)];
+  const lang = (ep && ep.missing && ep.missing.length === 1) ? ep.missing[0] : null;
+  if (act === "delete") {
+    if (!confirm("Delete subtitles for episode " + id + (lang ? " (" + lang + ")" : "") + "?")) { return; }
+  }
   btnBusy(btn, true);
   try {
-    const { status, data } = await api("/api2/episode/" + id + "/" + act, { method: "POST" });
+    const opts = { method: "POST" };
+    if (lang !== null) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify({ language: lang });
+    }
+    const { status, data } = await api("/api2/episode/" + id + "/" + act, opts);
     if (status === 200) {
       toast("episode " + id + ": " + act + " recorded", "ok");
       if (act === "exclude" || act === "unexclude") {
@@ -742,8 +753,8 @@ function ctlRow(key, value) {
     ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
     : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
   return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
-    '<td><button class="mini" onclick="setConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Set</button> ' +
-    '<button class="mini unset" onclick="unsetConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Unset</button></td></tr>';
+    '<td><button class="mini" onclick="setConfigKey(' + JSON.stringify(key) + ')">Set</button> ' +
+    '<button class="mini unset" onclick="unsetConfigKey(' + JSON.stringify(key) + ')">Unset</button></td></tr>';
 }
 
 async function loadControlConfig() {
