@@ -12,6 +12,7 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - sensevoice_min_dur_postpass: no <1s cues (extend / merge / drop ladder)
   - parse_exclusions: exclusions.jsonl ids parsed, garbage ignored
   - actions_consume: skip/retry/delete semantics on temp state/actions files
+  - state_compaction: >2000 lines -> latest-per-key + 14d cutoff, atomic
   - jellyfin_refresh: noop without key; item match + refresh POST with key
 """
 
@@ -20,6 +21,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import orchestrator as o
@@ -382,9 +384,11 @@ def test_parse_exclusions():
 
 
 def test_actions_consume():
-    """skip -> returned for this pass; retry -> state cleared (language-aware);
-    delete -> SRT files removed (NAS + TMP), state cleared, jellyfin refresh
-    fired; actions.jsonl truncated atomically."""
+    """skip -> returned for this pass; retry -> state cleared AND subtitle
+    files removed (Bazarr wanted only lists episodes with MISSING subs, so
+    state-only clearing would make Retry dead); delete -> SRT files removed
+    (NAS + TMP), state cleared, jellyfin refresh fired; actions.jsonl
+    truncated atomically."""
     import tempfile
 
     d = tempfile.mkdtemp()
@@ -446,10 +450,59 @@ def test_actions_consume():
     assert not os.path.exists(os.path.join(ep_dir, "Ep.id.srt")), "NAS id srt removed"
     assert not os.path.exists(os.path.join(ep_dir, "Ep.en.srt")), "NAS en srt removed"
     assert not os.path.exists(os.path.join(tmp_dir, "30_id.srt")), "TMP 30 srt removed"
-    assert os.path.isfile(os.path.join(tmp_dir, "20_id.srt"))
+    assert not os.path.exists(os.path.join(tmp_dir, "20_id.srt")), (
+        "retry must remove TMP srt too (Bazarr wanted only lists missing subs)"
+    )
     assert len(refreshes) == 1 and refreshes[0][0].endswith("Ep.mkv"), refreshes
     assert refreshes[0][1] == "Ep Title", refreshes
     print("PASS actions_consume")
+
+
+def test_state_compaction():
+    """>2000 state entries -> keep only the LATEST per (episode, language),
+    drop >14d-old entries, rewrite atomically; schema unchanged."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    state_file = os.path.join(d, "state.jsonl")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (
+        datetime.now(timezone.utc) - timedelta(days=20)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(state_file, "w", encoding="utf-8") as fh:
+        for i in range(1, 2001):
+            fh.write(
+                json.dumps(
+                    {"sonarrEpisodeId": i, "language": "id", "status": "done", "ts": now}
+                )
+                + "\n"
+            )
+        fh.write(
+            json.dumps(
+                {"sonarrEpisodeId": 999, "language": "id", "status": "done", "ts": old}
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {"sonarrEpisodeId": 5, "language": "id", "status": "done", "ts": now}
+            )
+            + "\n"
+        )
+    saved = o.STATE_FILE
+    o.STATE_FILE = state_file
+    try:
+        entries = o.load_state()
+    finally:
+        o.STATE_FILE = saved
+    keys = {(e["sonarrEpisodeId"], e["language"]) for e in entries}
+    assert (999, "id") not in keys, "old entry (>14d) must be dropped"
+    assert len(entries) == 1999, len(entries)
+    # atomically rewritten: file on disk is compacted, entry per key is latest
+    on_disk = o.load_records_jsonl(state_file)
+    assert len(on_disk) == len(entries) == 1999, (len(on_disk), len(entries))
+    assert [e["sonarrEpisodeId"] for e in on_disk].count(5) == 1
+    print("PASS state_compaction")
 
 
 def test_jellyfin_refresh():

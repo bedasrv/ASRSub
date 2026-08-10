@@ -168,7 +168,43 @@ def load_state():
                         entries.append(json.loads(line))
                     except Exception:
                         pass
+    if len(entries) > STATE_COMPACT_LINES:
+        entries = _compact_state(entries)
     return entries
+
+
+STATE_COMPACT_LINES = 2000
+STATE_COMPACT_DAYS = 14
+
+
+def _compact_state(entries):
+    """Compact state.jsonl (>2000 entries): keep only the LATEST entry per
+    (sonarrEpisodeId, language) and drop entries older than 14 days; write
+    atomically (tmp + os.replace). Never changes the entry schema."""
+    cutoff = time.time() - STATE_COMPACT_DAYS * 24 * 3600
+    last_idx = {}
+    for i, e in enumerate(entries):
+        key = (e.get("sonarrEpisodeId"), e.get("language"))
+        last_idx[key] = i
+    kept = []
+    for i, e in enumerate(entries):
+        if last_idx.get((e.get("sonarrEpisodeId"), e.get("language"))) != i:
+            continue  # newer entry exists for this (episode, language)
+        ts = e.get("ts", "")
+        try:
+            age = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            age = cutoff + 1  # unknown age: keep (cannot prove it is old)
+        if age < cutoff:
+            continue
+        kept.append(e)
+    if len(kept) < len(entries):
+        rewrite_jsonl(STATE_FILE, kept)
+        log(
+            f"state compacted: {len(entries)} -> {len(kept)} entries "
+            f"(latest per episode+language, <{STATE_COMPACT_DAYS}d kept)"
+        )
+    return kept
 
 
 def append_state(entry):
@@ -958,7 +994,13 @@ def consume_actions(cfg):
     to specific languages (null = the whole episode).
 
     - skip:   episode excluded from this pass's candidates
-    - retry:  done/error state entries for the episode cleared -> re-processed
+    - retry:  state entries cleared AND the episode's subtitle files removed
+              (same _delete_episode_subtitles as delete): Bazarr wanted only
+              lists episodes with MISSING subtitles, so clearing state alone
+              would never reprocess an episode whose .srt is on disk
+              (dashboard Retry would be dead); with the file gone the episode
+              re-enters Bazarr wanted and is regenerated. "language" limits
+              the state clearing to matching languages (null = whole episode).
     - delete: NAS + TMP SRT files removed, done state cleared -> regenerates,
               then Jellyfin refresh so the removed subtitle is dropped.
     Returns the set of episode ids to exclude this pass (skips)."""
@@ -1014,7 +1056,8 @@ def consume_actions(cfg):
         if media_path:
             jellyfin_refresh(cfg, media_path, title)
     for eid in sorted(retry_ids):
-        log(f"action: retry episode {eid} (state cleared)")
+        deleted = _delete_episode_subtitles(cfg, eid)
+        log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
     for eid in sorted(skip_ids):
         log(f"action: skip episode {eid} (excluded this pass)")
     rewrite_jsonl(ACTIONS_FILE, [])
@@ -1290,6 +1333,9 @@ def run_pass():
 
     prior_cache = {}
     futures = []
+    # 1 worker is intentional: ASR is VRAM-bound (faster-whisper/SenseVoice
+    # model + llama-server share one GPU); serial keeps GPU memory
+    # deterministic and avoids OOM under concurrent ASR loads.
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         for item in candidates:
             ep_id = item["sonarrEpisodeId"]
