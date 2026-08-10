@@ -782,9 +782,13 @@ def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
                 merged = {**entries_dict, **completion}
         if merged:
             for k, t in sorted(merged.items()):
+                if k > n:
+                    continue
                 groups.append((start + k - 1, start + k, re.sub(r"^>\s*", "", t)))
         else:
             for k, t in entries:
+                if k > n:
+                    continue
                 gi = start + k - 1
                 groups.append((gi, gi + 1, re.sub(r"^>\s*", "", t)))
             for k in range(m + 1, n + 1):
@@ -954,17 +958,19 @@ def jellyfin_refresh(cfg, media_path, title=None):
     threading.Thread(target=_run, daemon=True).start()
 
 
-def _delete_episode_subtitles(cfg, ep_id):
-    """Remove all {video stem}.{lang}.srt files (NAS path) plus TMP_DIR
-    copies the pipeline wrote for the episode. Never raises."""
+def _delete_episode_subtitles(cfg, ep_id, langs=None):
+    """Remove {video stem}.{lang}.srt files (NAS path) plus TMP_DIR copies
+    the pipeline wrote for the episode. langs=None deletes all TARGET_LANGS;
+    otherwise only the listed languages. Never raises."""
     deleted = []
+    langs = langs or list(cfg.get("TARGET_LANGS", []))
     try:
         info = get_episode(cfg, ep_id)
         ef = info.get("episodeFile") or {}
         p = map_path(ef.get("path", "")) if ef.get("path") else ""
         if p and os.path.isfile(p):
             stem = os.path.splitext(p)[0]
-            for lang in cfg.get("TARGET_LANGS", []):
+            for lang in langs:
                 cand = f"{stem}.{lang}.srt"
                 if os.path.isfile(cand):
                     try:
@@ -974,7 +980,7 @@ def _delete_episode_subtitles(cfg, ep_id):
                         pass
     except Exception as exc:
         log(f"action: delete: locating episode {ep_id} failed: {exc}")
-    for lang in cfg.get("TARGET_LANGS", []):
+    for lang in langs:
         cand = os.path.join(cfg.get("TMP_DIR", "/tmp"), f"{ep_id}_{lang}.srt")
         if os.path.isfile(cand):
             try:
@@ -1000,7 +1006,8 @@ def consume_actions(cfg):
               would never reprocess an episode whose .srt is on disk
               (dashboard Retry would be dead); with the file gone the episode
               re-enters Bazarr wanted and is regenerated. "language" limits
-              the state clearing to matching languages (null = whole episode).
+              the state clearing AND the subtitle-file deletion to matching
+              languages (null = whole episode).
     - delete: NAS + TMP SRT files removed, done state cleared -> regenerates,
               then Jellyfin refresh so the removed subtitle is dropped.
     Returns the set of episode ids to exclude this pass (skips)."""
@@ -1056,7 +1063,10 @@ def consume_actions(cfg):
         if media_path:
             jellyfin_refresh(cfg, media_path, title)
     for eid in sorted(retry_ids):
-        deleted = _delete_episode_subtitles(cfg, eid)
+        langs = retry_langs.get(eid)
+        deleted = _delete_episode_subtitles(
+            cfg, eid, langs=sorted(langs) if langs else None
+        )
         log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
     for eid in sorted(skip_ids):
         log(f"action: skip episode {eid} (excluded this pass)")

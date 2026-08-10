@@ -562,6 +562,71 @@ def test_jellyfin_refresh():
     print("PASS jellyfin_refresh (noop without key; item match + refresh POST)")
 
 
+
+def test_translate_overcount_clamped():
+    """Model returns MORE numbered lines than the chunk (12 for 10):
+    entries with k > n must be dropped so exactly n groups are produced and
+    cue assembly (cues[s]) never overruns the chunk."""
+
+    def fake_post_chat(cfg, messages, model, key, local=False):
+        return "\n".join(f"{i}. Baris nomor {i}." for i in range(1, 13))
+
+    o.post_chat = fake_post_chat
+    groups = o._translate_merge_aware(
+        build_cfg(), fake_ja_lines(10), "Indonesian", "k"
+    )
+    assert len(groups) == 10, f"over-count dropped: {len(groups)} groups"
+    assert [g[0] for g in groups] == list(range(10)), groups
+    cues = [
+        {"start": i * 1000, "end": i * 1000 + 900, "text": f"cue {i}"}
+        for i in range(10)
+    ]
+    for s, e, _t in groups:
+        assert 0 <= s < len(cues) and s < e <= len(cues), (s, e)
+    print("PASS translate_overcount_clamped")
+
+
+def test_delete_lang_scoped():
+    """_delete_episode_subtitles(cfg, eid, langs=["id"]) removes only the id
+    SRTs (NAS + TMP); en files and the video stay untouched."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    ep_dir = os.path.join(d, "ep")
+    os.makedirs(ep_dir)
+    mkv = os.path.join(ep_dir, "Ep.mkv")
+    for p in (
+        mkv,
+        os.path.join(ep_dir, "Ep.id.srt"),
+        os.path.join(ep_dir, "Ep.en.srt"),
+    ):
+        open(p, "w").close()
+    tmp_dir = os.path.join(d, "tmp")
+    os.makedirs(tmp_dir)
+    for p in (os.path.join(tmp_dir, "77_id.srt"), os.path.join(tmp_dir, "77_en.srt")):
+        open(p, "w").close()
+
+    saved_get_episode = o.get_episode
+    o.get_episode = lambda cfg, eid: {"episodeFile": {"path": mkv}}
+    try:
+        cfg = build_cfg()
+        cfg["TARGET_LANGS"] = ["id", "en"]
+        cfg["TMP_DIR"] = tmp_dir
+        deleted = o._delete_episode_subtitles(cfg, 77, langs=["id"])
+    finally:
+        o.get_episode = saved_get_episode
+
+    id_srt, en_srt = os.path.join(ep_dir, "Ep.id.srt"), os.path.join(ep_dir, "Ep.en.srt")
+    t_id, t_en = os.path.join(tmp_dir, "77_id.srt"), os.path.join(tmp_dir, "77_en.srt")
+    assert not os.path.exists(id_srt), "id srt must be removed"
+    assert os.path.isfile(en_srt), "en srt must stay"
+    assert not os.path.exists(t_id), "tmp id srt must be removed"
+    assert os.path.isfile(t_en), "tmp en srt must stay"
+    assert os.path.isfile(mkv), "video must stay"
+    assert sorted(deleted) == sorted([id_srt, t_id]), deleted
+    print("PASS delete_lang_scoped")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
