@@ -40,6 +40,13 @@ _LOG_RING = collections.deque(maxlen=25)
 
 ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
 STATE_FILE = os.environ.get("STATE_FILE", "/home/user/.config/asr-pipeline/state.jsonl")
+ACTIONS_FILE = os.environ.get("ACTIONS_FILE", "/home/user/.config/asr-pipeline/actions.jsonl")
+EXCLUSIONS_FILE = os.environ.get(
+    "EXCLUSIONS_FILE", "/home/user/.config/asr-pipeline/exclusions.jsonl"
+)
+
+JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://10.10.20.160:8096")
+JELLYFIN_MEDIA_ROOT = os.environ.get("JELLYFIN_MEDIA_ROOT", "/media")
 
 TRANSLATE_PROMPT = (
     "You are a professional anime subtitle translator. Translate the provided Japanese "
@@ -123,6 +130,8 @@ def load_config():
         x.strip() for x in cfg.get("TARGET_LANGS", "id,en").split(",") if x.strip()
     ]
     cfg["STATE_FILE"] = STATE_FILE
+    cfg["JELLYFIN_URL"] = cfg.get("JELLYFIN_URL") or JELLYFIN_URL
+    cfg["JELLYFIN_MEDIA_ROOT"] = cfg.get("JELLYFIN_MEDIA_ROOT") or JELLYFIN_MEDIA_ROOT
     sdh = cfg.get("sdh_placeholders")
     if isinstance(sdh, str):
         try:
@@ -167,6 +176,42 @@ def append_state(entry):
     entry["ts"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with open(STATE_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def load_records_jsonl(path):
+    """Parse a jsonl of dicts, tolerating empty/garbage lines."""
+    records = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+    return records
+
+
+def rewrite_jsonl(path, records):
+    """Atomic rewrite of a jsonl file (temp file + os.replace)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+
+def parse_exclusions():
+    """Excluded episode ids from exclusions.jsonl ({'episode_id': N, ...})."""
+    ids = set()
+    for rec in load_records_jsonl(EXCLUSIONS_FILE):
+        eid = rec.get("episode_id")
+        if isinstance(eid, int):
+            ids.add(eid)
+    return ids
 
 
 # ---------- remote APIs ----------
@@ -810,6 +855,172 @@ def translate_texts(
 # ---------- upload ----------
 
 
+def jellyfin_refresh(cfg, media_path, title=None):
+    """Fire-and-forget Jellyfin library refresh for a subtitle event.
+
+    Finds the episode item by SearchTerm (=episode title, fallback filename),
+    matches Path against the media file (mapped NAS path), then POSTs
+    /Items/{id}/Refresh (204). Runs in a daemon thread, ~5s timeouts; failures
+    are logged but never fail the episode. No-op without JELLYFIN_API_KEY.
+    """
+    key = cfg.get("JELLYFIN_API_KEY", "")
+    if not key or not media_path:
+        return
+
+    def _run():
+        try:
+            base = (cfg.get("JELLYFIN_URL") or JELLYFIN_URL).rstrip("/")
+            root = cfg.get("JELLYFIN_MEDIA_ROOT") or JELLYFIN_MEDIA_ROOT
+            jelly_path = (
+                root + media_path[len("/mnt/nas/share/media"):]
+                if media_path.startswith("/mnt/nas/share/media")
+                else media_path
+            )
+            filename = os.path.basename(media_path)
+            headers = {"X-Emby-Token": key}
+            r = requests.get(
+                base + "/Items",
+                params={
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Episode",
+                    "SearchTerm": title or filename,
+                    "Fields": "Path,MediaStreams",
+                },
+                headers=headers,
+                timeout=5,
+            )
+            r.raise_for_status()
+            item = None
+            for it in r.json().get("Items", []):
+                p = it.get("Path") or ""
+                if p == jelly_path or p.endswith("/" + filename):
+                    item = it
+                    break
+            if item is None:
+                log(f"jellyfin: episode item not found for {filename}")
+                return
+            body = {
+                "MetadataRefreshMode": "FullRefresh",
+                "ImageRefreshMode": "None",
+                "ReplaceAllMetadata": False,
+                "ReplaceAllImages": False,
+            }
+            rr = requests.post(
+                base + f"/Items/{item['Id']}/Refresh",
+                json=body,
+                headers=headers,
+                timeout=5,
+            )
+            log(f"jellyfin: refresh {filename} HTTP {rr.status_code}")
+        except Exception as exc:
+            log(f"jellyfin: refresh failed for {media_path}: {exc}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _delete_episode_subtitles(cfg, ep_id):
+    """Remove all {video stem}.{lang}.srt files (NAS path) plus TMP_DIR
+    copies the pipeline wrote for the episode. Never raises."""
+    deleted = []
+    try:
+        info = get_episode(cfg, ep_id)
+        ef = info.get("episodeFile") or {}
+        p = map_path(ef.get("path", "")) if ef.get("path") else ""
+        if p and os.path.isfile(p):
+            stem = os.path.splitext(p)[0]
+            for lang in cfg.get("TARGET_LANGS", []):
+                cand = f"{stem}.{lang}.srt"
+                if os.path.isfile(cand):
+                    try:
+                        os.remove(cand)
+                        deleted.append(cand)
+                    except OSError:
+                        pass
+    except Exception as exc:
+        log(f"action: delete: locating episode {ep_id} failed: {exc}")
+    for lang in cfg.get("TARGET_LANGS", []):
+        cand = os.path.join(cfg.get("TMP_DIR", "/tmp"), f"{ep_id}_{lang}.srt")
+        if os.path.isfile(cand):
+            try:
+                os.remove(cand)
+                deleted.append(cand)
+            except OSError:
+                pass
+    return deleted
+
+
+def consume_actions(cfg):
+    """Process pending actions.jsonl records once per pass; truncate the file.
+
+    schema (dashboard control_api_v2): {"ts", "type": "retry"|"skip"|"delete",
+    "episode_id": int, "language": null|<code>, "source", "note"} —
+    "action" is accepted as an alias for "type", and "language" limits retry
+    to specific languages (null = the whole episode).
+
+    - skip:   episode excluded from this pass's candidates
+    - retry:  done/error state entries for the episode cleared -> re-processed
+    - delete: NAS + TMP SRT files removed, done state cleared -> regenerates,
+              then Jellyfin refresh so the removed subtitle is dropped.
+    Returns the set of episode ids to exclude this pass (skips)."""
+    records = load_records_jsonl(ACTIONS_FILE)
+    if not records:
+        return set()
+    skip_ids, retry_ids, delete_ids = set(), set(), set()
+    retry_langs = {}
+    for rec in records:
+        eid = rec.get("episode_id")
+        if not isinstance(eid, int):
+            continue
+        action = rec.get("type") or rec.get("action") or ""
+        if action == "skip":
+            skip_ids.add(eid)
+        elif action == "retry":
+            retry_ids.add(eid)
+            lang = rec.get("language")
+            if isinstance(lang, str) and lang:
+                retry_langs.setdefault(eid, set()).add(lang)
+        elif action == "delete":
+            delete_ids.add(eid)
+    if retry_ids or delete_ids:
+        states = load_state()
+        kept = []
+        changed = False
+        for e in states:
+            eid = e.get("sonarrEpisodeId")
+            lang = e.get("language")
+            drop = False
+            if isinstance(eid, int) and eid in retry_ids:
+                langs = retry_langs.get(eid)
+                drop = not langs or lang in langs
+            elif isinstance(eid, int) and eid in delete_ids:
+                drop = True
+            if drop:
+                changed = True
+            else:
+                kept.append(e)
+        if changed:
+            rewrite_jsonl(STATE_FILE, kept)
+    for eid in sorted(delete_ids):
+        deleted = _delete_episode_subtitles(cfg, eid)
+        log(f"action: delete episode {eid} (removed {len(deleted)} SRTs, state cleared)")
+        media_path, title = "", None
+        try:
+            info = get_episode(cfg, eid)
+            ef = info.get("episodeFile") or {}
+            media_path = map_path(ef.get("path", "")) if ef.get("path") else ""
+            title = info.get("title") or info.get("Name")
+        except Exception:
+            pass
+        if media_path:
+            jellyfin_refresh(cfg, media_path, title)
+    for eid in sorted(retry_ids):
+        log(f"action: retry episode {eid} (state cleared)")
+    for eid in sorted(skip_ids):
+        log(f"action: skip episode {eid} (excluded this pass)")
+    rewrite_jsonl(ACTIONS_FILE, [])
+    return skip_ids
+
+
 def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     """Manual upload via POST /api/episodes/subtitles (verified against live
     Bazarr swagger.json 2026-08-07): query seriesid/episodeid/language/
@@ -950,6 +1161,9 @@ def process_after_asr(
         )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
+        ef = info.get("episodeFile") or {}
+        if ef.get("path"):
+            jellyfin_refresh(cfg, map_path(ef["path"]), info.get("title") or info.get("Name"))
         elapsed = round(time.time() - t0, 1)
         append_state(
             {
@@ -1026,9 +1240,9 @@ def run_pass():
             "WARNING: TRANSLATE_API_KEY is empty; any episode needing translation will FAIL"
         )
 
-    entries = load_state()
+    pending_skip = consume_actions(cfg)
 
-    done_keys = set()
+    entries = load_state()
     consec_errors = {}
     last_entry = {}
     for e in entries:
@@ -1058,6 +1272,13 @@ def run_pass():
         if missing & target_langs:
             candidates.append(item)
             seen.add(ep_id)
+    excluded = parse_exclusions().union(pending_skip)
+    if excluded:
+        before = len(candidates)
+        candidates = [
+            it for it in candidates if it.get("sonarrEpisodeId") not in excluded
+        ]
+        log(f"excluded this pass: {len(before) - len(candidates)} of {before} episodes {sorted(excluded)}")
     candidates.sort(key=lambda x: x["sonarrEpisodeId"])
     candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
 

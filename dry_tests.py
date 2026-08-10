@@ -416,7 +416,6 @@ def test_actions_consume():
         open(p, "w").close()
 
     saved_state, saved_actions = o.STATE_FILE, o.ACTIONS_FILE
-    saved_get_episode, saved_jf = o.get_episode, o.jellyfin_refresh
     o.STATE_FILE, o.ACTIONS_FILE = state_file, actions_file
     o.get_episode = lambda cfg, eid: {
         "title": "Ep Title",
@@ -433,7 +432,6 @@ def test_actions_consume():
         skip = o.consume_actions(cfg)
     finally:
         o.STATE_FILE, o.ACTIONS_FILE = saved_state, saved_actions
-        o.get_episode, o.jellyfin_refresh = saved_get_episode, saved_jf
 
     assert skip == {10}, skip
     remaining = o.load_records_jsonl(state_file)

@@ -124,6 +124,33 @@ merge into `main` when their track is done and verified.
   SenseVoice language codes: ja/zh/en/ko/yue (ASR lang stays "ja").
   `pipeline/sensevoice.py` vendors the logic (main-worktree adapter is
   `~/benchmark/adapters/sensevoice.py`).
+
+  **Jellyfin refresh + actions/exclusions (2026-08-10)**
+  - After a successful upload AND after a delete action, a fire-and-forget
+    Jellyfin library refresh runs (daemon thread, 5s timeouts, failures only
+    logged, never fails the episode): GET /Items SearchTerm=episode title
+    (fallback filename) with Fields=Path → match item whose Path equals the
+    mapped media path (host prefix → JELLYFIN_MEDIA_ROOT) or ends with the
+    video filename → POST /Items/{id}/Refresh with
+    {"MetadataRefreshMode":"FullRefresh","ImageRefreshMode":"None",
+    "ReplaceAllMetadata":false,"ReplaceAllImages":false} (204). Verified live
+    on NAS 10.10.20.160:8096 (container jellyfin; realtime monitor off, no
+    scan interval — refresh is required to pick up/drop subtitle files).
+    Env keys: JELLYFIN_URL (default http://10.10.20.160:8096),
+    JELLYFIN_API_KEY (empty = feature off), JELLYFIN_MEDIA_ROOT (default
+    /media). No-op without the API key.
+  - actions.jsonl (dashboard control_api_v2 schema: {"ts", "type":
+    "retry"|"skip"|"delete", "episode_id", "language", "source", "note"},
+    "action" accepted as type alias): consumed once per pass at run_pass
+    start, then the file is truncated (atomic rewrite). skip → episode
+    excluded from this pass's candidates; retry → done/error state entries
+    cleared (language-limited when the record carries a language), so it
+    re-processes; delete → all {video stem}.{lang}.srt files on the NAS path
+    + TMP_DIR copies removed, done state cleared (regenerates), then a
+    Jellyfin refresh drops the removed subtitle.
+  - exclusions.jsonl ({"episode_id": N, ...}): parsed once per pass and
+    filtered out of candidate selection before the MAX_EPS_PER_RUN cap is
+    applied (excluded ids never consume the cap); logged once per pass.
 - **dashboard**: v2 UI, single page, collapsible sections (user preference —
   no nav bars/tabs/hamburger). Informative+interactive: live per-episode
   progress, llama-server health + nvidia-smi VRAM/GPU stats, queue depth,
