@@ -140,6 +140,8 @@ def ensure_contiguous(cues):
     for i in range(1, len(cues)):
         if cues[i]["start"] < cues[i - 1]["end"]:
             cues[i]["start"] = cues[i - 1]["end"]
+        if cues[i]["end"] < cues[i]["start"]:
+            cues[i]["end"] = cues[i]["start"]
     return cues
 
 

@@ -42,7 +42,7 @@ def log(msg):
     print(f"{ts} {msg}", flush=True)
 
 
-def parse_reply(content, chunk_start):
+def parse_reply(content, chunk_start, n_lines):
     """Parse reviewer reply into {global_line_index: text} or None if malformed."""
     if content is None:
         return None
@@ -55,7 +55,7 @@ def parse_reply(content, chunk_start):
         if not m:
             return None
         local = int(m.group(1))
-        if local < 1 or local > CHUNK_SIZE:
+        if local < 1 or local > n_lines:
             return None
         global_idx = chunk_start + local - 1
         if global_idx in changes:
@@ -153,7 +153,7 @@ def review_chunk(cfg, ja_lines, tr_lines, chunk_start):
             return None, retries
         if code == 0:
             return None, retries
-    changes = parse_reply(content, chunk_start)
+    changes = parse_reply(content, chunk_start, len(tr_lines))
     if changes is None:
         retries = 1
         reason = "malformed line format / invalid or duplicate index"
@@ -169,7 +169,7 @@ def review_chunk(cfg, ja_lines, tr_lines, chunk_start):
         )
         code2, content2 = review_post(cfg, messages)
         if content2 is not None:
-            changes = parse_reply(content2, chunk_start)
+            changes = parse_reply(content2, chunk_start, len(tr_lines))
         else:
             changes = None
     if changes is None:
@@ -186,7 +186,7 @@ def find_translated_srt(video_path, lang):
     matches = []
     try:
         for f in os.listdir(d):
-            if f.endswith(f".{lang}.srt"):
+            if f.endswith(f".{lang}.srt") and ".test." not in f and ".orig" not in f:
                 matches.append(os.path.join(d, f))
     except OSError:
         return None
@@ -329,6 +329,13 @@ def process_episode(cfg, ep_id, langs, dry_run, no_regen):
         tr_cues = o.parse_srt(
             open(srt_path, "r", encoding="utf-8", errors="replace").read()
         )
+        had_marker = False
+        if not any("AI-generated" in c["text"] for c in ja_cues):
+            for i, c in enumerate(tr_cues):
+                if "AI-generated" in c["text"]:
+                    del tr_cues[i]
+                    had_marker = True
+                    break
         sample = " ".join(c["text"] for c in tr_cues[:30])
         if not is_target_lang(sample, lang):
             log(f"skip: {tag} [{lang}] srt is Japanese (echo), not a translation")
@@ -408,7 +415,9 @@ def process_episode(cfg, ep_id, langs, dry_run, no_regen):
         if not dry_run:
             tmp = srt_path + ".refine.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
-                o.write_srt(tr_cues, texts, tmp)
+                o.write_srt(
+                    tr_cues, texts, tmp, header=o.AI_MARKER if had_marker else None
+                )
             os.replace(tmp, srt_path)
         append_refine_state(
             {
