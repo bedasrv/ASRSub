@@ -49,7 +49,6 @@ def main():
         src = src[: args.max_lines]
         ref = ref[: args.max_lines]
 
-    tgt_token = tokenizer.convert_tokens_to_ids(TGT_LANG)
     t0 = time.time()
     hyps = []
     for i, line in enumerate(src):

@@ -43,6 +43,7 @@ def main():
     args = ap.parse_args()
 
     import faster_whisper
+    from faster_whisper.vad import VadOptions
 
     t0_all = time.time()
     print(f"faster-whisper {faster_whisper.__version__}")
@@ -63,7 +64,7 @@ def main():
             r["wav"],
             language="ja",
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
+            vad_parameters=VadOptions(min_silence_duration_ms=500, max_speech_duration_s=8),
             condition_on_previous_text=False,
             beam_size=5,
             initial_prompt="こんにちは。これはアニメの台詞です。",

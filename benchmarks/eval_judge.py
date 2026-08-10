@@ -286,9 +286,19 @@ def main():
                 print(f"zen API failed ({e!r}); falling back to local llama-server", file=sys.stderr)
         if s is None:
             s = judge.judge_batch(batch, desc, local=True)
+        if s is None:
+            print(
+                f"WARNING: batch {b} unscored — both zen and local judge failed",
+                file=sys.stderr,
+            )
+            continue
         scored.extend(s)
         print(f"scored {len(scored)}/{len(items)} (backend {judge.backend})", flush=True)
         time.sleep(0.5)
+
+    if not scored:
+        print("no batches scored — judge backends failed", file=sys.stderr)
+        return 1
 
     report(items, scored, desc, out_name, None)
 
