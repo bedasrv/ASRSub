@@ -5,291 +5,473 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ASRSub</title>
 <style>
+/* ============ Material 3 design tokens ============ */
 :root {
-  --bg:#fff; --fg:#111; --card:#f5f5f5; --border:#ddd; --accent:#2563eb;
-  --ok:#16a34a; --err:#dc2626; --run:#d97706; --new:#64748b;
+  color-scheme: light;
+  --primary: #4355b9; --on-primary: #ffffff; --primary-container: #dfe0ff; --on-primary-container: #00105c;
+  --secondary: #5b5d72; --on-secondary: #ffffff; --secondary-container: #dfe0f9; --on-secondary-container: #171a2c;
+  --tertiary: #76556b; --on-tertiary: #ffffff; --tertiary-container: #ffd8e4; --on-tertiary-container: #2c1223;
+  --error: #ba1a1a; --on-error: #ffffff; --error-container: #ffdad6; --on-error-container: #410002;
+  --surface: #fef7ff; --on-surface: #1c1b1f;
+  --surface-variant: #e3e0ec; --on-surface-variant: #49454f;
+  --surface-container-low: #f7f2fa; --surface-container: #f3edf7; --surface-container-high: #ece6f0;
+  --outline: #79747e; --outline-variant: #cac4d0;
+  --inverse-surface: #313033; --inverse-on-surface: #f4eff4;
+  --ok: #2e7d32; --run: #b26a00;
+  --r-s: 8px; --r-m: 12px; --r-l: 16px; --r-xl: 28px; --r-full: 999px;
+  --sh1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
+  --sh2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
+  --sh3: 0 1px 3px rgba(0,0,0,.30), 0 4px 8px 3px rgba(0,0,0,.15);
+  --sh4: 0 2px 3px rgba(0,0,0,.30), 0 8px 10px 1px rgba(0,0,0,.15);
+  --t-hl: 600 22px/28px; --t-tl: 600 16px/24px; --t-tm: 600 14px/20px;
+  --t-bm: 400 14px/20px; --t-bs: 400 12px/16px;
+  --t-lm: 500 12px/16px; --t-ll: 500 14px/20px;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --bg:#0f1115; --fg:#e5e7eb; --card:#1a1d24; --border:#2a2e37; --accent:#3b82f6;
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --primary: #bec2ff; --on-primary: #16255c; --primary-container: #2b3a94; --on-primary-container: #dfe0ff;
+    --secondary: #c3c5de; --on-secondary: #2c2f42; --secondary-container: #424559; --on-secondary-container: #dfe0f9;
+    --tertiary: #e6bad0; --on-tertiary: #44273a; --tertiary-container: #5d3d53; --on-tertiary-container: #ffd8e4;
+    --error: #ffb4ab; --on-error: #690005; --error-container: #93000a; --on-error-container: #ffdad6;
+    --surface: #141218; --on-surface: #e6e0e9;
+    --surface-variant: #49454f; --on-surface-variant: #cac4d0;
+    --surface-container-low: #1d1b21; --surface-container: #211f26; --surface-container-high: #2b2930;
+    --outline: #938f99; --outline-variant: #49454f;
+    --inverse-surface: #e6e0e9; --inverse-on-surface: #322f35;
+    --ok: #81c995; --run: #ffb86b;
   }
 }
-html[data-theme="light"] {
-  --bg:#fff; --fg:#111; --card:#f5f5f5; --border:#ddd; --accent:#2563eb;
-  --ok:#16a34a; --err:#dc2626; --run:#d97706; --new:#64748b;
-}
 html[data-theme="dark"] {
-  --bg:#0f1115; --fg:#e5e7eb; --card:#1a1d24; --border:#2a2e37; --accent:#3b82f6;
+  color-scheme: dark;
+  --primary: #bec2ff; --on-primary: #16255c; --primary-container: #2b3a94; --on-primary-container: #dfe0ff;
+  --secondary: #c3c5de; --on-secondary: #2c2f42; --secondary-container: #424559; --on-secondary-container: #dfe0f9;
+  --tertiary: #e6bad0; --on-tertiary: #44273a; --tertiary-container: #5d3d53; --on-tertiary-container: #ffd8e4;
+  --error: #ffb4ab; --on-error: #690005; --error-container: #93000a; --on-error-container: #ffdad6;
+  --surface: #141218; --on-surface: #e6e0e9;
+  --surface-variant: #49454f; --on-surface-variant: #cac4d0;
+  --surface-container-low: #1d1b21; --surface-container: #211f26; --surface-container-high: #2b2930;
+  --outline: #938f99; --outline-variant: #49454f;
+  --inverse-surface: #e6e0e9; --inverse-on-surface: #322f35;
+  --ok: #81c995; --run: #ffb86b;
 }
+
 * { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
 body {
-  margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: var(--bg); color: var(--fg); font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  font-size: 14px; background: var(--surface); color: var(--on-surface);
+  overflow-x: hidden; min-height: 100vh;
 }
-header {
+.muted { color: var(--on-surface-variant); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+.empty { padding: 28px 16px; text-align: center; color: var(--on-surface-variant); font: var(--t-bm); }
+
+/* ============ App bar ============ */
+.app-bar {
+  position: sticky; top: 0; z-index: 20; height: 64px;
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 14px 16px; border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; background: var(--bg); z-index: 10;
+  padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--outline-variant);
 }
-header h1 { font-size: 18px; margin: 0; }
-.header-right { display: flex; align-items: center; gap: 10px; }
-#refresh-ind { font-size: 12px; color: var(--new); }
-#theme-toggle {
-  background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer;
+.app-bar h1 { margin: 0; font: var(--t-tl); letter-spacing: .1px; }
+.bar-actions { display: flex; align-items: center; gap: 10px; }
+#refresh-ind { font: var(--t-bs); color: var(--on-surface-variant); }
+@media (max-width: 419px) { #refresh-ind { display: none; } }
+.icon-btn {
+  position: relative; width: 48px; height: 48px; border-radius: var(--r-full); border: none;
+  background: transparent; color: var(--on-surface); font-size: 18px; cursor: pointer;
 }
-main { padding: 10px; max-width: 860px; margin: 0 auto; }
-#error-banner {
-  display: none; background: var(--err); color: #fff; padding: 10px 14px;
-  border-radius: 8px; margin-bottom: 12px; font-size: 14px;
+.icon-btn::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0; }
+.icon-btn:hover::after { opacity: .08; }
+.icon-btn:active::after { opacity: .12; }
+.icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* ============ Pages ============ */
+main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
+@media (min-width: 840px) { main { padding: 24px 24px 64px; } }
+.page { display: none; }
+.page.active { display: block; }
+.page-title { font: var(--t-hl); margin: 4px 0 16px; }
+.sec-title { font: var(--t-tm); margin: 20px 0 8px; }
+#error-banner, #lib-banner { display: none; }
+#error-banner.visible { display: flex; }
+.retry-banner {
+  align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  background: var(--error-container); color: var(--on-error-container);
+  border-radius: var(--r-m); padding: 10px 14px; margin-bottom: 12px; font: var(--t-bm);
 }
-#error-banner.visible { display: block; }
-h2 { font-size: 15px; margin: 14px 0 6px; }
-.sec-head {
-  display: flex; align-items: center; justify-content: space-between;
-  cursor: pointer; user-select: none; padding: 4px 2px;
-}
-.chev { transition: transform .15s; font-size: 12px; color: var(--new); }
-.sec.collapsed .sec-body { display: none; }
-.sec.collapsed .chev { transform: rotate(-90deg); }
+.retry-banner.visible { display: flex; }
+.retry-banner button { flex: none; }
+
+/* ============ Cards ============ */
 .card {
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-m);
 }
-.grid {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px;
-}
-.stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
-.stat .lbl { font-size: 11px; color: var(--new); }
-.stat .val { font-size: 15px; font-weight: 700; margin-top: 2px; word-break: break-word; }
-.stat .val.ok { color: var(--ok); }
-.stat .val.err { color: var(--err); }
-.stat .val.run { color: var(--run); }
-.stat .val.accent { color: var(--accent); }
-.pills { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.card + .card { margin-top: 12px; }
+.card-head { font: var(--t-tl); padding: 14px 16px 0; }
+.card-body { padding: 4px 16px 14px; }
+.gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.gpu-name { font: var(--t-tm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-util { font: 600 20px/24px; color: var(--primary); }
+.vram { margin-top: 12px; }
+.vram-bar { height: 8px; background: var(--surface-variant); border-radius: var(--r-full); overflow: hidden; }
+.vram-fill { height: 100%; background: var(--primary); border-radius: var(--r-full); transition: width .4s; }
+.vram-txt { font: var(--t-bs); color: var(--on-surface-variant); margin-top: 6px; }
+.model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.gpu-err { font: var(--t-bs); color: var(--on-surface-variant); margin-top: 8px; word-break: break-word; }
+
+/* ============ Pills / chips / badges ============ */
+.pills { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill {
-  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
-  padding: 4px 10px; font-size: 13px; display: flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px;
+  background: var(--surface-variant); color: var(--on-surface-variant);
+  border-radius: var(--r-s); font: var(--t-lm);
 }
-.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.pill.mono { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
 .dot.up { background: var(--ok); }
-.dot.down { background: var(--err); }
+.dot.down { background: var(--error); }
 .dot.running { background: var(--run); }
-.dot.stopped { background: var(--new); }
+.dot.stopped { background: var(--on-surface-variant); }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
+  border-radius: var(--r-s); font: 500 12px/16px; white-space: nowrap;
+}
+.chip-wanted { background: var(--primary); color: var(--on-primary); font-weight: 700; }
+.chip-done { background: var(--secondary-container); color: var(--on-secondary-container); }
+.chip-wanted-lang { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.chip-error { background: var(--error-container); color: var(--on-error-container); }
+.chip-excluded { background: var(--surface-variant); color: var(--on-surface-variant); }
+
 .badge {
-  border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 600; color: #fff;
-  white-space: nowrap;
+  display: inline-flex; align-items: center; height: 24px; padding: 0 10px;
+  border-radius: var(--r-full); font: 600 12px/16px; white-space: nowrap;
 }
-.badge.lang { background: var(--accent); }
-.badge.new { background: var(--new); }
-.badge.done { background: var(--ok); }
-.badge.error { background: var(--err); }
-.badge.running { background: var(--run); }
-.badge.ai { background: #9333ea; }
-.badge.q { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
-.muted { color: var(--new); }
-.mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.badge.done { background: var(--secondary-container); color: var(--on-secondary-container); }
+.badge.error { background: var(--error-container); color: var(--on-error-container); }
+.badge.running { background: var(--primary-container); color: var(--on-primary-container); }
+.badge.new { background: var(--surface-variant); color: var(--on-surface-variant); }
+.badge.ai { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 
-#wanted-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
-.ep-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.ep-series { font-weight: 700; font-size: 15px; }
-.ep-code { font-size: 13px; color: var(--accent); font-weight: 600; white-space: nowrap; }
-.ep-title { font-size: 13px; color: var(--new); margin: 4px 0; }
-.ep-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.missing { font-size: 12px; color: var(--new); }
-.flags { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
-.ep-actions { display: flex; gap: 8px; margin-top: 8px; }
-.ep-actions button {
-  flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 8px; padding: 9px 10px; font-size: 14px; cursor: pointer; min-height: 38px;
+/* ============ M3 buttons ============ */
+.m3-btn {
+  position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 44px; min-width: 64px; padding: 0 18px; border-radius: var(--r-full); border: none;
+  font: var(--t-ll); letter-spacing: .1px; cursor: pointer;
 }
-.ep-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.btn-retry { border-color: var(--accent); color: var(--accent); }
-button.btn-skip { border-color: var(--err); color: var(--err); }
-button.btn-del { border-color: var(--err); color: var(--err); }
-button.btn-exclude { border-color: var(--new); color: var(--fg); }
-button.btn-excluded { border-color: var(--run); color: var(--run); }
-.badge.excluded { background: #7c3aed; }
-.act-del {
-  background: var(--card); border: 1px solid var(--err); color: var(--err);
-  border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer;
-  margin-left: 4px; flex: none;
+.m3-btn::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; }
+.m3-btn:hover::after { opacity: .08; }
+.m3-btn:active::after { opacity: .12; }
+.m3-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.m3-btn:disabled { opacity: .38; cursor: default; }
+.m3-btn:disabled::after { opacity: 0; }
+.m3-btn.filled { background: var(--primary); color: var(--on-primary); }
+.m3-btn.tonal { background: var(--secondary-container); color: var(--on-secondary-container); }
+.m3-btn.outlined { background: transparent; color: var(--primary); border: 1px solid var(--outline); }
+.m3-btn.outlined.danger { color: var(--error); border-color: var(--error); }
+.m3-btn.text { background: transparent; color: var(--primary); }
+.m3-btn.text.danger { color: var(--error); }
+.mini-btn {
+  position: relative; height: 40px; padding: 0 12px; border-radius: var(--r-full); border: none;
+  background: transparent; color: var(--error); font: 500 13px/20px; cursor: pointer;
 }
-.act-del:disabled { opacity: 0.45; cursor: not-allowed; }
-#wanted-toolbar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 8px; margin-bottom: 8px; font-size: 13px;
-}
-#wanted-toolbar .tb-count { color: var(--new); font-size: 12px; }
-#wanted-toolbar label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-#wanted-toolbar button {
-  background: var(--bg); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer;
-}
-#wanted-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
-.ep-check { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.mini-btn::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; }
+.mini-btn:hover::after { opacity: .08; }
+.mini-btn:active::after { opacity: .12; }
 
-#activity-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
-.activity {
-  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 9px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  font-size: 13px;
+/* ============ Library page ============ */
+#sel-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  position: sticky; top: 64px; z-index: 15;
+  background: var(--surface-container-high); border-radius: var(--r-xl);
+  box-shadow: var(--sh2); padding: 8px 12px; margin-bottom: 12px;
 }
-.activity .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.activity .act-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity .act-detail { font-size: 12px; color: var(--new); }
-.activity .right { display: flex; align-items: center; gap: 6px; color: var(--new); font-size: 12px; white-space: nowrap; flex: none; }
+#sel-bar[hidden] { display: none; }
+.sel-count { font: var(--t-ll); flex: 1 1 auto; min-width: 84px; }
+#sel-bar .m3-btn { height: 40px; min-width: 0; padding: 0 14px; flex: none; }
 
-#episodes-list { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px; }
-.episode-row {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 9px; font-size: 13px;
+#library-list { display: grid; gap: 10px; }
+.lib-row { display: flex; align-items: flex-start; gap: 4px; padding: 4px 12px 12px 4px; }
+.check-wrap {
+  display: flex; align-items: center; justify-content: center; flex: none;
+  width: 48px; height: 48px; margin: 8px 4px 0 4px; cursor: pointer;
 }
-.episode-row .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.episode-row .ep-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.episode-row .right { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--new); white-space: nowrap; flex: none; }
+.m3-check {
+  appearance: none; -webkit-appearance: none; width: 20px; height: 20px; flex: none;
+  border: 2px solid var(--outline); border-radius: 5px; background: transparent;
+  position: relative; transition: background .12s, border-color .12s; cursor: pointer;
+}
+.m3-check:checked { background: var(--primary); border-color: var(--primary); }
+.m3-check:checked::after {
+  content: ""; position: absolute; left: 5px; top: 1px; width: 5px; height: 10px;
+  border: solid var(--on-primary); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.m3-check:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.lib-main { flex: 1; min-width: 0; padding-top: 10px; }
+.lib-series { font: var(--t-tl); line-height: 24px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lib-sub { font: var(--t-bm); color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.chips-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.row-actions .m3-btn { flex: 1 1 44%; height: 44px; min-width: 0; padding: 0 8px; font: 500 13px/20px; }
 
-#gpu-card .gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-#gpu-card .gpu-name { font-weight: 700; }
-#gpu-card .gpu-util { font-size: 18px; font-weight: 700; color: var(--accent); }
-.vram { margin: 8px 0 2px; }
-.vram-bar {
-  height: 14px; background: var(--border); border-radius: 999px; overflow: hidden;
-}
-.vram-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width .4s; }
-.vram-txt { font-size: 12px; color: var(--new); margin-top: 4px; }
-.model-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+/* ============ Activity page ============ */
+#activity-list { display: grid; gap: 10px; }
+.act-row { display: flex; gap: 12px; padding: 12px 14px; align-items: flex-start; }
+.act-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; margin-top: 8px; background: var(--outline); }
+.act-dot.done { background: var(--ok); }
+.act-dot.error { background: var(--error); }
+.act-dot.running { background: var(--run); }
+.act-main { flex: 1; min-width: 0; }
+.act-title { font: var(--t-tl); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-code { color: var(--primary); font-weight: 600; }
+.act-sub { font: var(--t-bm); color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.act-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.act-time { font: var(--t-bs); color: var(--on-surface-variant); }
 
-#ctl-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
-#ctl-actions button {
-  background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 8px; padding: 9px 14px; font-size: 14px; cursor: pointer; min-height: 40px;
+/* ============ Status page ============ */
+.ctl-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.ctl-actions .m3-btn { flex: 1 1 40%; }
+.counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (min-width: 600px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
+.tile {
+  background: var(--surface-container-low); border: 1px solid var(--outline-variant);
+  border-radius: var(--r-m); padding: 12px 14px;
 }
-#ctl-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
-#ctl-actions button#act-pause { border-color: var(--err); color: var(--err); }
-#ctl-actions button#act-resume { border-color: var(--ok); color: var(--ok); }
-.ctl-grid {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin-bottom: 10px;
-}
-.ctl-stat { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
-.ctl-stat .lbl { font-size: 11px; color: var(--new); }
-.ctl-stat .val { font-size: 14px; font-weight: 600; }
-.ctl-stat .val.ok { color: var(--ok); }
-.ctl-stat .val.err { color: var(--err); }
-.ctl-stat .val.run { color: var(--run); }
-#ctl-config table { width: 100%; border-collapse: collapse; font-size: 13px; }
-#ctl-config th, #ctl-config td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); }
-#ctl-config th { color: var(--new); font-size: 12px; font-weight: 600; }
-#ctl-config td .kv { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
-#ctl-config .mini {
-  background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 6px; padding: 5px 9px; font-size: 12px; cursor: pointer;
-}
-#ctl-config .mini.unset { border-color: var(--err); color: var(--err); }
+.tile .lbl { font: var(--t-lm); color: var(--on-surface-variant); }
+.tile .val { font: var(--t-tm); margin-top: 4px; word-break: break-word; }
+.tile .val.ok { color: var(--ok); }
+.tile .val.err { color: var(--error); }
+.tile .val.run { color: var(--run); }
+
+/* ============ Settings page ============ */
+#ctl-config table { width: 100%; border-collapse: collapse; }
+#ctl-config th { text-align: left; font: var(--t-lm); color: var(--on-surface-variant); padding: 4px 8px; }
+#ctl-config td { padding: 8px; border-top: 1px solid var(--outline-variant); vertical-align: middle; }
+#ctl-config td.kv { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; word-break: break-all; }
 #ctl-config input[type="text"] {
-  background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 6px; padding: 6px 7px; font-size: 13px; width: 100%; max-width: 220px;
+  background: var(--surface-variant); color: var(--on-surface); border: none;
+  border-radius: var(--r-s); padding: 8px 10px; font: var(--t-bm); width: 100%; min-width: 0;
+}
+#ctl-config input[type="text"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+#ctl-config .mini {
+  height: 36px; padding: 0 14px; border-radius: var(--r-full); border: none;
+  background: var(--secondary-container); color: var(--on-secondary-container);
+  font: var(--t-lm); cursor: pointer;
+}
+#ctl-config .mini.unset { background: transparent; border: 1px solid var(--error); color: var(--error); }
+#ctl-config .mini:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+@media (max-width: 599px) {
+  #ctl-config table, #ctl-config tbody, #ctl-config tr, #ctl-config td { display: block; }
+  #ctl-config thead { display: none; }
+  #ctl-config tr {
+    background: var(--surface-container-low); border: 1px solid var(--outline-variant);
+    border-radius: var(--r-m); padding: 10px 12px; margin-bottom: 8px;
+  }
+  #ctl-config td { border: none; padding: 4px 0; }
+}
+.settings-note { font: var(--t-bs); color: var(--on-surface-variant); margin-top: 20px; }
+
+/* ============ Navigation: bottom bar (mobile) / rail (desktop) ============ */
+.nav-item {
+  border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font: var(--t-lm); padding: 0;
+}
+.nav-item svg { display: block; }
+.nav-item .ind {
+  display: flex; align-items: center; justify-content: center;
+  border-radius: var(--r-l); transition: background .15s;
+}
+.nav-item.active { color: var(--primary); font-weight: 700; }
+
+.bottom-nav {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
+  display: flex; height: 80px; padding-bottom: env(safe-area-inset-bottom);
+  background: var(--surface-container); border-top: 1px solid var(--outline-variant);
+}
+.bottom-nav .nav-item { flex: 1; height: 64px; gap: 0; }
+.bottom-nav .nav-item .ind { width: 64px; height: 32px; }
+.bottom-nav .nav-item.active .ind { background: var(--secondary-container); }
+
+.nav-rail { display: none; }
+@media (min-width: 840px) {
+  .nav-rail {
+    display: flex; flex-direction: column; align-items: center;
+    position: fixed; top: 0; bottom: 0; left: 0; width: 80px; z-index: 30;
+    padding-top: 12px; gap: 4px;
+    background: var(--surface-container-low); border-right: 1px solid var(--outline-variant);
+  }
+  .app-main { margin-left: 80px; }
+  .bottom-nav { display: none; }
+  .nav-rail .nav-item { width: 80px; height: 56px; gap: 2px; }
+  .nav-rail .nav-item .ind { width: 56px; height: 32px; }
+  .nav-rail .nav-item.active .ind { background: var(--secondary-container); }
 }
 
+/* ============ FAB ============ */
+.fab {
+  position: fixed; right: 16px; bottom: 96px; z-index: 25;
+  display: flex; align-items: center; gap: 8px;
+  height: 56px; padding: 0 20px; border-radius: var(--r-l); border: none;
+  background: var(--primary-container); color: var(--on-primary-container);
+  box-shadow: var(--sh3); font: 600 14px/20px; cursor: pointer;
+}
+.fab::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; }
+.fab:hover::after { opacity: .08; }
+.fab:active::after { opacity: .12; }
+.fab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.fab[hidden] { display: none; }
+@media (min-width: 840px) { .fab { bottom: 24px; right: 24px; } }
+
+/* ============ Toasts ============ */
 #toasts {
-  position: fixed; bottom: 16px; left: 0; right: 0; display: flex; flex-direction: column;
-  align-items: center; gap: 8px; z-index: 100; pointer-events: none; padding: 0 16px;
+  position: fixed; left: 0; right: 0; bottom: 96px; z-index: 100; pointer-events: none;
+  display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 16px;
 }
+@media (min-width: 840px) { #toasts { bottom: 24px; } }
 .toast {
-  background: var(--fg); color: var(--bg); border-radius: 10px; padding: 10px 16px;
-  font-size: 14px; max-width: 480px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
-  transition: opacity .3s, transform .3s; text-align: center;
+  background: var(--inverse-surface); color: var(--inverse-on-surface);
+  border-radius: var(--r-l); padding: 12px 20px; font: var(--t-bm);
+  max-width: 480px; box-shadow: var(--sh4); text-align: center;
+  transition: opacity .3s, transform .3s;
 }
-.toast.err { background: var(--err); color: #fff; }
-.toast.ok { background: var(--ok); color: #fff; }
+.toast.err { background: var(--error-container); color: var(--on-error-container); }
 .toast.out { opacity: 0; transform: translateY(8px); }
-footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0 30px; }
-@media (min-width: 768px) {
-  body { font-size: 16px; }
-  main { padding: 20px; }
-  .grid { grid-template-columns: repeat(4, 1fr); }
-  .ctl-grid { grid-template-columns: repeat(3, 1fr); }
-  #wanted-list { grid-template-columns: repeat(2, 1fr); }
-}
 </style>
 </head>
 <body>
-<header>
-  <h1>ASRSub</h1>
-  <div class="header-right">
-    <span id="refresh-ind"></span>
-    <button id="theme-toggle" title="Theme">🔄</button>
-  </div>
-</header>
-<main>
-  <div id="error-banner">dashboard backend unreachable</div>
-
-  <section class="sec" id="sec-pipeline">
-    <h2 class="sec-head" data-sec="pipeline">Pipeline <span class="chev">▾</span></h2>
-    <div class="sec-body">
-      <div class="pills">
-        <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
-        <span class="pill"><span class="dot stopped" id="q-dot"></span><span id="q-text">queue …</span></span>
-      </div>
-      <div class="grid" id="pipe-grid">
-        <div class="stat"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
-        <div class="stat"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
-        <div class="stat"><div class="lbl">Queue (wanted)</div><div class="val accent" id="st-queue">–</div></div>
-        <div class="stat"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
-        <div class="stat"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
-        <div class="stat"><div class="lbl">Started at</div><div class="val" id="st-started">–</div></div>
-        <div class="stat"><div class="lbl">Run-once requested</div><div class="val" id="st-runonce">–</div></div>
-        <div class="stat"><div class="lbl">State counts</div><div class="val" id="st-counts">–</div></div>
-      </div>
-      <div id="episodes-list"><div class="muted">no per-episode records yet</div></div>
+<div class="app-main">
+  <header class="app-bar">
+    <h1>ASRSub</h1>
+    <div class="bar-actions">
+      <span id="refresh-ind"></span>
+      <button id="theme-toggle" class="icon-btn" title="Theme" aria-label="Toggle theme">🔄</button>
     </div>
-  </section>
-
-  <section class="sec" id="sec-gpu">
-    <h2 class="sec-head" data-sec="gpu">GPU &amp; Model <span class="chev">▾</span></h2>
-    <div class="sec-body">
-      <div class="card" id="gpu-card"><div class="muted">loading…</div></div>
+  </header>
+  <main id="main">
+    <div id="error-banner" class="retry-banner visible" role="alert">
+      <span>dashboard backend unreachable</span>
     </div>
-  </section>
 
-  <section class="sec" id="sec-wanted">
-    <h2 class="sec-head" data-sec="wanted">Wanted <span class="chev">▾</span></h2>
-    <div class="sec-body">
-      <div id="wanted-toolbar">
-        <label><input type="checkbox" id="sel-all" class="ep-check"> all</label>
-        <span class="tb-count" id="sel-count">0 selected</span>
-        <button id="batch-retry" data-batch="retry">Retry</button>
-        <button id="batch-skip" data-batch="skip">Skip</button>
-        <button id="batch-delete" data-batch="delete">Delete</button>
-        <button id="batch-exclude" data-batch="exclude">Exclude</button>
-        <button id="sel-clear">Clear</button>
+    <!-- ============ Library ============ -->
+    <section class="page active" id="page-library" aria-label="Library">
+      <h2 class="page-title">Library</h2>
+      <div id="lib-banner" class="retry-banner" role="alert">
+        <span id="lib-banner-msg"></span>
+        <button class="m3-btn text" onclick="pollLibrary()">Retry</button>
       </div>
-      <div id="wanted-list"><div class="muted">loading…</div></div>
-    </div>
-  </section>
-
-  <section class="sec" id="sec-activity">
-    <h2 class="sec-head" data-sec="activity">Recent activity <span class="chev">▾</span></h2>
-    <div class="sec-body"><div id="activity-list"><div class="muted">loading…</div></div></div>
-  </section>
-
-  <section class="sec" id="sec-control">
-    <h2 class="sec-head" data-sec="control">Control <span class="chev">▾</span></h2>
-    <div class="sec-body">
-      <div id="ctl-actions">
-        <button id="act-wake" onclick="ctlAction('wake')">Wake now</button>
-        <button id="act-run-once" onclick="ctlAction('run-once')">Run once</button>
-        <button id="act-pause" onclick="ctlAction('pause')">Pause</button>
-        <button id="act-resume" onclick="ctlAction('resume')">Resume</button>
+      <div id="sel-bar" hidden>
+        <span class="sel-count" id="sel-count">0 selected</span>
+        <button class="m3-btn text" id="sel-all-btn">All</button>
+        <button class="m3-btn filled" id="batch-retry" data-batch="retry" disabled>Retry</button>
+        <button class="m3-btn outlined danger" id="batch-delete" data-batch="delete" disabled>Delete</button>
+        <button class="m3-btn tonal" id="batch-exclude" data-batch="exclude" disabled>Exclude</button>
+        <button class="m3-btn text" id="sel-clear">Clear</button>
       </div>
-      <div class="ctl-grid" id="ctl-status"><div class="muted">loading…</div></div>
-      <div id="ctl-config"><div class="muted">loading…</div></div>
-    </div>
-  </section>
+      <div id="library-list"><div class="empty">loading…</div></div>
+    </section>
 
-  <footer>status polls every 5s · wanted/activity every 20s</footer>
-</main>
+    <!-- ============ Activity ============ -->
+    <section class="page" id="page-activity" aria-label="Activity">
+      <h2 class="page-title">Activity</h2>
+      <div id="activity-list"><div class="empty">loading…</div></div>
+    </section>
+
+    <!-- ============ Status ============ -->
+    <section class="page" id="page-status" aria-label="Status">
+      <h2 class="page-title">Status</h2>
+      <div class="card">
+        <div class="card-head">Pipeline</div>
+        <div class="card-body">
+          <div class="pills">
+            <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
+            <span class="pill"><span class="dot stopped" id="q-dot"></span><span id="q-text">queue …</span></span>
+          </div>
+          <div class="counts" id="st-counts"></div>
+          <div class="ctl-actions">
+            <button id="act-wake" class="m3-btn tonal" onclick="ctlAction('wake')">Wake now</button>
+            <button id="act-run-once" class="m3-btn tonal" onclick="ctlAction('run-once')">Run once</button>
+            <button id="act-pause" class="m3-btn outlined danger" onclick="ctlAction('pause')">Pause</button>
+            <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
+          </div>
+        </div>
+      </div>
+      <div class="stats-grid" style="margin-top:12px">
+        <div class="tile"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
+        <div class="tile"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
+        <div class="tile"><div class="lbl">Queue (wanted)</div><div class="val" id="st-queue">–</div></div>
+        <div class="tile"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
+        <div class="tile"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
+        <div class="tile"><div class="lbl">Started at</div><div class="val" id="st-started">–</div></div>
+        <div class="tile"><div class="lbl">Run-once requested</div><div class="val" id="st-runonce">–</div></div>
+      </div>
+      <div class="card" id="gpu-card">
+        <div class="card-head">GPU</div>
+        <div class="card-body"><div id="gpu-body"><div class="muted">loading…</div></div></div>
+      </div>
+      <div class="card" id="model-card">
+        <div class="card-head">Model</div>
+        <div class="card-body"><div id="model-body"><div class="muted">loading…</div></div></div>
+      </div>
+    </section>
+
+    <!-- ============ Settings ============ -->
+    <section class="page" id="page-settings" aria-label="Settings">
+      <h2 class="page-title">Settings</h2>
+      <div id="ctl-config"><div class="empty">loading…</div></div>
+      <div class="settings-note">status polls every 5s · library/activity every 20s · data is cached server-side</div>
+    </section>
+  </main>
+</div>
+
+<nav class="bottom-nav" aria-label="Pages">
+  <button class="nav-item active" data-page="library" aria-current="page">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+    <span>Library</span>
+  </button>
+  <button class="nav-item" data-page="activity">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6.1"/><path d="M3.5 2.5v4h4"/><path d="M12 7.5V12l3 2"/></svg></span>
+    <span>Activity</span>
+  </button>
+  <button class="nav-item" data-page="status">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12h4l2.5-6 4.5 12 2.5-6h5.5"/></svg></span>
+    <span>Status</span>
+  </button>
+  <button class="nav-item" data-page="settings">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
+    <span>Settings</span>
+  </button>
+</nav>
+
+<aside class="nav-rail" aria-label="Pages">
+  <button class="nav-item active" data-page="library" aria-current="page">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+    <span>Library</span>
+  </button>
+  <button class="nav-item" data-page="activity">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6.1"/><path d="M3.5 2.5v4h4"/><path d="M12 7.5V12l3 2"/></svg></span>
+    <span>Activity</span>
+  </button>
+  <button class="nav-item" data-page="status">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12h4l2.5-6 4.5 12 2.5-6h5.5"/></svg></span>
+    <span>Status</span>
+  </button>
+  <button class="nav-item" data-page="settings">
+    <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
+    <span>Settings</span>
+  </button>
+</aside>
+
+<button id="fab-retry" class="fab" hidden>
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3.5v3.5h-3.5"/></svg>
+  <span>Retry</span>
+</button>
+
 <div id="toasts"></div>
 <script>
 const LS_THEME = "asr-dash-theme";
@@ -312,32 +494,6 @@ document.getElementById("theme-toggle").addEventListener("click", function () {
   localStorage.setItem(LS_THEME, theme);
   applyTheme(theme);
 });
-
-const LS_SECTIONS = "asr-dash-sections";
-const DEF_SECTIONS = { pipeline: true, gpu: true, wanted: true, activity: true, control: false };
-function initSections() {
-  let s = {};
-  try { s = JSON.parse(localStorage.getItem(LS_SECTIONS) || "{}") || {}; } catch (e) { s = {}; }
-  const merged = Object.assign({}, DEF_SECTIONS, s);
-  for (const sec of document.querySelectorAll(".sec")) {
-    const name = sec.querySelector(".sec-head").dataset.sec;
-    const collapsed = merged[name] === false;
-    sec.classList.toggle("collapsed", collapsed);
-  }
-  document.querySelectorAll(".sec-head").forEach(function (h) {
-    h.addEventListener("click", function () {
-      const sec = h.parentElement;
-      const name = h.dataset.sec;
-      const collapsed = !sec.classList.contains("collapsed");
-      sec.classList.toggle("collapsed", collapsed);
-      const cur = {};
-      try { Object.assign(cur, JSON.parse(localStorage.getItem(LS_SECTIONS) || "{}")); } catch (e) {}
-      cur[name] = !collapsed;
-      localStorage.setItem(LS_SECTIONS, JSON.stringify(cur));
-    });
-  });
-}
-initSections();
 
 function esc(s) {
   const d = document.createElement("div");
@@ -402,7 +558,33 @@ function btnBusy(btn, on, label) {
   }
 }
 
-let wantedEpisodes = {};
+/* ============ Navigation ============ */
+const PAGES = ["library", "activity", "status", "settings"];
+let currentPage = "library";
+function showPage(name) {
+  if (PAGES.indexOf(name) < 0) return;
+  currentPage = name;
+  for (const p of PAGES) {
+    const el = document.getElementById("page-" + p);
+    if (el) el.classList.toggle("active", p === name);
+  }
+  for (const b of document.querySelectorAll(".nav-item")) {
+    const on = b.dataset.page === name;
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  }
+  window.scrollTo(0, 0);
+  if (name === "settings") loadControlConfig();
+  if (name === "status") pollStatus();
+  if (name === "library") pollLibrary();
+  updateFab();
+}
+for (const b of document.querySelectorAll(".nav-item")) {
+  b.addEventListener("click", function () { showPage(b.dataset.page); });
+}
+
+/* ============ Status page ============ */
 function renderStatus(data) {
   const daemon = data.daemon || {};
   const reachable = !!daemon.reachable;
@@ -418,232 +600,73 @@ function renderStatus(data) {
   qd.className = queue.wanted ? "dot running" : "dot up";
   qt.textContent = "queue: " + (queue.wanted != null ? queue.wanted + " wanted" : "?");
 
-  document.getElementById("st-daemon").textContent = reachable ? (daemon.paused ? "paused" : "running") : "stopped";
-  document.getElementById("st-daemon").className = "val " + (reachable ? (daemon.paused ? "run" : "ok") : "err");
+  const stDaemon = document.getElementById("st-daemon");
+  stDaemon.textContent = reachable ? (daemon.paused ? "paused" : "running") : "stopped";
+  stDaemon.className = "val " + (reachable ? (daemon.paused ? "run" : "ok") : "err");
   document.getElementById("st-uptime").textContent = daemon.uptime_s != null ? fmtDur(daemon.uptime_s) : "–";
   document.getElementById("st-queue").textContent = queue.wanted != null ? queue.wanted : "–";
   const lp = daemon.last_pass || {};
-  document.getElementById("st-lastpass").textContent = lp.processed != null
+  const stLp = document.getElementById("st-lastpass");
+  stLp.textContent = lp.processed != null
     ? (lp.processed + " processed · " + (lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?") + " d/s/f")
     : "–";
-  const lpe = document.getElementById("st-lastpass");
-  lpe.className = "val" + ((lp.failed || 0) > 0 ? " err" : "");
-  document.getElementById("st-failures").textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
-  document.getElementById("st-failures").className = "val" + ((daemon.consecutive_failures || 0) > 0 ? " err" : "");
+  stLp.className = "val" + ((lp.failed || 0) > 0 ? " err" : "");
+  const stF = document.getElementById("st-failures");
+  stF.textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
+  stF.className = "val" + ((daemon.consecutive_failures || 0) > 0 ? " err" : "");
   document.getElementById("st-started").textContent = daemon.started_at ? relTime(daemon.started_at) : "–";
   document.getElementById("st-runonce").textContent = daemon.run_once_requested ? "yes" : "no";
+
   const sc = data.state_counts || {};
-  document.getElementById("st-counts").textContent = sc.total != null
-    ? (sc.done + " done · " + sc.error + " err · " + sc.pending + " pend (" + sc.total + ")")
-    : "–";
+  const cEl = document.getElementById("st-counts");
+  if (sc.total != null) {
+    cEl.innerHTML =
+      '<span class="pill"><span class="dot up"></span>' + esc(sc.done ?? "?") + " done</span>" +
+      '<span class="pill"><span class="dot down"></span>' + esc(sc.error ?? "?") + " error</span>" +
+      '<span class="pill"><span class="dot stopped"></span>' + esc(sc.pending ?? "?") + " pending (" + esc(sc.total) + ")</span>";
+  } else {
+    cEl.innerHTML = "";
+  }
 
   renderGpu(data.gpu || {}, data.llama || {});
-  renderEpisodes(data.episodes || {});
-  renderCtlStatus(daemon);
+  const pa = document.getElementById("act-pause");
+  const re = document.getElementById("act-resume");
+  if (pa && re) {
+    pa.disabled = !reachable || !!daemon.paused;
+    re.disabled = !reachable || !daemon.paused;
+  }
 }
 
 function renderGpu(gpu, llama) {
-  const el = document.getElementById("gpu-card");
-  let html;
-  if (gpu.available && (gpu.gpus || []).length) {
-    const g = gpu.gpus[0];
+  const el = document.getElementById("gpu-body");
+  if (!el) return;
+  const g = (gpu.gpus && gpu.gpus[0]) || null;
+  if (gpu.available && g) {
     const used = g.memory_used_mb, total = g.memory_total_mb;
     const pct = used != null && total ? Math.round((used / total) * 100) : null;
-    html =
+    el.innerHTML =
       '<div class="gpu-row"><span class="gpu-name">' + esc(g.name) + "</span>" +
-      '<span class="gpu-util">' + (g.util_pct != null ? g.util_pct + "%" : "?") + "</span></div>" +
+      '<span class="gpu-util">' + (g.util_pct != null ? esc(g.util_pct) + "%" : "?") + "</span></div>" +
       '<div class="vram"><div class="vram-bar"><div class="vram-fill" style="width:' + (pct != null ? pct : 0) + '%"></div></div>' +
-      '<div class="vram-txt">VRAM ' + fmtMB(used) + " / " + fmtMB(total) + (pct != null ? " (" + pct + "%)" : "") + "</div></div>" +
-      '<div class="model-row">' +
-      '<span class="pill"><span class="dot ' + (llama.up ? "up" : "down") + '"></span>' +
-      "<span>" + (llama.up ? "llama-server up" + (llama.latency_ms != null ? " (" + llama.latency_ms + "ms)" : "") : "llama-server down") + "</span></span>" +
-      (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") +
-      "</div>";
+      '<div class="vram-txt">VRAM ' + fmtMB(used) + " / " + fmtMB(total) + (pct != null ? " (" + pct + "%)" : "") + "</div></div>";
   } else {
-    html = '<div class="muted">GPU unavailable' +
-      (gpu.error ? " — " + esc(gpu.error) : "") + "</div>" +
-      '<div class="model-row"><span class="pill"><span class="dot ' + (llama.up ? "up" : "down") + '"></span>' +
-      "<span>" + (llama.up ? "llama-server up" + (llama.latency_ms != null ? " (" + llama.latency_ms + "ms)" : "") : "llama-server down") + "</span></span>" +
-      (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") + "</div>";
+    el.innerHTML =
+      '<div class="unavail"><span class="chip chip-excluded">GPU unavailable</span>' +
+      (gpu.error ? '<span class="muted" style="font:var(--t-bs)">' + esc(gpu.error) + "</span>" : "") + "</div>";
   }
-  el.innerHTML = html;
+  renderModel(llama);
 }
 
-function renderEpisodes(episodes) {
-  const el = document.getElementById("episodes-list");
-  const ids = Object.keys(episodes);
-  if (!ids.length) {
-    el.innerHTML = '<div class="muted">no per-episode records yet</div>';
-    return;
-  }
-  ids.sort(function (a, b) {
-    return String(episodes[b].ts || "").localeCompare(String(episodes[a].ts || ""));
-  });
-  const rows = [];
-  for (const id of ids.slice(0, 15)) {
-    const e = episodes[id];
-    const w = wantedEpisodes[id] || {};
-    const label = [w.series, w.episode].filter(Boolean).join(" ") || "ep " + id;
-    rows.push(
-      '<div class="episode-row"><div class="left">' +
-      '<span class="badge ' + statusClass(e.status) + '">' + esc(e.status) + "</span>" +
-      '<span class="ep-label">' + esc(label) + "</span></div>" +
-      '<div class="right">' +
-      (e.refine ? '<span title="refined" style="color:var(--ok)">✓</span>' : "") +
-      (e.language ? '<span class="badge lang">' + esc(e.language) + "</span>" : "") +
-      (e.elapsed_s != null ? "<span>" + fmtDur(e.elapsed_s) + "</span>" : "") +
-      "<span>" + relTime(e.ts) + "</span></div></div>"
-    );
-  }
-  el.innerHTML = rows.join("");
-}
-
-let selected = {};
-let exclusions = {};
-
-function renderWanted(data) {
-  const wl = document.getElementById("wanted-list");
-  const items = data.items || [];
-  wantedEpisodes = {};
-  exclusions = data.exclusions || {};
-  for (const it of items) {
-    wantedEpisodes[String(it.sonarrEpisodeId)] = it;
-    if (!(String(it.sonarrEpisodeId) in selected)) selected[String(it.sonarrEpisodeId)] = false;
-  }
-  for (const k of Object.keys(selected)) {
-    if (!wantedEpisodes[k]) delete selected[k];
-  }
-  if (!items.length) {
-    wl.innerHTML = '<div class="muted">no wanted episodes</div>';
-    updateToolbar();
-    return;
-  }
-  const cards = [];
-  for (const ep of items) {
-    const st = ep.state || {};
-    const q = ep.quality || {};
-    const key = String(ep.sonarrEpisodeId);
-    const excluded = !!exclusions[key];
-    const flags = [q.source, q.resolution, q.codec, q.audio].filter(Boolean)
-      .map(function (f) { return '<span class="badge q">' + esc(f) + "</span>"; }).join("");
-    const missing = (ep.missing || []).map(function (l) { return esc(l); }).join(", ");
-    const subs = ep.subtitle_files || [];
-    const subTxt = subs.length
-      ? '<div class="ep-title" style="font-size:11px">' + esc(subs.length) + " sub file(s): " + esc(subs[0].split("/").pop()) + "</div>"
-      : "";
-    cards.push(
-      '<div class="card">' +
-      '<div class="ep-head"><span style="display:flex;align-items:center;gap:8px;min-width:0">' +
-      '<input type="checkbox" class="ep-check" data-check="' + ep.sonarrEpisodeId + '"' + (selected[key] ? " checked" : "") + ">" +
-      '<span class="ep-series">' + esc(ep.series) + "</span></span>" +
-      '<span class="ep-code">' + esc(ep.episode) + "</span></div>" +
-      '<div class="ep-title">' + esc(ep.title) + "</div>" +
-      subTxt +
-      '<div class="ep-meta">' +
-      '<div class="flags">' + flags +
-      '<span class="badge ' + statusClass(st.status) + '">' + esc(st.status) + "</span>" +
-      (ep.lang_states ? Object.keys(ep.lang_states).map(function (l) {
-        const ls = ep.lang_states[l];
-        return '<span class="badge lang ' + statusClass(ls.status) + '">' + esc(l) + ":" + esc(ls.status) + "</span>";
-      }).join("") : "") +
-      (excluded ? '<span class="badge excluded">EXCLUDED</span>' : "") +
-      (ep.refine ? '<span class="badge ai">refined</span>' : "") +
-      "</div>" +
-      '<span class="missing">missing: ' + (missing || "none") + "</span></div>" +
-      '<div class="ep-actions">' +
-      '<button class="btn-retry" data-act="retry" data-id="' + ep.sonarrEpisodeId + '">Retry</button>' +
-      '<button class="btn-skip" data-act="skip" data-id="' + ep.sonarrEpisodeId + '">Skip</button>' +
-      '<button class="btn-del" data-act="delete" data-id="' + ep.sonarrEpisodeId + '">Delete</button>' +
-      '<button class="' + (excluded ? "btn-excluded" : "btn-exclude") + '" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + ep.sonarrEpisodeId + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
-      "</div></div>"
-    );
-  }
-  wl.innerHTML = cards.join("");
-  updateToolbar();
-}
-
-function updateToolbar() {
-  const boxes = document.querySelectorAll('#wanted-list .ep-check');
-  const sel = Object.keys(selected).filter(function (k) { return selected[k]; });
-  document.getElementById("sel-count").textContent = sel.length + " selected";
-  const sa = document.getElementById("sel-all");
-  if (sa) {
-    sa.checked = boxes.length > 0 && sel.length === boxes.length;
-    sa.indeterminate = sel.length > 0 && sel.length < boxes.length;
-  }
-  for (const act of ["retry", "skip", "delete", "exclude"]) {
-    const b = document.getElementById("batch-" + act);
-    if (b) b.disabled = sel.length === 0;
-  }
-}
-
-function toggleSelect(id, on) {
-  selected[String(id)] = !!on;
-  updateToolbar();
-}
-
-function selectAll(on) {
-  for (const k of Object.keys(selected)) selected[k] = on;
-  const boxes = document.querySelectorAll('#wanted-list .ep-check');
-  for (const b of boxes) b.checked = on;
-  updateToolbar();
-}
-
-function renderActivity(data) {
-  const al = document.getElementById("activity-list");
-  const items = data.items || [];
-  if (!items.length) {
-    al.innerHTML = '<div class="muted">no recent activity</div>';
-    return;
-  }
-  const rows = [];
-  for (const it of items) {
-    const label = [it.series, it.episode].filter(Boolean).join(" ") || "";
-    const head = label ? label : (it.title ? it.title : "?");
-    rows.push(
-      '<div class="activity"><div class="left">' +
-      '<span class="dot ' + (it.kind === "bazarr" ? "up" : "running") + '"></span>' +
-      "<div><div class=\"act-label\">" + esc(head) + (it.title && label ? " — " + esc(it.title) : "") + "</div>" +
-      '<div class="act-detail">' + esc(it.detail || "") + "</div></div></div>" +
-      '<div class="right">' +
-      (it.ai ? '<span class="badge ai">AI</span>' : "") +
-      (it.language ? '<span class="badge lang">' + esc(it.language) + "</span>" : "") +
-      (it.elapsed_s != null ? "<span>" + fmtDur(it.elapsed_s) + "</span>" : "") +
-      "<span>" + (relTime(it.ts) || esc(it.relative || "")) + "</span>" +
-      (it.episode_id != null ? '<button class="act-del" data-act="delete" data-id="' + it.episode_id + '">Del</button>' : "") +
-      "</div></div>"
-    );
-  }
-  al.innerHTML = rows.join("");
-}
-
-function renderCtlStatus(daemon) {
-  const el = document.getElementById("ctl-status");
-  const pa = document.getElementById("act-pause");
-  const re = document.getElementById("act-resume");
-  const reachable = !!daemon.reachable;
-  if (!reachable) {
-    el.innerHTML = '<div class="muted" style="grid-column:1/-1">control daemon unreachable (' + esc(daemon.error || "?") + ")</div>";
-    pa.disabled = true; re.disabled = true;
-    return;
-  }
-  const paused = !!daemon.paused;
-  const lp = daemon.last_pass || {};
-  const rows = [
-    ["daemon state", paused ? '<span class="val run">paused</span>' : '<span class="val ok">running</span>'],
-    ["uptime", '<span class="val">' + esc(fmtDur(daemon.uptime_s)) + "</span>"],
-    ["run-once requested", '<span class="val">' + (daemon.run_once_requested ? "yes" : "no") + "</span>"],
-    ["consecutive failures", '<span class="val' + ((daemon.consecutive_failures || 0) > 0 ? " err" : "") + '">' + esc(daemon.consecutive_failures ?? "?") + "</span>"],
-    ["last pass processed", '<span class="val">' + esc(lp.processed ?? "?") + "</span>"],
-    ["last pass done/skipped/failed", '<span class="val">' + esc((lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?")) + "</span>"],
-    ["last pass wanted before/after", '<span class="val">' + esc((lp.wanted_before ?? "?") + "/" + (lp.wanted_after ?? "?")) + "</span>"],
-    ["started at", '<span class="val">' + esc(daemon.started_at || "?") + "</span>"],
-  ];
-  el.innerHTML = rows.map(function (r) {
-    return '<div class="ctl-stat"><div class="lbl">' + r[0] + '</div><div class="val">' + r[1] + "</div></div>";
-  }).join("");
-  pa.disabled = paused;
-  re.disabled = !paused;
+function renderModel(llama) {
+  const el = document.getElementById("model-body");
+  if (!el) return;
+  const up = !!llama.up;
+  el.innerHTML =
+    '<div class="model-row">' +
+    '<span class="pill"><span class="dot ' + (up ? "up" : "down") + '"></span>' +
+    "<span>" + (up ? "llama-server up" + (llama.latency_ms != null ? " (" + esc(llama.latency_ms) + "ms)" : "") : "llama-server down") + "</span></span>" +
+    (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") +
+    "</div>";
 }
 
 async function pollStatus() {
@@ -658,45 +681,199 @@ async function pollStatus() {
   }
 }
 
-async function pollLists() {
+/* ============ Library page ============ */
+let libraryItems = {};
+let libraryExcluded = {};
+let selected = {};
+let lastLibrary = null;
+
+function selectedIds() {
+  return Object.keys(selected).filter(function (k) { return selected[k]; });
+}
+
+function updateSelBar() {
+  const n = selectedIds().length;
+  document.getElementById("sel-count").textContent = n + " selected";
+  for (const act of ["retry", "delete", "exclude"]) {
+    const b = document.getElementById("batch-" + act);
+    if (b) b.disabled = n === 0;
+  }
+  const allBtn = document.getElementById("sel-all-btn");
+  if (allBtn) allBtn.textContent = n > 0 && n === Object.keys(libraryItems).length ? "None" : "All";
+  updateFab();
+}
+
+function toggleSelect(id, on) {
+  selected[String(id)] = !!on;
+  updateSelBar();
+}
+
+function selectAll(on) {
+  for (const k of Object.keys(libraryItems)) selected[k] = on;
+  const boxes = document.querySelectorAll("#library-list .m3-check");
+  for (const b of boxes) b.checked = on;
+  updateSelBar();
+}
+
+function langChip(l) {
+  const st = l.status || "wanted";
+  const cls = st === "done" ? "chip-done" : st === "error" ? "chip-error" : st === "excluded" ? "chip-excluded" : "chip-wanted-lang";
+  return '<span class="chip ' + cls + '">' + esc(l.language) + (st === "done" ? " ✓" : "") + "</span>";
+}
+
+function renderLibrary(data) {
+  lastLibrary = data;
+  const list = document.getElementById("library-list");
+  const banner = document.getElementById("lib-banner");
+  banner.classList.remove("visible");
+  banner.hidden = true;
+  const items = data.items || [];
+  libraryItems = {};
+  for (const it of items) {
+    if (it.sonarr_episode_id != null) libraryItems[String(it.sonarr_episode_id)] = it;
+  }
+  for (const k of Object.keys(selected)) {
+    if (!libraryItems[k]) delete selected[k];
+  }
+  const bar = document.getElementById("sel-bar");
+  if (!items.length) {
+    bar.hidden = true;
+    list.innerHTML = '<div class="empty">library is empty — nothing wanted right now</div>';
+    updateSelBar();
+    return;
+  }
+  bar.hidden = false;
+  const rows = [];
+  for (const it of items) {
+    const id = String(it.sonarr_episode_id);
+    const excluded = !!libraryExcluded[id];
+    const chips = (it.languages || []).map(langChip).join("");
+    rows.push(
+      '<div class="card lib-row">' +
+      '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + '></label>' +
+      '<div class="lib-main">' +
+      '<div class="lib-series">' + esc(it.series) + (it.wanted ? ' <span class="chip chip-wanted">WANTED</span>' : "") + "</div>" +
+      '<div class="lib-sub">' + esc(it.episode) + (it.title ? " · " + esc(it.title) : "") + "</div>" +
+      (chips ? '<div class="chips-row">' + chips + "</div>" : "") +
+      '<div class="row-actions">' +
+      '<button class="m3-btn outlined" data-act="retry" data-id="' + id + '">Retry</button>' +
+      '<button class="m3-btn outlined" data-act="skip" data-id="' + id + '">Skip</button>' +
+      '<button class="m3-btn outlined danger" data-act="delete" data-id="' + id + '">Delete</button>' +
+      '<button class="m3-btn outlined" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + id + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
+      "</div>" +
+      "</div></div>"
+    );
+  }
+  list.innerHTML = rows.join("");
+  updateSelBar();
+}
+
+function libUnavailable(msg) {
+  const banner = document.getElementById("lib-banner");
+  document.getElementById("lib-banner-msg").textContent = "library unavailable — " + msg;
+  banner.hidden = false;
+  banner.classList.add("visible");
+  const list = document.getElementById("library-list");
+  if (lastLibrary === null) list.innerHTML = '<div class="empty">library unavailable</div>';
+  updateSelBar();
+}
+
+function itemLangTarget(it) {
+  if (!it || !it.languages) return null;
+  const cands = it.languages.filter(function (l) {
+    return l.status === "wanted" || l.status === "error";
+  });
+  return cands.length === 1 ? cands[0].language : null;
+}
+
+async function pollLibrary() {
   try {
-    const [w, a] = await Promise.all([api("/api2/wanted"), api("/api2/activity")]);
-    if (w.status === 200) renderWanted(w.data);
-    if (a.status === 200) renderActivity(a.data);
+    const lib = await api("/api2/library");
+    if (lib.status === 404) { libUnavailable("HTTP 404 — endpoint not ready yet"); return; }
+    if (lib.status !== 200) { libUnavailable("HTTP " + lib.status); return; }
+    const ex = await api("/api2/exclusions");
+    if (ex.status === 200) {
+      libraryExcluded = {};
+      for (const r of (ex.data.exclusions || [])) {
+        if (r && r.episode_id != null) libraryExcluded[String(r.episode_id)] = true;
+      }
+    }
+    renderLibrary(lib.data);
+  } catch (e) {
+    libUnavailable(esc(e.message));
+  }
+}
+
+/* ============ Activity page ============ */
+let activityItems = {};
+
+function actColor(it) {
+  if (it.kind === "bazarr") return "done";
+  if (it.detail === "done") return "done";
+  if (it.detail === "error") return "error";
+  if (it.detail === "running") return "running";
+  return "";
+}
+
+function renderActivity(data) {
+  const al = document.getElementById("activity-list");
+  const items = data.items || [];
+  if (!items.length) {
+    al.innerHTML = '<div class="empty">no recent activity</div>';
+    return;
+  }
+  activityItems = {};
+  const rows = [];
+  for (const it of items) {
+    if (it.episode_id != null) activityItems[String(it.episode_id)] = it;
+    const dot = actColor(it);
+    const title = it.title ? esc(it.title) : "";
+    const sub = it.detail ? esc(it.detail) : "";
+    const tsIso = it.ts ? new Date(it.ts).toISOString() : "";
+    const rt = relTime(it.ts) || esc(it.relative || "");
+    const dur = fmtDur(it.elapsed_s);
+    const parts = [];
+    if (it.language) parts.push('<span class="chip chip-done">' + esc(it.language) + "</span>");
+    if (it.kind === "pipeline" && it.detail) parts.push('<span class="badge ' + statusClass(it.detail) + '">' + esc(it.detail) + "</span>");
+    if (it.ai) parts.push('<span class="badge ai">AI</span>');
+    if (dur) parts.push('<span class="act-time">' + dur + "</span>");
+    if (rt) parts.push('<span class="act-time" title="' + esc(tsIso || it.ts || "") + '">' + rt + "</span>");
+    if (it.episode_id != null) {
+      parts.push('<button class="mini-btn" data-act="delete" data-id="' + esc(it.episode_id) + '">Delete</button>');
+    }
+    rows.push(
+      '<div class="card act-row">' +
+      '<span class="act-dot ' + dot + '"></span>' +
+      '<div class="act-main">' +
+      '<div class="act-title">' +
+      (it.series ? esc(it.series) + " " : "") +
+      (it.episode ? '<span class="act-code">' + esc(it.episode) + "</span>" : "") +
+      "</div>" +
+      (title ? '<div class="act-sub">' + title + "</div>" : "") +
+      (sub && !title ? '<div class="act-sub">' + sub + "</div>" : "") +
+      '<div class="act-meta">' + parts.join("") + "</div>" +
+      "</div></div>"
+    );
+  }
+  al.innerHTML = rows.join("");
+}
+
+async function pollActivity() {
+  try {
+    const { status, data } = await api("/api2/activity");
+    if (status === 200) renderActivity(data);
   } catch (e) {}
 }
 
-for (const el of ["wanted-list", "activity-list"]) {
-  document.getElementById(el).addEventListener("click", function (ev) {
-    const btn = ev.target.closest("button[data-act]");
-    if (!btn) return;
-    episodeAction(btn.dataset.act, btn.dataset.id, btn);
-  });
+async function pollLists() {
+  await Promise.all([pollLibrary(), pollActivity()]);
 }
 
-document.getElementById("wanted-list").addEventListener("change", function (ev) {
-  const cb = ev.target.closest("input[data-check]");
-  if (!cb) return;
-  toggleSelect(cb.dataset.check, cb.checked);
-});
-
-const selAll = document.getElementById("sel-all");
-if (selAll) {
-  selAll.addEventListener("change", function () { selectAll(selAll.checked); });
-}
-const selClear = document.getElementById("sel-clear");
-if (selClear) {
-  selClear.addEventListener("click", function () { selectAll(false); });
-}
-for (const act of ["retry", "skip", "delete", "exclude"]) {
-  const b = document.getElementById("batch-" + act);
-  if (b) b.addEventListener("click", function () { batchAction(act); });
-}
-
+/* ============ Actions ============ */
 async function batchAction(act) {
-  const ids = Object.keys(selected).filter(function (k) { return selected[k]; });
+  const ids = selectedIds();
   if (!ids.length) return;
-  if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) { return; }
+  if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) return;
   const btn = document.getElementById("batch-" + act);
   btnBusy(btn, true);
   let ok = 0, failed = 0;
@@ -715,25 +892,24 @@ async function batchAction(act) {
   pollStatus();
 }
 
-async function episodeAction(act, id, btn) {
-  const ep = wantedEpisodes[String(id)];
-  const lang = (ep && ep.missing && ep.missing.length === 1) ? ep.missing[0] : null;
+async function episodeAction(act, id, btn, langOverride) {
+  const it = libraryItems[String(id)] || activityItems[String(id)];
+  let lang = langOverride;
+  if (lang == null) lang = itemLangTarget(it);
   if (act === "delete") {
-    if (!confirm("Delete subtitles for episode " + id + (lang ? " (" + lang + ")" : "") + "?")) { return; }
+    if (!confirm("Delete subtitles for episode " + id + (lang ? " (" + lang + ")" : "") + "?")) return;
   }
   btnBusy(btn, true);
   try {
     const opts = { method: "POST" };
-    if (lang !== null) {
+    if (lang !== null && lang !== undefined) {
       opts.headers = { "Content-Type": "application/json" };
       opts.body = JSON.stringify({ language: lang });
     }
     const { status, data } = await api("/api2/episode/" + id + "/" + act, opts);
     if (status === 200) {
       toast("episode " + id + ": " + act + " recorded", "ok");
-      if (act === "exclude" || act === "unexclude") {
-        selected[String(id)] = false;
-      }
+      if (act === "exclude" || act === "unexclude") selected[String(id)] = false;
       pollLists();
       pollStatus();
     } else {
@@ -745,6 +921,65 @@ async function episodeAction(act, id, btn) {
   btnBusy(btn, false);
 }
 
+document.getElementById("library-list").addEventListener("click", function (ev) {
+  const btn = ev.target.closest("button[data-act]");
+  if (btn) episodeAction(btn.dataset.act, btn.dataset.id, btn);
+});
+document.getElementById("library-list").addEventListener("change", function (ev) {
+  const cb = ev.target.closest("input[data-check]");
+  if (!cb) return;
+  toggleSelect(cb.dataset.check, cb.checked);
+});
+document.getElementById("activity-list").addEventListener("click", function (ev) {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const actIt = activityItems[String(btn.dataset.id)];
+  episodeAction(btn.dataset.act, btn.dataset.id, btn, actIt ? actIt.language : undefined);
+});
+
+const selAllBtn = document.getElementById("sel-all-btn");
+if (selAllBtn) {
+  selAllBtn.addEventListener("click", function () {
+    const n = selectedIds().length;
+    if (n > 0 && n === Object.keys(libraryItems).length) selectAll(false);
+    else selectAll(true);
+  });
+}
+const selClear = document.getElementById("sel-clear");
+if (selClear) {
+  selClear.addEventListener("click", function () { selectAll(false); });
+}
+for (const act of ["retry", "delete", "exclude"]) {
+  const b = document.getElementById("batch-" + act);
+  if (b) b.addEventListener("click", function () { batchAction(act); });
+}
+document.getElementById("fab-retry").addEventListener("click", function () {
+  batchAction("retry");
+});
+
+function updateFab() {
+  const fab = document.getElementById("fab-retry");
+  fab.hidden = !(currentPage === "library" && selectedIds().length > 0);
+}
+
+async function ctlAction(a) {
+  const btn = document.getElementById("act-" + a);
+  btnBusy(btn, true);
+  try {
+    const { status, data } = await api("/api2/" + a, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (status === 200) {
+      toast(a + " ok", "ok");
+      pollStatus();
+    } else {
+      toast(a + " failed: " + esc((data && data.error) || status), "err");
+    }
+  } catch (e) {
+    toast(a + " failed: " + esc(e.message), "err");
+  }
+  btnBusy(btn, false);
+}
+
+/* ============ Settings (config) ============ */
 const DEFAULT_KEYS = ["MAX_EPS_PER_RUN", "TARGET_LANGS", "TRANSLATE_BASE", "TRANSLATE_MODEL", "MAX_TRANSLATE_WORKERS"];
 
 function ctlRow(key, value) {
@@ -753,7 +988,7 @@ function ctlRow(key, value) {
     ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
     : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
   return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
-    '<td><button class="mini" onclick="setConfigKey(' + JSON.stringify(key) + ')">Set</button> ' +
+    '<td style="white-space:nowrap"><button class="mini" onclick="setConfigKey(' + JSON.stringify(key) + ')">Set</button> ' +
     '<button class="mini unset" onclick="unsetConfigKey(' + JSON.stringify(key) + ')">Unset</button></td></tr>';
 }
 
@@ -762,7 +997,7 @@ async function loadControlConfig() {
   try {
     const { status, data } = await api("/api2/config");
     if (status !== 200) {
-      el.innerHTML = '<div class="muted">config unavailable (' + esc((data && data.error) || status) + ")</div>";
+      el.innerHTML = '<div class="empty">config unavailable (' + esc((data && data.error) || status) + ")</div>";
       return;
     }
     const keys = DEFAULT_KEYS.concat(Object.keys(data).sort()).filter(function (k, i, a) {
@@ -775,7 +1010,7 @@ async function loadControlConfig() {
       '<td><button class="mini" onclick="addKey()">Add</button></td></tr></table>';
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = '<div class="muted">config unavailable (' + esc(e.message) + ")</div>";
+    el.innerHTML = '<div class="empty">config unavailable (' + esc(e.message) + ")</div>";
   }
 }
 
@@ -827,26 +1062,9 @@ async function unsetConfigKey(key) {
   }
 }
 
-async function ctlAction(a) {
-  const btn = document.getElementById("act-" + a);
-  btnBusy(btn, true);
-  try {
-    const { status, data } = await api("/api2/" + a, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    if (status === 200) {
-      toast(a + " ok", "ok");
-      pollStatus();
-    } else {
-      toast(a + " failed: " + esc((data && data.error) || status), "err");
-    }
-  } catch (e) {
-    toast(a + " failed: " + esc(e.message), "err");
-  }
-  btnBusy(btn, false);
-}
-
+showPage("library");
 pollStatus();
 pollLists();
-loadControlConfig();
 setInterval(pollStatus, 5000);
 setInterval(pollLists, 20000);
 </script>
