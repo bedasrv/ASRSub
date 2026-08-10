@@ -230,6 +230,34 @@ def load_records_jsonl(path):
     return records
 
 
+def consume_records_jsonl(path):
+    """Read a jsonl and remove the consumed records in place.
+
+    Runs on a single "r+" handle: reads lines, then rewrites any bytes
+    appended after the last readline as the new file tail — the consumed
+    prefix is gone, records added by a concurrent writer survive, and no
+    record is processed twice."""
+    records = []
+    if os.path.exists(path):
+        with open(path, "r+", encoding="utf-8") as fh:
+            while True:
+                line = fh.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+            tail = fh.read()
+            fh.seek(0)
+            fh.truncate(0)
+            fh.write(tail)
+    return records
+
+
 def rewrite_jsonl(path, records):
     """Atomic rewrite of a jsonl file (temp file + os.replace)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -992,7 +1020,8 @@ def _delete_episode_subtitles(cfg, ep_id, langs=None):
 
 
 def consume_actions(cfg):
-    """Process pending actions.jsonl records once per pass; truncate the file.
+    """Process pending actions.jsonl records once per pass; consumed records
+    removed in place (tail-preserving: records appended mid-pass survive).
 
     schema (dashboard control_api_v2): {"ts", "type": "retry"|"skip"|"delete",
     "episode_id": int, "language": null|<code>, "source", "note"} —
@@ -1011,7 +1040,7 @@ def consume_actions(cfg):
     - delete: NAS + TMP SRT files removed, done state cleared -> regenerates,
               then Jellyfin refresh so the removed subtitle is dropped.
     Returns the set of episode ids to exclude this pass (skips)."""
-    records = load_records_jsonl(ACTIONS_FILE)
+    records = consume_records_jsonl(ACTIONS_FILE)
     if not records:
         return set()
     skip_ids, retry_ids, delete_ids = set(), set(), set()
@@ -1070,7 +1099,6 @@ def consume_actions(cfg):
         log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
     for eid in sorted(skip_ids):
         log(f"action: skip episode {eid} (excluded this pass)")
-    rewrite_jsonl(ACTIONS_FILE, [])
     return skip_ids
 
 

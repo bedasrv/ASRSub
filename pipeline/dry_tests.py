@@ -16,6 +16,7 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - jellyfin_refresh: noop without key; item match + refresh POST with key
   - refine_regenerate_uses_asr_cues: regenerate_asr -> asr_cues + cache cue list
   - refine_cache_hit_uses_cues_directly: cache cues used as dicts, no parse_srt
+  - actions_truncate_preserves_appended: tail-preserving consume keeps concurrent appends
 """
 
 import json
@@ -687,6 +688,56 @@ def test_refine_cache_hit_uses_cues_directly():
     assert parse_calls == [], "parse_srt must not be called on cache cues"
     assert [c["text"] for c in cues] == ["hai.", "sou desu."]
     print("PASS refine_cache_hit_uses_cues_directly")
+
+
+
+def test_actions_truncate_preserves_appended():
+    """tail-preserving consumption: the consumed prefix is removed in place,
+    records appended by a concurrent writer survive the consume and are
+    processed on the next pass."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    state_file = os.path.join(d, "state.jsonl")
+    actions_file = os.path.join(d, "actions.jsonl")
+    with open(state_file, "w", encoding="utf-8") as fh:
+        for eid, lang in ((10, "id"), (10, "en"), (20, "id")):
+            fh.write(
+                json.dumps({"sonarrEpisodeId": eid, "language": lang, "status": "done"})
+                + "\n"
+            )
+    with open(actions_file, "w", encoding="utf-8") as fh:
+        fh.write('{"type": "retry", "episode_id": 10, "ts": "t"}\n')
+        fh.write('{"type": "skip", "episode_id": 20, "ts": "t"}\n')
+
+    recs = o.consume_records_jsonl(actions_file)
+    assert len(recs) == 2, recs
+    assert recs[0]["episode_id"] == 10 and recs[1]["episode_id"] == 20, recs
+    with open(actions_file, "r", encoding="utf-8") as fh:
+        assert fh.read() == "", "consumed prefix must be removed in place"
+
+    with open(actions_file, "a", encoding="utf-8") as fh:
+        fh.write('{"type": "retry", "episode_id": 999, "ts": "t2"}\n')
+
+    saved_state, saved_actions = o.STATE_FILE, o.ACTIONS_FILE
+    saved_del, saved_jf = o._delete_episode_subtitles, o.jellyfin_refresh
+    o.STATE_FILE, o.ACTIONS_FILE = state_file, actions_file
+    dels = []
+    o._delete_episode_subtitles = lambda cfg, eid, langs=None: dels.append(eid) or []
+    o.jellyfin_refresh = lambda cfg, media_path, title=None: None
+    try:
+        cfg = build_cfg()
+        cfg["TARGET_LANGS"] = ["id", "en"]
+        cfg["TMP_DIR"] = d
+        skip = o.consume_actions(cfg)
+        assert skip == set(), skip
+        assert dels == [999], "appended record must be processed on next pass"
+        with open(actions_file, "r", encoding="utf-8") as fh:
+            assert fh.read() == "", "tail consumed on the next pass"
+    finally:
+        o.STATE_FILE, o.ACTIONS_FILE = saved_state, saved_actions
+        o._delete_episode_subtitles, o.jellyfin_refresh = saved_del, saved_jf
+    print("PASS actions_truncate_preserves_appended")
 
 
 if __name__ == "__main__":
