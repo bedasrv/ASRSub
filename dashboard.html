@@ -67,16 +67,8 @@ body {
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
 .empty { padding: 28px 16px; text-align: center; color: var(--on-surface-variant); font: var(--t-bm); }
 
-/* ============ App bar ============ */
-.app-bar {
-  position: sticky; top: 0; z-index: 20; height: 64px;
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--outline-variant);
-}
-.app-bar h1 { margin: 0; font: var(--t-tl); letter-spacing: .1px; }
-.bar-actions { display: flex; align-items: center; gap: 10px; }
-#refresh-ind { font: var(--t-bs); color: var(--on-surface-variant); }
-@media (max-width: 419px) { #refresh-ind { display: none; } }
+/* ============ Status refresh indicator ============ */
+#refresh-ind { font-size: 12px; line-height: 16px; font-weight: 400; color: var(--on-surface-variant); margin-left: 8px; }
 .icon-btn {
   position: relative; width: 48px; height: 48px; border-radius: var(--r-full); border: none;
   background: transparent; color: var(--on-surface); font-size: 18px; cursor: pointer;
@@ -87,12 +79,12 @@ body {
 .icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
 /* ============ Pages ============ */
-main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
-@media (min-width: 840px) { main { padding: 24px 24px 64px; } }
+main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
+@media (min-width: 840px) { main { padding: 16px 16px 64px; } }
 .page { display: none; }
 .page.active { display: block; }
-.page-title { font: var(--t-hl); margin: 4px 0 16px; }
-.sec-title { font: var(--t-tm); margin: 20px 0 8px; }
+.page-title { font-size: 15px; font-weight: 600; line-height: 20px; margin: 0 0 8px; }
+.sec-title { font-size: 13px; font-weight: 600; line-height: 18px; margin: 12px 0 6px; }
 #error-banner, #lib-banner { display: none; }
 #error-banner.visible { display: flex; }
 .retry-banner {
@@ -109,18 +101,18 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
   border: 1px solid var(--outline-variant);
   border-radius: var(--r-m);
 }
-.card + .card { margin-top: 12px; }
-.card-head { font: var(--t-tl); padding: 14px 16px 0; }
-.card-body { padding: 4px 16px 14px; }
-.gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 10px; }
+.card + .card { margin-top: 10px; }
+.card-head { font: var(--t-tl); padding: 10px 12px 0; }
+.card-body { padding: 6px 12px 10px; }
+.gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .gpu-name { font: var(--t-tm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gpu-util { font: 600 20px/24px; color: var(--primary); }
-.vram { margin-top: 12px; }
+.vram { margin-top: 8px; }
 .vram-bar { height: 8px; background: var(--surface-variant); border-radius: var(--r-full); overflow: hidden; }
 .vram-fill { height: 100%; background: var(--primary); border-radius: var(--r-full); transition: width .4s; }
 .vram-txt { font: var(--t-bs); color: var(--on-surface-variant); margin-top: 6px; }
-.model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
-.unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .gpu-err { font: var(--t-bs); color: var(--on-surface-variant); margin-top: 8px; word-break: break-word; }
 
 /* ============ Pills / chips / badges ============ */
@@ -138,8 +130,8 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 .dot.stopped { background: var(--on-surface-variant); }
 
 .chip {
-  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px;
-  border-radius: var(--r-s); font: 500 12px/16px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+  border-radius: var(--r-s); font-size: 12px; font-weight: 500; line-height: 16px; white-space: nowrap;
 }
 .chip-wanted { background: var(--primary); color: var(--on-primary); font-weight: 700; }
 .chip-done { background: var(--secondary-container); color: var(--on-secondary-container); }
@@ -183,10 +175,39 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 .mini-btn:hover::after { opacity: .08; }
 .mini-btn:active::after { opacity: .12; }
 
+/* ============ Search toolbar ============ */
+.search-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.search-field { position: relative; flex: 1 1 200px; min-width: 160px; }
+.search-field input[type="search"] {
+  width: 100%; height: 34px; padding: 0 30px 0 12px; border-radius: var(--r-full);
+  border: 1px solid var(--outline-variant); background: var(--surface-container-high); color: var(--on-surface);
+  font: var(--t-bm); outline: none; appearance: none; -webkit-appearance: none;
+}
+.search-field input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.search-field input[type="search"]:focus-visible { border-color: var(--primary); outline: 2px solid var(--primary); outline-offset: 1px; }
+.search-field input[type="search"]::placeholder { color: var(--on-surface-variant); }
+.search-clear {
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  width: 24px; height: 24px; padding: 0; border: none; border-radius: 50%;
+  background: transparent; color: var(--on-surface-variant); font-size: 15px; line-height: 24px; cursor: pointer;
+}
+.search-clear:hover { background: var(--surface-variant); }
+.search-clear:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.search-count { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); white-space: nowrap; }
+.filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.fchip {
+  height: 26px; padding: 0 10px; border-radius: var(--r-full);
+  border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant);
+  font-size: 12px; font-weight: 500; line-height: 16px; cursor: pointer; white-space: nowrap;
+}
+.fchip:hover { background: var(--surface-variant); }
+.fchip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
+.fchip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
 /* ============ Library page ============ */
 #sel-bar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  position: sticky; top: 64px; z-index: 15;
+  position: sticky; top: 0; z-index: 15;
   background: var(--surface-container-high); border-radius: var(--r-xl);
   box-shadow: var(--sh2); padding: 8px 12px; margin-bottom: 12px;
 }
@@ -194,11 +215,11 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 .sel-count { font: var(--t-ll); flex: 1 1 auto; min-width: 84px; }
 #sel-bar .m3-btn { height: 40px; min-width: 0; padding: 0 14px; flex: none; }
 
-#library-list { display: grid; gap: 10px; }
-.lib-row { display: flex; align-items: flex-start; gap: 4px; padding: 4px 12px 12px 4px; }
+#library-list { display: grid; gap: 8px; }
+.lib-row { display: flex; align-items: flex-start; gap: 4px; padding: 6px 10px 8px 4px; }
 .check-wrap {
   display: flex; align-items: center; justify-content: center; flex: none;
-  width: 48px; height: 48px; margin: 8px 4px 0 4px; cursor: pointer;
+  width: 48px; height: 48px; margin: 4px 4px 0 4px; cursor: pointer;
 }
 .m3-check {
   appearance: none; -webkit-appearance: none; width: 20px; height: 20px; flex: none;
@@ -211,39 +232,38 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
   border: solid var(--on-primary); border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
 .m3-check:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.lib-main { flex: 1; min-width: 0; padding-top: 10px; }
-.lib-series { font: var(--t-tl); line-height: 24px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.lib-sub { font: var(--t-bm); color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
-.chips-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-.row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
-.row-actions .m3-btn { flex: 1 1 44%; height: 44px; min-width: 0; padding: 0 8px; font: 500 13px/20px; }
+.lib-main { flex: 1; min-width: 0; padding-top: 8px; }
+.lib-series { font-size: 14px; font-weight: 600; line-height: 20px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lib-sub { font-size: 13px; line-height: 18px; color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.chips-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.row-actions .m3-btn { flex: 1 1 44%; height: 36px; min-width: 0; padding: 0 8px; font-size: 12px; font-weight: 500; line-height: 16px; }
 
 /* ============ Activity page ============ */
-#activity-list { display: grid; gap: 10px; }
-.act-row { display: flex; gap: 12px; padding: 12px 14px; align-items: flex-start; }
-.act-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; margin-top: 8px; background: var(--outline); }
+#activity-list { display: grid; gap: 8px; }
+.act-row { display: flex; gap: 10px; padding: 6px 10px; align-items: flex-start; }
+.act-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; background: var(--outline); }
 .act-dot.done { background: var(--ok); }
 .act-dot.error { background: var(--error); }
 .act-dot.running { background: var(--run); }
 .act-main { flex: 1; min-width: 0; }
-.act-title { font: var(--t-tl); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-title { font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act-code { color: var(--primary); font-weight: 600; }
-.act-sub { font: var(--t-bm); color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
-.act-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.act-sub { font-size: 13px; line-height: 18px; color: var(--on-surface-variant); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
+.act-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .act-time { font: var(--t-bs); color: var(--on-surface-variant); }
 
 /* ============ Status page ============ */
-.ctl-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.ctl-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
 .ctl-actions .m3-btn { flex: 1 1 40%; }
-.counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.counts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-@media (min-width: 600px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
 .tile {
   background: var(--surface-container-low); border: 1px solid var(--outline-variant);
-  border-radius: var(--r-m); padding: 12px 14px;
+  border-radius: var(--r-m); padding: 10px;
 }
-.tile .lbl { font: var(--t-lm); color: var(--on-surface-variant); }
-.tile .val { font: var(--t-tm); margin-top: 4px; word-break: break-word; }
+.tile .lbl { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--on-surface-variant); }
+.tile .val { font-size: 16px; font-weight: 600; line-height: 20px; margin-top: 4px; word-break: break-word; }
 .tile .val.ok { color: var(--ok); }
 .tile .val.err { color: var(--error); }
 .tile .val.run { color: var(--run); }
@@ -291,31 +311,33 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 
 .bottom-nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
-  display: flex; height: 80px; padding-bottom: env(safe-area-inset-bottom);
+  display: flex; height: calc(56px + env(safe-area-inset-bottom));
   background: var(--surface-container); border-top: 1px solid var(--outline-variant);
 }
-.bottom-nav .nav-item { flex: 1; height: 64px; gap: 0; }
+.bottom-nav .nav-item { flex: 1; height: 56px; gap: 0; }
 .bottom-nav .nav-item .ind { width: 64px; height: 32px; }
 .bottom-nav .nav-item.active .ind { background: var(--secondary-container); }
+.bottom-nav .theme-toggle { font-size: 18px; }
 
 .nav-rail { display: none; }
 @media (min-width: 840px) {
   .nav-rail {
     display: flex; flex-direction: column; align-items: center;
-    position: fixed; top: 0; bottom: 0; left: 0; width: 80px; z-index: 30;
+    position: fixed; top: 0; bottom: 0; left: 0; width: 72px; z-index: 30;
     padding-top: 12px; gap: 4px;
     background: var(--surface-container-low); border-right: 1px solid var(--outline-variant);
   }
-  .app-main { margin-left: 80px; }
+  .app-main { margin-left: 72px; }
   .bottom-nav { display: none; }
-  .nav-rail .nav-item { width: 80px; height: 56px; gap: 2px; }
+  .nav-rail .nav-item { width: 72px; height: 48px; gap: 2px; }
   .nav-rail .nav-item .ind { width: 56px; height: 32px; }
   .nav-rail .nav-item.active .ind { background: var(--secondary-container); }
+  .nav-rail .theme-toggle { margin-top: auto; margin-bottom: 10px; width: 40px; height: 40px; flex: none; }
 }
 
 /* ============ FAB ============ */
 .fab {
-  position: fixed; right: 16px; bottom: 96px; z-index: 25;
+  position: fixed; right: 16px; bottom: 80px; z-index: 25;
   display: flex; align-items: center; gap: 8px;
   height: 56px; padding: 0 20px; border-radius: var(--r-l); border: none;
   background: var(--primary-container); color: var(--on-primary-container);
@@ -330,7 +352,7 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 
 /* ============ Toasts ============ */
 #toasts {
-  position: fixed; left: 0; right: 0; bottom: 96px; z-index: 100; pointer-events: none;
+  position: fixed; left: 0; right: 0; bottom: 80px; z-index: 100; pointer-events: none;
   display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 16px;
 }
 @media (min-width: 840px) { #toasts { bottom: 24px; } }
@@ -346,13 +368,6 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
 </head>
 <body>
 <div class="app-main">
-  <header class="app-bar">
-    <h1>ASRSub</h1>
-    <div class="bar-actions">
-      <span id="refresh-ind"></span>
-      <button id="theme-toggle" class="icon-btn" title="Theme" aria-label="Toggle theme">🔄</button>
-    </div>
-  </header>
   <main id="main">
     <div id="error-banner" class="retry-banner visible" role="alert">
       <span>dashboard backend unreachable</span>
@@ -361,6 +376,21 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
     <!-- ============ Library ============ -->
     <section class="page active" id="page-library" aria-label="Library">
       <h2 class="page-title">Library</h2>
+      <div class="search-bar">
+        <div class="search-field">
+          <input type="search" id="lib-search-input" placeholder="Search series, episode, language…" aria-label="Search library">
+          <button type="button" class="search-clear" id="lib-search-clear" aria-label="Clear search" tabindex="-1">×</button>
+        </div>
+        <span class="search-count" id="lib-search-count"></span>
+        <div class="filter-chips" id="lib-filter-chips" role="group" aria-label="Status filter">
+          <button type="button" class="fchip active" data-status="">All</button>
+          <button type="button" class="fchip" data-status="wanted">Wanted</button>
+          <button type="button" class="fchip" data-status="done">Done</button>
+          <button type="button" class="fchip" data-status="error">Error</button>
+          <button type="button" class="fchip" data-status="pending">Pending</button>
+          <button type="button" class="fchip" data-status="excluded">Excluded</button>
+        </div>
+      </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
         <button class="m3-btn text" onclick="pollLibrary()">Retry</button>
@@ -379,6 +409,13 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
     <!-- ============ Activity ============ -->
     <section class="page" id="page-activity" aria-label="Activity">
       <h2 class="page-title">Activity</h2>
+      <div class="search-bar">
+        <div class="search-field">
+          <input type="search" id="act-search-input" placeholder="Search activity…" aria-label="Search activity">
+          <button type="button" class="search-clear" id="act-search-clear" aria-label="Clear search" tabindex="-1">×</button>
+        </div>
+        <span class="search-count" id="act-search-count"></span>
+      </div>
       <div id="activity-list"><div class="empty">loading…</div></div>
     </section>
 
@@ -386,7 +423,7 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
     <section class="page" id="page-status" aria-label="Status">
       <h2 class="page-title">Status</h2>
       <div class="card">
-        <div class="card-head">Pipeline</div>
+        <div class="card-head">Pipeline <span id="refresh-ind"></span></div>
         <div class="card-body">
           <div class="pills">
             <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
@@ -446,6 +483,7 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
     <span>Settings</span>
   </button>
+  <button class="nav-item theme-toggle" aria-label="Theme" title="Theme"></button>
 </nav>
 
 <aside class="nav-rail" aria-label="Pages">
@@ -465,6 +503,7 @@ main { padding: 16px 16px 112px; max-width: 960px; margin: 0 auto; }
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
     <span>Settings</span>
   </button>
+  <button id="theme-toggle" class="icon-btn theme-toggle" aria-label="Theme" title="Theme"></button>
 </aside>
 
 <button id="fab-retry" class="fab" hidden>
@@ -478,7 +517,7 @@ const LS_THEME = "asr-dash-theme";
 const ICONS = { auto: "🔄", light: "☀️", dark: "🌙" };
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
-  document.getElementById("theme-toggle").textContent = ICONS[t] || ICONS.auto;
+  for (const b of document.querySelectorAll(".theme-toggle")) b.textContent = ICONS[t] || ICONS.auto;
 }
 function initTheme() {
   let t = localStorage.getItem(LS_THEME);
@@ -487,13 +526,15 @@ function initTheme() {
   return t;
 }
 let theme = initTheme();
-document.getElementById("theme-toggle").addEventListener("click", function () {
-  const order = ["auto", "light", "dark"];
-  const idx = order.indexOf(theme);
-  theme = order[(idx + 1) % order.length];
-  localStorage.setItem(LS_THEME, theme);
-  applyTheme(theme);
-});
+for (const b of document.querySelectorAll(".theme-toggle")) {
+  b.addEventListener("click", function () {
+    const order = ["auto", "light", "dark"];
+    const idx = order.indexOf(theme);
+    theme = order[(idx + 1) % order.length];
+    localStorage.setItem(LS_THEME, theme);
+    applyTheme(theme);
+  });
+}
 
 function esc(s) {
   const d = document.createElement("div");
@@ -675,7 +716,8 @@ async function pollStatus() {
     if (status !== 200) throw new Error("HTTP " + status);
     document.getElementById("error-banner").classList.remove("visible");
     renderStatus(data);
-    document.getElementById("refresh-ind").textContent = "updated " + relTime(data.updated_at);
+    const ri = document.getElementById("refresh-ind");
+    if (ri) ri.textContent = "updated " + relTime(data.updated_at);
   } catch (e) {
     document.getElementById("error-banner").classList.add("visible");
   }
@@ -721,6 +763,55 @@ function langChip(l) {
   return '<span class="chip ' + cls + '">' + esc(l.language) + (st === "done" ? " ✓" : "") + "</span>";
 }
 
+let libQuery = "";
+let libStatus = "";
+
+function setSearchCount(id, n, m) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = m > 0 ? n + " / " + m : "";
+}
+
+function libRowHTML(it) {
+  const id = String(it.sonarr_episode_id);
+  const excluded = !!libraryExcluded[id];
+  const chips = (it.languages || []).map(langChip).join("");
+  return (
+    '<div class="card lib-row">' +
+    '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + '></label>' +
+    '<div class="lib-main">' +
+    '<div class="lib-series">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="chip chip-wanted">WANTED</span>' : "") + "</div>" +
+    '<div class="lib-sub">' + (it.episode || '<span class="muted">—</span>') + (it.title ? " · " + esc(it.title) : "") + "</div>" +
+    (chips ? '<div class="chips-row">' + chips + "</div>" : "") +
+    '<div class="row-actions">' +
+    '<button class="m3-btn outlined" data-act="retry" data-id="' + id + '">Retry</button>' +
+    '<button class="m3-btn outlined" data-act="skip" data-id="' + id + '">Skip</button>' +
+    '<button class="m3-btn outlined danger" data-act="delete" data-id="' + id + '">Delete</button>' +
+    '<button class="m3-btn outlined" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + id + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
+    "</div>" +
+    "</div></div>"
+  );
+}
+
+function libMatches(it, q) {
+  if (libStatus) {
+    if (libStatus === "wanted") {
+      if (!it.wanted) return false;
+    } else if (!(it.languages || []).some(function (l) {
+      return (l.status || "wanted") === libStatus;
+    })) {
+      return false;
+    }
+  }
+  if (q) {
+    const hay = [
+      it.series, it.episode, it.title, it.sonarr_episode_id,
+      (it.languages || []).map(function (l) { return l.language; }).join(" "),
+    ].join(" ").toLowerCase();
+    if (hay.indexOf(q) < 0) return false;
+  }
+  return true;
+}
+
 function renderLibrary(data) {
   lastLibrary = data;
   const list = document.getElementById("library-list");
@@ -736,35 +827,27 @@ function renderLibrary(data) {
     if (!libraryItems[k]) delete selected[k];
   }
   const bar = document.getElementById("sel-bar");
+  setSearchCount("lib-search-count", 0, items.length);
   if (!items.length) {
     bar.hidden = true;
-    list.innerHTML = '<div class="empty">library is empty — nothing wanted right now</div>';
+    list.innerHTML = libQuery.trim()
+      ? '<div class="empty">no matches for "' + esc(libQuery.trim()) + '"</div>'
+      : '<div class="empty">library is empty — nothing wanted right now</div>';
     updateSelBar();
     return;
   }
   bar.hidden = false;
-  const rows = [];
-  for (const it of items) {
-    const id = String(it.sonarr_episode_id);
-    const excluded = !!libraryExcluded[id];
-    const chips = (it.languages || []).map(langChip).join("");
-    rows.push(
-      '<div class="card lib-row">' +
-      '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + '></label>' +
-      '<div class="lib-main">' +
-      '<div class="lib-series">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="chip chip-wanted">WANTED</span>' : "") + "</div>" +
-      '<div class="lib-sub">' + (it.episode || '<span class="muted">—</span>') + (it.title ? " · " + esc(it.title) : "") + "</div>" +
-      (chips ? '<div class="chips-row">' + chips + "</div>" : "") +
-      '<div class="row-actions">' +
-      '<button class="m3-btn outlined" data-act="retry" data-id="' + id + '">Retry</button>' +
-      '<button class="m3-btn outlined" data-act="skip" data-id="' + id + '">Skip</button>' +
-      '<button class="m3-btn outlined danger" data-act="delete" data-id="' + id + '">Delete</button>' +
-      '<button class="m3-btn outlined" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + id + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
-      "</div>" +
-      "</div></div>"
-    );
+  const q = libQuery.trim().toLowerCase();
+  const filtered = items.filter(function (it) { return libMatches(it, q); });
+  setSearchCount("lib-search-count", filtered.length, items.length);
+  if (!filtered.length) {
+    list.innerHTML = q
+      ? '<div class="empty">no matches for "' + esc(libQuery.trim()) + '"</div>'
+      : '<div class="empty">no matches for the selected filter</div>';
+    updateSelBar();
+    return;
   }
-  list.innerHTML = rows.join("");
+  list.innerHTML = filtered.map(libRowHTML).join("");
   updateSelBar();
 }
 
@@ -806,6 +889,8 @@ async function pollLibrary() {
 
 /* ============ Activity page ============ */
 let activityItems = {};
+let lastActivity = [];
+let actQuery = "";
 
 function actColor(it) {
   if (it.kind === "bazarr") return "done";
@@ -818,13 +903,25 @@ function actColor(it) {
 function renderActivity(data) {
   const al = document.getElementById("activity-list");
   const items = data.items || [];
+  lastActivity = items;
   if (!items.length) {
-    al.innerHTML = '<div class="empty">no recent activity</div>';
+    activityItems = {};
+    setSearchCount("act-search-count", 0, 0);
+    al.innerHTML = actQuery.trim()
+      ? '<div class="empty">no matches for "' + esc(actQuery.trim()) + '"</div>'
+      : '<div class="empty">no recent activity</div>';
     return;
   }
   activityItems = {};
+  const q = actQuery.trim().toLowerCase();
+  const filtered = items.filter(function (it) {
+    if (!q) return true;
+    const hay = [it.series, it.episode, it.title, it.detail].join(" ").toLowerCase();
+    return hay.indexOf(q) >= 0;
+  });
+  setSearchCount("act-search-count", filtered.length, items.length);
   const rows = [];
-  for (const it of items) {
+  for (const it of filtered) {
     if (it.episode_id != null) activityItems[String(it.episode_id)] = it;
     const dot = actColor(it);
     const title = it.title ? esc(it.title) : "";
@@ -855,6 +952,10 @@ function renderActivity(data) {
       "</div></div>"
     );
   }
+  if (!rows.length) {
+    al.innerHTML = '<div class="empty">no matches for "' + esc(actQuery.trim()) + '"</div>';
+    return;
+  }
   al.innerHTML = rows.join("");
 }
 
@@ -867,6 +968,59 @@ async function pollActivity() {
 
 async function pollLists() {
   await Promise.all([pollLibrary(), pollActivity()]);
+}
+
+/* ============ Search / filters ============ */
+const libSearchInput = document.getElementById("lib-search-input");
+if (libSearchInput) {
+  libSearchInput.addEventListener("input", function () {
+    libQuery = libSearchInput.value;
+    if (lastLibrary) renderLibrary(lastLibrary);
+  });
+  libSearchInput.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      libQuery = "";
+      libSearchInput.value = "";
+      if (lastLibrary) renderLibrary(lastLibrary);
+    }
+  });
+}
+const libSearchClear = document.getElementById("lib-search-clear");
+if (libSearchClear) {
+  libSearchClear.addEventListener("click", function () {
+    libQuery = "";
+    if (libSearchInput) { libSearchInput.value = ""; libSearchInput.focus(); }
+    if (lastLibrary) renderLibrary(lastLibrary);
+  });
+}
+for (const c of document.querySelectorAll("#lib-filter-chips .fchip")) {
+  c.addEventListener("click", function () {
+    libStatus = c.dataset.status || "";
+    for (const x of document.querySelectorAll("#lib-filter-chips .fchip")) x.classList.toggle("active", x === c);
+    if (lastLibrary) renderLibrary(lastLibrary);
+  });
+}
+const actSearchInput = document.getElementById("act-search-input");
+if (actSearchInput) {
+  actSearchInput.addEventListener("input", function () {
+    actQuery = actSearchInput.value;
+    renderActivity({ items: lastActivity });
+  });
+  actSearchInput.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      actQuery = "";
+      actSearchInput.value = "";
+      renderActivity({ items: lastActivity });
+    }
+  });
+}
+const actSearchClear = document.getElementById("act-search-clear");
+if (actSearchClear) {
+  actSearchClear.addEventListener("click", function () {
+    actQuery = "";
+    if (actSearchInput) { actSearchInput.value = ""; actSearchInput.focus(); }
+    renderActivity({ items: lastActivity });
+  });
 }
 
 /* ============ Actions ============ */
