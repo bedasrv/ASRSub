@@ -3,11 +3,10 @@
 
 v1 subcommands hit the v1 ControlHandler directly on :8085:
     status config wake pause resume run-once config set/unset
-v2 subcommands point at /api2/* endpoints (control_api_v2.py):
+v2 subcommands point at /api2/* endpoints served by the dashboard FastAPI
+app (control_api_v2.py handlers, default http://127.0.0.1:8080):
     status2 activity wanted episode-retry <id> episode-skip <id>
-    host override: PIPE_API2_HOST (default http://127.0.0.1:8085, where api2 is
-    registered alongside the v1 ControlHandler; use PIPE_API2_HOST=<dashboard
-    url> to test the dashboard-embedded api2).
+    host override: PIPE_API2_HOST.
 """
 import json
 import os
@@ -16,7 +15,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_HOST = "http://127.0.0.1:8085"
-DEFAULT_API2_HOST = "http://127.0.0.1:8085"
+DEFAULT_API2_HOST = "http://127.0.0.1:8080"
 ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
 
 

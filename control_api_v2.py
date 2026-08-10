@@ -536,8 +536,14 @@ class ControlAPIv2:
                 continue
             d = os.path.dirname(base)
             if os.path.isdir(d):
+                files = glob.glob(os.path.join(d, "*.srt")) + glob.glob(
+                    os.path.join(d, "*.ass")
+                )
                 return sorted(
-                    glob.glob(os.path.join(d, "*.srt")) + glob.glob(os.path.join(d, "*.ass"))
+                    f
+                    for f in files
+                    if ".test." not in os.path.basename(f)
+                    and ".orig" not in os.path.basename(f)
                 )
         return []
 
@@ -661,7 +667,22 @@ class ControlAPIv2:
             key=lambda it: (_parse_ts(it["ts"]) if _parse_ts(it["ts"]) is not None else -1),
             reverse=True,
         )
-        return 200, {"items": items[:50], "updated_at": _now_iso()}
+        seen = set()
+        for it in items:
+            if it.get("kind") == "pipeline" and it.get("episode_id") is not None:
+                ts = _parse_ts(it.get("ts"))
+                if ts is not None:
+                    seen.add((it["episode_id"], int(ts // 300)))
+        deduped = []
+        for it in items:
+            key = None
+            if it.get("kind") != "pipeline" and it.get("episode_id") is not None:
+                ts = _parse_ts(it.get("ts"))
+                if ts is not None:
+                    key = (it["episode_id"], int(ts // 300))
+            if it.get("kind") == "pipeline" or key is None or key not in seen:
+                deduped.append(it)
+        return 200, {"items": deduped[:50], "updated_at": _now_iso()}
 
     def _h_wanted(self, body, id=None):
         wanted_json = self._bazarr_wanted()
