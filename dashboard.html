@@ -105,6 +105,29 @@ h2 { font-size: 15px; margin: 14px 0 6px; }
 .ep-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.btn-retry { border-color: var(--accent); color: var(--accent); }
 button.btn-skip { border-color: var(--err); color: var(--err); }
+button.btn-del { border-color: var(--err); color: var(--err); }
+button.btn-exclude { border-color: var(--new); color: var(--fg); }
+button.btn-excluded { border-color: var(--run); color: var(--run); }
+.badge.excluded { background: #7c3aed; }
+.act-del {
+  background: var(--card); border: 1px solid var(--err); color: var(--err);
+  border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer;
+  margin-left: 4px; flex: none;
+}
+.act-del:disabled { opacity: 0.45; cursor: not-allowed; }
+#wanted-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px; margin-bottom: 8px; font-size: 13px;
+}
+#wanted-toolbar .tb-count { color: var(--new); font-size: 12px; }
+#wanted-toolbar label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+#wanted-toolbar button {
+  background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+#wanted-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.ep-check { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
 
 #activity-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
 .activity {
@@ -232,7 +255,18 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
 
   <section class="sec" id="sec-wanted">
     <h2 class="sec-head" data-sec="wanted">Wanted <span class="chev">▾</span></h2>
-    <div class="sec-body"><div id="wanted-list"><div class="muted">loading…</div></div></div>
+    <div class="sec-body">
+      <div id="wanted-toolbar">
+        <label><input type="checkbox" id="sel-all" class="ep-check"> all</label>
+        <span class="tb-count" id="sel-count">0 selected</span>
+        <button id="batch-retry" data-batch="retry">Retry</button>
+        <button id="batch-skip" data-batch="skip">Skip</button>
+        <button id="batch-delete" data-batch="delete">Delete</button>
+        <button id="batch-exclude" data-batch="exclude">Exclude</button>
+        <button id="sel-clear">Clear</button>
+      </div>
+      <div id="wanted-list"><div class="muted">loading…</div></div>
+    </div>
   </section>
 
   <section class="sec" id="sec-activity">
@@ -464,39 +498,91 @@ function renderEpisodes(episodes) {
   el.innerHTML = rows.join("");
 }
 
+let selected = {};
+let exclusions = {};
+
 function renderWanted(data) {
   const wl = document.getElementById("wanted-list");
   const items = data.items || [];
   wantedEpisodes = {};
-  for (const it of items) wantedEpisodes[String(it.sonarrEpisodeId)] = it;
+  exclusions = data.exclusions || {};
+  for (const it of items) {
+    wantedEpisodes[String(it.sonarrEpisodeId)] = it;
+    if (!(String(it.sonarrEpisodeId) in selected)) selected[String(it.sonarrEpisodeId)] = false;
+  }
+  for (const k of Object.keys(selected)) {
+    if (!wantedEpisodes[k]) delete selected[k];
+  }
   if (!items.length) {
     wl.innerHTML = '<div class="muted">no wanted episodes</div>';
+    updateToolbar();
     return;
   }
   const cards = [];
   for (const ep of items) {
     const st = ep.state || {};
     const q = ep.quality || {};
+    const key = String(ep.sonarrEpisodeId);
+    const excluded = !!exclusions[key];
     const flags = [q.source, q.resolution, q.codec, q.audio].filter(Boolean)
       .map(function (f) { return '<span class="badge q">' + esc(f) + "</span>"; }).join("");
     const missing = (ep.missing || []).map(function (l) { return esc(l); }).join(", ");
+    const subs = ep.subtitle_files || [];
+    const subTxt = subs.length
+      ? '<div class="ep-title" style="font-size:11px">' + esc(subs.length) + " sub file(s): " + esc(subs[0].split("/").pop()) + "</div>"
+      : "";
     cards.push(
       '<div class="card">' +
-      '<div class="ep-head"><span class="ep-series">' + esc(ep.series) + '</span><span class="ep-code">' + esc(ep.episode) + "</span></div>" +
+      '<div class="ep-head"><span style="display:flex;align-items:center;gap:8px;min-width:0">' +
+      '<input type="checkbox" class="ep-check" data-check="' + ep.sonarrEpisodeId + '"' + (selected[key] ? " checked" : "") + ">" +
+      '<span class="ep-series">' + esc(ep.series) + "</span></span>" +
+      '<span class="ep-code">' + esc(ep.episode) + "</span></div>" +
       '<div class="ep-title">' + esc(ep.title) + "</div>" +
+      subTxt +
       '<div class="ep-meta">' +
       '<div class="flags">' + flags +
       '<span class="badge ' + statusClass(st.status) + '">' + esc(st.status) + "</span>" +
+      (excluded ? '<span class="badge excluded">EXCLUDED</span>' : "") +
       (ep.refine ? '<span class="badge ai">refined</span>' : "") +
       "</div>" +
       '<span class="missing">missing: ' + (missing || "none") + "</span></div>" +
       '<div class="ep-actions">' +
       '<button class="btn-retry" data-act="retry" data-id="' + ep.sonarrEpisodeId + '">Retry</button>' +
       '<button class="btn-skip" data-act="skip" data-id="' + ep.sonarrEpisodeId + '">Skip</button>' +
+      '<button class="btn-del" data-act="delete" data-id="' + ep.sonarrEpisodeId + '">Delete</button>' +
+      '<button class="' + (excluded ? "btn-excluded" : "btn-exclude") + '" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + ep.sonarrEpisodeId + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
       "</div></div>"
     );
   }
   wl.innerHTML = cards.join("");
+  updateToolbar();
+}
+
+function updateToolbar() {
+  const boxes = document.querySelectorAll('#wanted-list .ep-check');
+  const sel = Object.keys(selected).filter(function (k) { return selected[k]; });
+  document.getElementById("sel-count").textContent = sel.length + " selected";
+  const sa = document.getElementById("sel-all");
+  if (sa) {
+    sa.checked = boxes.length > 0 && sel.length === boxes.length;
+    sa.indeterminate = sel.length > 0 && sel.length < boxes.length;
+  }
+  for (const act of ["retry", "skip", "delete", "exclude"]) {
+    const b = document.getElementById("batch-" + act);
+    if (b) b.disabled = sel.length === 0;
+  }
+}
+
+function toggleSelect(id, on) {
+  selected[String(id)] = !!on;
+  updateToolbar();
+}
+
+function selectAll(on) {
+  for (const k of Object.keys(selected)) selected[k] = on;
+  const boxes = document.querySelectorAll('#wanted-list .ep-check');
+  for (const b of boxes) b.checked = on;
+  updateToolbar();
 }
 
 function renderActivity(data) {
@@ -519,7 +605,9 @@ function renderActivity(data) {
       (it.ai ? '<span class="badge ai">AI</span>' : "") +
       (it.language ? '<span class="badge lang">' + esc(it.language) + "</span>" : "") +
       (it.elapsed_s != null ? "<span>" + fmtDur(it.elapsed_s) + "</span>" : "") +
-      "<span>" + (relTime(it.ts) || esc(it.relative || "")) + "</span></div></div>"
+      "<span>" + (relTime(it.ts) || esc(it.relative || "")) + "</span>" +
+      (it.episode_id != null ? '<button class="act-del" data-act="delete" data-id="' + it.episode_id + '">Del</button>' : "") +
+      "</div></div>"
     );
   }
   al.innerHTML = rows.join("");
@@ -574,11 +662,53 @@ async function pollLists() {
   } catch (e) {}
 }
 
-document.getElementById("wanted-list").addEventListener("click", function (ev) {
-  const btn = ev.target.closest("button[data-act]");
-  if (!btn) return;
-  episodeAction(btn.dataset.act, btn.dataset.id, btn);
+for (const el of ["wanted-list", "activity-list"]) {
+  document.getElementById(el).addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-act]");
+    if (!btn) return;
+    episodeAction(btn.dataset.act, btn.dataset.id, btn);
+  });
+}
+
+document.getElementById("wanted-list").addEventListener("change", function (ev) {
+  const cb = ev.target.closest("input[data-check]");
+  if (!cb) return;
+  toggleSelect(cb.dataset.check, cb.checked);
 });
+
+const selAll = document.getElementById("sel-all");
+if (selAll) {
+  selAll.addEventListener("change", function () { selectAll(selAll.checked); });
+}
+const selClear = document.getElementById("sel-clear");
+if (selClear) {
+  selClear.addEventListener("click", function () { selectAll(false); });
+}
+for (const act of ["retry", "skip", "delete", "exclude"]) {
+  const b = document.getElementById("batch-" + act);
+  if (b) b.addEventListener("click", function () { batchAction(act); });
+}
+
+async function batchAction(act) {
+  const ids = Object.keys(selected).filter(function (k) { return selected[k]; });
+  if (!ids.length) return;
+  const btn = document.getElementById("batch-" + act);
+  btnBusy(btn, true);
+  let ok = 0, failed = 0;
+  for (const id of ids) {
+    try {
+      const { status } = await api("/api2/episode/" + id + "/" + act, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      if (status === 200) ok++; else failed++;
+    } catch (e) { failed++; }
+  }
+  btnBusy(btn, false);
+  toast(act + " batch: " + ok + " ok" + (failed ? ", " + failed + " failed" : ""), failed ? "err" : "ok");
+  if (act === "exclude" || !failed) selectAll(false);
+  pollLists();
+  pollStatus();
+}
 
 async function episodeAction(act, id, btn) {
   btnBusy(btn, true);
@@ -586,6 +716,9 @@ async function episodeAction(act, id, btn) {
     const { status, data } = await api("/api2/episode/" + id + "/" + act, { method: "POST" });
     if (status === 200) {
       toast("episode " + id + ": " + act + " recorded", "ok");
+      if (act === "exclude" || act === "unexclude") {
+        selected[String(id)] = false;
+      }
       pollLists();
       pollStatus();
     } else {

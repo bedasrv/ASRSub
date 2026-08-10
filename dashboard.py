@@ -71,6 +71,32 @@ def api2_episode_skip(ep_id: str, body: dict = None):
     )
 
 
+@app.post("/api2/episode/{ep_id}/delete")
+def api2_episode_delete(ep_id: str, body: dict = None):
+    return _resp(
+        *api2.handle("POST", f"/api2/episode/{ep_id}/delete", body or {}, token=_token())
+    )
+
+
+@app.post("/api2/episode/{ep_id}/exclude")
+def api2_episode_exclude(ep_id: str, body: dict = None):
+    return _resp(
+        *api2.handle("POST", f"/api2/episode/{ep_id}/exclude", body or {}, token=_token())
+    )
+
+
+@app.post("/api2/episode/{ep_id}/unexclude")
+def api2_episode_unexclude(ep_id: str, body: dict = None):
+    return _resp(
+        *api2.handle("POST", f"/api2/episode/{ep_id}/unexclude", body or {}, token=_token())
+    )
+
+
+@app.get("/api2/exclusions")
+def api2_exclusions():
+    return _resp(*api2.handle("GET", "/api2/exclusions"))
+
+
 @app.post("/api2/pause")
 def api2_pause():
     return _resp(*api2.handle("POST", "/api2/pause", {}, token=_token()))

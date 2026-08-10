@@ -14,8 +14,12 @@ Endpoints (all JSON; errors as {"error": ...}):
     GET  /api2/wanted     Bazarr wanted list with quality flags + missing langs + per-episode state
     GET  /api2/config     pipeline.env + config.overrides.json merged, secrets masked
     GET  /api2/health     {"ok": true}
-    POST /api2/episode/{id}/retry   append a retry record to actions.jsonl (see schema below)
-    POST /api2/episode/{id}/skip    append a skip record to actions.jsonl
+    GET  /api2/exclusions  list persistent exclusion records (exclusions.jsonl)
+    POST /api2/episode/{id}/retry     append a retry record to actions.jsonl (see schema below)
+    POST /api2/episode/{id}/skip      append a skip record to actions.jsonl
+    POST /api2/episode/{id}/delete    append a delete record to actions.jsonl
+    POST /api2/episode/{id}/exclude   add a persistent exclusion (exclusions.jsonl)
+    POST /api2/episode/{id}/unexclude remove an exclusion
     POST /api2/pause | resume | run-once | wake   proxy to the v1 ControlHandler on :8085
 
 Auth: POST endpoints require X-API-Key == CONTROL_API_KEY (same rule as the v1
@@ -25,15 +29,24 @@ server proxies in-process and supplies the token itself.
 
 actions.jsonl schema (runtime file, never committed):
     one JSON object per line, appended atomically:
-    {"ts": "<ISO8601 UTC>", "type": "retry"|"skip", "episode_id": <int>,
+    {"ts": "<ISO8601 UTC>", "type": "retry"|"skip"|"delete", "episode_id": <int>,
      "language": null|<lang code>, "source": "dashboard"|"pctl", "note": ""}
     episode_id corresponds to sonarrEpisodeId in state.jsonl.
-    - retry: re-process the episode for the listed language(s); language null = all missing.
-    - skip:  treat as skipped; do not process it again.
+    - retry:  re-process the episode for the listed language(s); language null = all missing.
+    - skip:   treat as skipped; do not process it again.
+    - delete: remove the episode's subtitle files from disk (see list_subtitle_files);
+              language null = all languages.
     Consumers (rewrite track) read the tail, honor each record once, and may
     truncate the file once caught up.
+
+exclusions.jsonl schema (runtime file, never committed):
+    one JSON object per line, rewritten atomically on change:
+    {"episode_id": <int>, "series_id": <int|null>, "reason": "<str>", "ts": "<ISO8601 UTC>"}
+    Excluded episodes are never picked up by the pipeline again; the wanted list
+    keeps showing them (EXCLUDED badge) so the exclusion can be undone later.
 """
 
+import glob
 import json
 import os
 import re
@@ -51,6 +64,7 @@ OVERRIDE_FILE = os.path.join(CFG_DIR, "config.overrides.json")
 STATE_FILE = os.path.join(CFG_DIR, "state.jsonl")
 REFINE_FILE = os.path.join(CFG_DIR, "refine_state.jsonl")
 ACTIONS_FILE = os.path.join(CFG_DIR, "actions.jsonl")
+EXCLUSIONS_FILE = os.path.join(CFG_DIR, "exclusions.jsonl")
 
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 EP_LABEL_RE = re.compile(r"(\d+)x(\d+)")
@@ -115,6 +129,8 @@ class ControlAPIv2:
         "STATE_FILE": STATE_FILE,
         "REFINE_FILE": REFINE_FILE,
         "ACTIONS_FILE": ACTIONS_FILE,
+        "EXCLUSIONS_FILE": EXCLUSIONS_FILE,
+        "NAS_MEDIA_ROOT": "/mnt/nas/share/media",
         "CONTROL_URL": "http://127.0.0.1:8085",
         "LLAMA_URL": "http://127.0.0.1:8011",
         "NVIDIA_SMI_CMD": [
@@ -135,8 +151,12 @@ class ControlAPIv2:
             "/api2/wanted": self._h_wanted,
             "/api2/config": self._h_config,
             "/api2/health": self._h_health,
+            "/api2/exclusions": self._h_exclusions,
             "/api2/episode/{id}/retry": self._h_retry,
             "/api2/episode/{id}/skip": self._h_skip,
+            "/api2/episode/{id}/delete": self._h_delete,
+            "/api2/episode/{id}/exclude": self._h_exclude,
+            "/api2/episode/{id}/unexclude": self._h_unexclude,
             "/api2/pause": self._h_pause,
             "/api2/resume": self._h_resume,
             "/api2/run-once": self._h_run_once,
@@ -419,6 +439,7 @@ class ControlAPIv2:
                     {
                         "ts": h.get("parsed_timestamp"),
                         "kind": "bazarr",
+                        "episode_id": h.get("sonarrEpisodeId"),
                         "series": h.get("seriesTitle"),
                         "episode": self._episode_number_label(h.get("episode_number")),
                         "title": h.get("episodeTitle"),
@@ -477,6 +498,8 @@ class ControlAPIv2:
                     data.get("seasonNumber"), data.get("episodeNumber")
                 ),
                 "title": data.get("title"),
+                "series_id": data.get("seriesId"),
+                "path": ef.get("path"),
                 "quality": {"resolution": q.get("resolution"), "source": q.get("name")},
                 "media": {
                     "video_codec": mi.get("videoCodec"),
@@ -486,6 +509,37 @@ class ControlAPIv2:
             }
         self._cache[("ep", ep_id)] = (now, det)
         return det
+
+    def list_subtitle_files(self, episode):
+        """Resolve SRT/ASS subtitle files on disk for an episode.
+
+        episode: a Sonarr episode dict (with episodeFile.path) or a detail dict
+        from _ep_detail. Sonarr container paths under /data/... are mapped onto
+        the NAS mount NAS_MEDIA_ROOT; the mapped directory wins when it exists,
+        otherwise the raw path is tried. Returns a sorted list of absolute
+        .srt/.ass file paths (empty when the episode has no files or the mount
+        is not visible from this host).
+        """
+        path = None
+        if isinstance(episode, dict):
+            ef = episode.get("episodeFile") or {}
+            path = episode.get("path") or ef.get("path")
+        if not path:
+            return []
+        root = self.opts.get("NAS_MEDIA_ROOT", "/mnt/nas/share/media").rstrip("/")
+        candidates = []
+        if isinstance(path, str) and path.startswith("/data/"):
+            candidates.append(root + path[len("/data"):])
+        candidates.append(path)
+        for base in candidates:
+            if not isinstance(base, str) or not base:
+                continue
+            d = os.path.dirname(base)
+            if os.path.isdir(d):
+                return sorted(
+                    glob.glob(os.path.join(d, "*.srt")) + glob.glob(os.path.join(d, "*.ass"))
+                )
+        return []
 
     @staticmethod
     def _episode_label(season_num, ep_num):
@@ -520,6 +574,11 @@ class ControlAPIv2:
         flags["audio"] = m.get("audio_codec")
         flags["source"] = q.get("source")
         return flags
+
+    def _subs_cached(self, ep_id, det):
+        return self._cached(
+            ("subs", ep_id), 15, lambda: self.list_subtitle_files(det)
+        )
 
     def _resolve_label(self, ep_id, wanted_data):
         for item in wanted_data:
@@ -586,6 +645,7 @@ class ControlAPIv2:
                 {
                     "ts": e.get("ts"),
                     "kind": "pipeline",
+                    "episode_id": ep_id,
                     "series": series,
                     "episode": episode,
                     "title": title,
@@ -646,19 +706,26 @@ class ControlAPIv2:
             items.append(
                 {
                     "sonarrEpisodeId": ep_id,
+                    "series_id": it.get("sonarrSeriesId"),
                     "series": it.get("seriesTitle"),
                     "episode": self._episode_number_label(it.get("episode_number")),
                     "title": it.get("episodeTitle"),
                     "missing": missing,
                     "quality": self._quality_flags(details.get(ep_id)),
+                    "subtitle_files": self._subs_cached(ep_id, details.get(ep_id)),
                     "state": state,
                     "refine": (
                         {"status": rf.get("status"), "ts": rf.get("ts")} if rf else None
                     ),
                 }
             )
-        return 200, {"total": wanted_json.get("total", len(items)), "items": items,
-                     "updated_at": _now_iso()}
+        exclusions = {str(r.get("episode_id")): r for r in self._read_exclusions()}
+        return 200, {
+            "total": wanted_json.get("total", len(items)),
+            "items": items,
+            "exclusions": exclusions,
+            "updated_at": _now_iso(),
+        }
 
     def _append_action(self, kind, ep_id, body):
         lang = None
@@ -686,6 +753,81 @@ class ControlAPIv2:
 
     def _h_skip(self, body, id=None):
         return self._append_action("skip", id, body)
+
+    def _h_delete(self, body, id=None):
+        return self._append_action("delete", id, body)
+
+    def _read_exclusions(self):
+        recs = []
+        try:
+            with open(self.opts["EXCLUSIONS_FILE"], encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(e, dict) and e.get("episode_id") is not None:
+                        recs.append(e)
+        except OSError:
+            pass
+        return recs
+
+    def _write_exclusions(self, recs):
+        path = self.opts["EXCLUSIONS_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for r in recs:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+
+    def _ep_series_id(self, ep_id, wanted_data):
+        for it in wanted_data:
+            if it.get("sonarrEpisodeId") == ep_id:
+                return it.get("sonarrSeriesId")
+        return None
+
+    def _h_exclusions(self, body, id=None):
+        recs = self._read_exclusions()
+        return 200, {"total": len(recs), "exclusions": recs, "updated_at": _now_iso()}
+
+    def _h_exclude(self, body, id=None):
+        reason = ""
+        if isinstance(body, dict) and isinstance(body.get("reason"), str):
+            reason = body["reason"]
+        for r in self._read_exclusions():
+            if r.get("episode_id") == id:
+                return 200, {"ok": True, "already_excluded": True, "record": r}
+        wanted = self._bazarr_wanted()
+        series_id = self._ep_series_id(id, wanted.get("data", []) or [])
+        if series_id is None:
+            series_id = self._ep_detail(id).get("series_id")
+        rec = {
+            "episode_id": id,
+            "series_id": series_id,
+            "reason": reason,
+            "ts": _now_iso(),
+        }
+        try:
+            recs = self._read_exclusions()
+            recs.append(rec)
+            self._write_exclusions(recs)
+        except OSError as exc:
+            raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+        return 200, {"ok": True, "record": rec}
+
+    def _h_unexclude(self, body, id=None):
+        recs = self._read_exclusions()
+        before = len(recs)
+        recs = [r for r in recs if r.get("episode_id") != id]
+        try:
+            self._write_exclusions(recs)
+        except OSError as exc:
+            raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+        return 200, {"ok": True, "removed": before - len(recs)}
 
     def _daemon_action(self, path):
         code, data = self._daemon("POST", path)
@@ -749,3 +891,15 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+if __name__ == "__main__":
+    import sys
+
+    from http.server import ThreadingHTTPServer
+
+    port = int(os.environ.get("API2_PORT") or (sys.argv[1] if len(sys.argv) > 1 else "8086"))
+    server = ThreadingHTTPServer(("127.0.0.1", port), _RequestHandler)
+    ControlAPIv2().register(server)
+    print(f"api2 listening on 127.0.0.1:{port} (GET /api2/status, /api2/health)", flush=True)
+    server.serve_forever()
