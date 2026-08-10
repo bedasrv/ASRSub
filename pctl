@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Control CLI for the ASR pipeline orchestrator control API (stdlib only)."""
+"""Control CLI for the ASR pipeline orchestrator control API (stdlib only).
+
+v1 subcommands hit the v1 ControlHandler directly on :8085:
+    status config wake pause resume run-once config set/unset
+v2 subcommands point at /api2/* endpoints served by the dashboard FastAPI
+app (control_api_v2.py handlers, default http://127.0.0.1:8080):
+    status2 activity wanted episode-retry <id> episode-skip <id>
+    host override: PIPE_API2_HOST.
+"""
 import json
 import os
 import sys
@@ -7,11 +15,16 @@ import urllib.error
 import urllib.request
 
 DEFAULT_HOST = "http://127.0.0.1:8085"
+DEFAULT_API2_HOST = "http://127.0.0.1:8080"
 ENV_FILE = "/home/user/.config/asr-pipeline/pipeline.env"
 
 
 def get_host():
     return os.environ.get("PIPE_HOST", DEFAULT_HOST)
+
+
+def get_api2_host():
+    return os.environ.get("PIPE_API2_HOST", DEFAULT_API2_HOST)
 
 
 def read_token():
@@ -29,8 +42,8 @@ def read_token():
     return None
 
 
-def request(method, path, token=None, body=None):
-    req = urllib.request.Request(get_host() + path, method=method)
+def request(method, path, token=None, body=None, host=None):
+    req = urllib.request.Request((host or get_host()) + path, method=method)
     req.add_header("Content-Type", "application/json")
     if token is not None:
         req.add_header("X-API-Key", token)
@@ -57,7 +70,7 @@ def fail(msg):
 
 def main(argv):
     if not argv:
-        fail("usage: pctl <status|config|wake|pause|resume|run-once|config set K=V...|config unset K...>")
+        fail("usage: pctl <status|config|wake|pause|resume|run-once|status2|activity|wanted|episode-retry ID|episode-skip ID|config set K=V...|config unset K...>")
     cmd = argv[0]
     if cmd == "status":
         code, body = request("GET", "/status")
@@ -94,6 +107,28 @@ def main(argv):
     if cmd in ("wake", "pause", "resume", "run-once"):
         token = read_token() if cmd != "wake" else None
         code, body = request("POST", "/" + cmd, token=token)
+        print(json.dumps(body, indent=2))
+        sys.exit(0 if code == 200 else 1)
+    if cmd in ("status2", "activity", "wanted"):
+        path = {
+            "status2": "/api2/status",
+            "activity": "/api2/activity",
+            "wanted": "/api2/wanted",
+        }[cmd]
+        code, body = request("GET", path, host=get_api2_host())
+        print(json.dumps(body, indent=2))
+        sys.exit(0 if code == 200 else 1)
+    if cmd in ("episode-retry", "episode-skip"):
+        if len(argv) < 2:
+            fail(f"usage: pctl {cmd} <sonarrEpisodeId>")
+        ep = argv[1]
+        if not ep.isdigit():
+            fail(f"episode id must be an integer, got: {ep}")
+        token = read_token()
+        if not token:
+            fail("PIPE_TOKEN env or CONTROL_API_KEY in pipeline.env required")
+        action = "retry" if cmd == "episode-retry" else "skip"
+        code, body = request("POST", f"/api2/episode/{ep}/{action}", token=token, host=get_api2_host())
         print(json.dumps(body, indent=2))
         sys.exit(0 if code == 200 else 1)
     fail(f"unknown command: {cmd}")

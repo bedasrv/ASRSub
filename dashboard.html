@@ -2,7 +2,7 @@
 <html lang="en" data-theme="auto">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ASRSub</title>
 <style>
 :root {
@@ -38,77 +38,133 @@ header h1 { font-size: 18px; margin: 0; }
   background: var(--card); border: 1px solid var(--border); color: var(--fg);
   border-radius: 8px; padding: 6px 10px; font-size: 14px; cursor: pointer;
 }
-main { padding: 10px; max-width: 820px; margin: 0 auto; }
+main { padding: 10px; max-width: 860px; margin: 0 auto; }
 #error-banner {
   display: none; background: var(--err); color: #fff; padding: 10px 14px;
   border-radius: 8px; margin-bottom: 12px; font-size: 14px;
 }
 #error-banner.visible { display: block; }
-.summary {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px;
-}
-.stat {
-  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px; text-align: center;
-}
-.stat .num { font-size: 22px; font-weight: 700; }
-.stat .lbl { font-size: 12px; color: var(--new); margin-top: 2px; }
-.stat.wanted .num { color: var(--accent); }
-.stat.done .num { color: var(--ok); }
-.stat.error .num { color: var(--err); }
-.stat.running .num { color: var(--run); }
-.pills { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
-.pill {
-  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
-  padding: 4px 10px; font-size: 13px; display: flex; align-items: center; gap: 6px;
-}
-.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.dot.up { background: var(--ok); }
-.dot.down { background: var(--err); }
-.dot.running { background: var(--run); }
-.dot.stopped { background: var(--new); }
 h2 { font-size: 15px; margin: 14px 0 6px; }
 .sec-head {
   display: flex; align-items: center; justify-content: space-between;
-  cursor: pointer; user-select: none;
+  cursor: pointer; user-select: none; padding: 4px 2px;
 }
 .chev { transition: transform .15s; font-size: 12px; color: var(--new); }
 .sec.collapsed .sec-body { display: none; }
 .sec.collapsed .chev { transform: rotate(-90deg); }
-#wanted-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .card {
   background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
 }
+.grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px;
+}
+.stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+.stat .lbl { font-size: 11px; color: var(--new); }
+.stat .val { font-size: 15px; font-weight: 700; margin-top: 2px; word-break: break-word; }
+.stat .val.ok { color: var(--ok); }
+.stat .val.err { color: var(--err); }
+.stat .val.run { color: var(--run); }
+.stat .val.accent { color: var(--accent); }
+.pills { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.pill {
+  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+  padding: 4px 10px; font-size: 13px; display: flex; align-items: center; gap: 6px;
+}
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.dot.up { background: var(--ok); }
+.dot.down { background: var(--err); }
+.dot.running { background: var(--run); }
+.dot.stopped { background: var(--new); }
+.badge {
+  border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 600; color: #fff;
+  white-space: nowrap;
+}
+.badge.lang { background: var(--accent); }
+.badge.new { background: var(--new); }
+.badge.done { background: var(--ok); }
+.badge.error { background: var(--err); }
+.badge.running { background: var(--run); }
+.badge.ai { background: #9333ea; }
+.badge.q { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
+.muted { color: var(--new); }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+
+#wanted-list { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .ep-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .ep-series { font-weight: 700; font-size: 15px; }
 .ep-code { font-size: 13px; color: var(--accent); font-weight: 600; white-space: nowrap; }
 .ep-title { font-size: 13px; color: var(--new); margin: 4px 0; }
 .ep-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .missing { font-size: 12px; color: var(--new); }
-.badge {
-  border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600; color: #fff;
+.flags { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.ep-actions { display: flex; gap: 8px; margin-top: 8px; }
+.ep-actions button {
+  flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 8px; padding: 9px 10px; font-size: 14px; cursor: pointer; min-height: 38px;
 }
-.badge.new { background: var(--new); }
-.badge.done { background: var(--ok); }
-.badge.error { background: var(--err); }
-.badge.running { background: var(--run); }
-.elapsed { font-size: 12px; color: var(--new); }
-#recent-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
-.recent {
+.ep-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.btn-retry { border-color: var(--accent); color: var(--accent); }
+button.btn-skip { border-color: var(--err); color: var(--err); }
+button.btn-del { border-color: var(--err); color: var(--err); }
+button.btn-exclude { border-color: var(--new); color: var(--fg); }
+button.btn-excluded { border-color: var(--run); color: var(--run); }
+.badge.excluded { background: #7c3aed; }
+.act-del {
+  background: var(--card); border: 1px solid var(--err); color: var(--err);
+  border-radius: 6px; padding: 3px 7px; font-size: 11px; cursor: pointer;
+  margin-left: 4px; flex: none;
+}
+.act-del:disabled { opacity: 0.45; cursor: not-allowed; }
+#wanted-toolbar {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px; margin-bottom: 8px; font-size: 13px;
+}
+#wanted-toolbar .tb-count { color: var(--new); font-size: 12px; }
+#wanted-toolbar label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+#wanted-toolbar button {
+  background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+#wanted-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.ep-check { width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+
+#activity-list { display: grid; grid-template-columns: 1fr; gap: 6px; }
+.activity {
   background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-  padding: 6px 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 7px 9px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
   font-size: 13px;
 }
-.recent .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.recent .ep-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent .right { display: flex; align-items: center; gap: 10px; color: var(--new); font-size: 12px; white-space: nowrap; }
-.muted { color: var(--new); }
-footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0 30px; }
+.activity .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.activity .act-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity .act-detail { font-size: 12px; color: var(--new); }
+.activity .right { display: flex; align-items: center; gap: 6px; color: var(--new); font-size: 12px; white-space: nowrap; flex: none; }
+
+#episodes-list { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 8px; }
+.episode-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 9px; font-size: 13px;
+}
+.episode-row .left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.episode-row .ep-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.episode-row .right { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--new); white-space: nowrap; flex: none; }
+
+#gpu-card .gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+#gpu-card .gpu-name { font-weight: 700; }
+#gpu-card .gpu-util { font-size: 18px; font-weight: 700; color: var(--accent); }
+.vram { margin: 8px 0 2px; }
+.vram-bar {
+  height: 14px; background: var(--border); border-radius: 999px; overflow: hidden;
+}
+.vram-fill { height: 100%; background: var(--accent); border-radius: 999px; transition: width .4s; }
+.vram-txt { font-size: 12px; color: var(--new); margin-top: 4px; }
+.model-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 
 #ctl-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 #ctl-actions button {
   background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer;
+  border-radius: 8px; padding: 9px 14px; font-size: 14px; cursor: pointer; min-height: 40px;
 }
 #ctl-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 #ctl-actions button#act-pause { border-color: var(--err); color: var(--err); }
@@ -128,24 +184,32 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
 #ctl-config td .kv { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
 #ctl-config .mini {
   background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 6px; padding: 3px 8px; font-size: 12px; cursor: pointer;
+  border-radius: 6px; padding: 5px 9px; font-size: 12px; cursor: pointer;
 }
 #ctl-config .mini.unset { border-color: var(--err); color: var(--err); }
 #ctl-config input[type="text"] {
   background: var(--card); border: 1px solid var(--border); color: var(--fg);
-  border-radius: 6px; padding: 4px 6px; font-size: 12px; width: 200px;
-}
-#ctl-msg { font-size: 13px; min-height: 18px; margin-top: 8px; }
-#ctl-msg.ok { color: var(--ok); }
-#ctl-msg.err { color: var(--err); }
-@media (min-width: 768px) {
-  .ctl-grid { grid-template-columns: repeat(3, 1fr); }
+  border-radius: 6px; padding: 6px 7px; font-size: 13px; width: 100%; max-width: 220px;
 }
 
+#toasts {
+  position: fixed; bottom: 16px; left: 0; right: 0; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; z-index: 100; pointer-events: none; padding: 0 16px;
+}
+.toast {
+  background: var(--fg); color: var(--bg); border-radius: 10px; padding: 10px 16px;
+  font-size: 14px; max-width: 480px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  transition: opacity .3s, transform .3s; text-align: center;
+}
+.toast.err { background: var(--err); color: #fff; }
+.toast.ok { background: var(--ok); color: #fff; }
+.toast.out { opacity: 0; transform: translateY(8px); }
+footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0 30px; }
 @media (min-width: 768px) {
   body { font-size: 16px; }
   main { padding: 20px; }
-  .summary { grid-template-columns: repeat(4, 1fr); }
+  .grid { grid-template-columns: repeat(4, 1fr); }
+  .ctl-grid { grid-template-columns: repeat(3, 1fr); }
   #wanted-list { grid-template-columns: repeat(2, 1fr); }
 }
 </style>
@@ -160,44 +224,76 @@ footer { text-align: center; color: var(--new); font-size: 12px; padding: 18px 0
 </header>
 <main>
   <div id="error-banner">dashboard backend unreachable</div>
-  <div class="summary">
-    <div class="stat wanted"><div class="num" id="s-wanted">–</div><div class="lbl">Wanted</div></div>
-    <div class="stat done"><div class="num" id="s-done">–</div><div class="lbl">Done</div></div>
-    <div class="stat error"><div class="num" id="s-error">–</div><div class="lbl">Error</div></div>
-    <div class="stat running"><div class="num" id="s-running">–</div><div class="lbl">Running</div></div>
-  </div>
-  <div class="pills">
-    <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
-    <span class="pill"><span class="dot stopped" id="a-dot"></span><span id="a-text">asr …</span></span>
-  </div>
+
+  <section class="sec" id="sec-pipeline">
+    <h2 class="sec-head" data-sec="pipeline">Pipeline <span class="chev">▾</span></h2>
+    <div class="sec-body">
+      <div class="pills">
+        <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
+        <span class="pill"><span class="dot stopped" id="q-dot"></span><span id="q-text">queue …</span></span>
+      </div>
+      <div class="grid" id="pipe-grid">
+        <div class="stat"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
+        <div class="stat"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
+        <div class="stat"><div class="lbl">Queue (wanted)</div><div class="val accent" id="st-queue">–</div></div>
+        <div class="stat"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
+        <div class="stat"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
+        <div class="stat"><div class="lbl">Started at</div><div class="val" id="st-started">–</div></div>
+        <div class="stat"><div class="lbl">Run-once requested</div><div class="val" id="st-runonce">–</div></div>
+        <div class="stat"><div class="lbl">State counts</div><div class="val" id="st-counts">–</div></div>
+      </div>
+      <div id="episodes-list"><div class="muted">no per-episode records yet</div></div>
+    </div>
+  </section>
+
+  <section class="sec" id="sec-gpu">
+    <h2 class="sec-head" data-sec="gpu">GPU &amp; Model <span class="chev">▾</span></h2>
+    <div class="sec-body">
+      <div class="card" id="gpu-card"><div class="muted">loading…</div></div>
+    </div>
+  </section>
+
   <section class="sec" id="sec-wanted">
     <h2 class="sec-head" data-sec="wanted">Wanted <span class="chev">▾</span></h2>
-    <div class="sec-body"><div id="wanted-list"></div></div>
+    <div class="sec-body">
+      <div id="wanted-toolbar">
+        <label><input type="checkbox" id="sel-all" class="ep-check"> all</label>
+        <span class="tb-count" id="sel-count">0 selected</span>
+        <button id="batch-retry" data-batch="retry">Retry</button>
+        <button id="batch-skip" data-batch="skip">Skip</button>
+        <button id="batch-delete" data-batch="delete">Delete</button>
+        <button id="batch-exclude" data-batch="exclude">Exclude</button>
+        <button id="sel-clear">Clear</button>
+      </div>
+      <div id="wanted-list"><div class="muted">loading…</div></div>
+    </div>
   </section>
-  <section class="sec" id="sec-recent">
-    <h2 class="sec-head" data-sec="recent">Recent activity <span class="chev">▾</span></h2>
-    <div class="sec-body"><div id="recent-list"></div></div>
+
+  <section class="sec" id="sec-activity">
+    <h2 class="sec-head" data-sec="activity">Recent activity <span class="chev">▾</span></h2>
+    <div class="sec-body"><div id="activity-list"><div class="muted">loading…</div></div></div>
   </section>
+
   <section class="sec" id="sec-control">
     <h2 class="sec-head" data-sec="control">Control <span class="chev">▾</span></h2>
     <div class="sec-body">
-      <div id="ctl-status"><div class="muted">loading…</div></div>
       <div id="ctl-actions">
         <button id="act-wake" onclick="ctlAction('wake')">Wake now</button>
         <button id="act-run-once" onclick="ctlAction('run-once')">Run once</button>
         <button id="act-pause" onclick="ctlAction('pause')">Pause</button>
         <button id="act-resume" onclick="ctlAction('resume')">Resume</button>
       </div>
+      <div class="ctl-grid" id="ctl-status"><div class="muted">loading…</div></div>
       <div id="ctl-config"><div class="muted">loading…</div></div>
-      <div id="ctl-msg"></div>
     </div>
   </section>
-  <footer>polls every 15s · read-only</footer>
+
+  <footer>status polls every 5s · wanted/activity every 20s</footer>
 </main>
+<div id="toasts"></div>
 <script>
 const LS_THEME = "asr-dash-theme";
 const ICONS = { auto: "🔄", light: "☀️", dark: "🌙" };
-
 function applyTheme(t) {
   document.documentElement.setAttribute("data-theme", t);
   document.getElementById("theme-toggle").textContent = ICONS[t] || ICONS.auto;
@@ -218,7 +314,7 @@ document.getElementById("theme-toggle").addEventListener("click", function () {
 });
 
 const LS_SECTIONS = "asr-dash-sections";
-const DEF_SECTIONS = { wanted: true, recent: true, control: false };
+const DEF_SECTIONS = { pipeline: true, gpu: true, wanted: true, activity: true, control: false };
 function initSections() {
   let s = {};
   try { s = JSON.parse(localStorage.getItem(LS_SECTIONS) || "{}") || {}; } catch (e) { s = {}; }
@@ -243,10 +339,15 @@ function initSections() {
 }
 initSections();
 
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s == null ? "" : String(s);
+  return d.innerHTML;
+}
 function relTime(ts) {
   if (!ts) return "";
-  const d = new Date(ts.replace("Z", "+00:00"));
-  if (isNaN(d.getTime())) return ts;
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return "";
   const diff = Date.now() - d.getTime();
   if (diff < 0) return "now";
   const m = Math.floor(diff / 60000);
@@ -256,9 +357,17 @@ function relTime(ts) {
   if (h < 24) return h + "h ago";
   return Math.floor(h / 24) + "d ago";
 }
-function fmtElapsed(s) {
+function fmtDur(s) {
   if (s == null) return "";
-  return s + "s";
+  const total = Math.round(s);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), sec = total % 60;
+  if (h > 0) return h + "h " + m + "m";
+  if (m > 0) return m + "m " + sec + "s";
+  return sec + "s";
+}
+function fmtMB(mb) {
+  if (mb == null) return "?";
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb + " MB";
 }
 function statusClass(st) {
   if (st === "done") return "done";
@@ -266,153 +375,374 @@ function statusClass(st) {
   if (st === "running") return "running";
   return "new";
 }
-function pillDot(el, up) {
-  el.className = "dot " + (up ? "up" : "down");
-}
-function esc(s) {
-  const d = document.createElement("div");
-  d.textContent = s == null ? "" : String(s);
-  return d.innerHTML;
-}
-
-let lastData = null;
-let fetchFail = false;
-
-function render(data) {
-  lastData = data;
-  document.getElementById("s-wanted").textContent = data.wanted_total ?? "–";
-  document.getElementById("s-done").textContent = data.state_summary.done ?? "–";
-  document.getElementById("s-error").textContent = data.state_summary.error ?? "–";
-  document.getElementById("s-running").textContent = data.state_summary.running ?? "–";
-
-  const pipe = data.pipeline || {};
-  const pd = document.getElementById("p-dot");
-  const pt = document.getElementById("p-text");
-  if (pipe.running) {
-    pd.className = "dot running";
-    pt.textContent = "pipeline running (pid " + (pipe.pid || "?") + ")";
-  } else {
-    pd.className = "dot stopped";
-    pt.textContent = "pipeline stopped";
-  }
-  const ad = document.getElementById("a-dot");
-  const at = document.getElementById("a-text");
-  if (data.asr && data.asr.up) {
-    ad.className = "dot up";
-    at.textContent = "asr up (" + (data.asr.latency_ms != null ? data.asr.latency_ms + "ms" : "?") + ")";
-  } else {
-    ad.className = "dot down";
-    at.textContent = "asr down";
-  }
-
-  const wl = document.getElementById("wanted-list");
-  wl.innerHTML = "";
-  const wanted = data.wanted || [];
-  if (!wanted.length) {
-    wl.innerHTML = '<div class="muted">no wanted episodes</div>';
-  } else {
-    for (const ep of wanted) {
-      const badge = '<span class="badge ' + statusClass(ep.state_status) + '">' + esc(ep.state_status) + "</span>";
-      const elapsed = ep.state_status === "done" && ep.elapsed_s != null
-        ? '<span class="elapsed">' + fmtElapsed(ep.elapsed_s) + "</span>" : "";
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML =
-        '<div class="ep-head"><span class="ep-series">' + esc(ep.series) + '</span><span class="ep-code">' + esc(ep.episode) + "</span></div>" +
-        '<div class="ep-title">' + esc(ep.title) + "</div>" +
-        '<div class="ep-meta"><span class="missing">missing: ' + (ep.missing && ep.missing.length ? esc(ep.missing.join(", ")) : "none") + "</span>" +
-        "<span>" + badge + elapsed + "</span></div>";
-      wl.appendChild(card);
-    }
-  }
-
-  const rl = document.getElementById("recent-list");
-  rl.innerHTML = "";
-  const recent = data.recent || [];
-  if (!recent.length) {
-    rl.innerHTML = '<div class="muted">no recent activity</div>';
-  } else {
-    for (const r of recent) {
-      const el = document.createElement("div");
-      el.className = "recent";
-      el.innerHTML =
-        '<div class="left"><span class="dot ' + (r.status === "error" ? "down" : "up") + '"></span>' +
-        '<span class="ep-label">' + esc(r.label) + "</span></div>" +
-        '<div class="right">' +
-        (r.elapsed_s != null ? "<span>" + fmtElapsed(r.elapsed_s) + "</span>" : "") +
-        "<span>" + relTime(r.ts) + "</span></div>";
-      rl.appendChild(el);
-    }
-  }
-
-  document.getElementById("refresh-ind").textContent = "updated " + relTime(data.updated_at);
+function toast(msg, kind) {
+  const t = document.createElement("div");
+  t.className = "toast " + (kind || "ok");
+  t.textContent = msg;
+  document.getElementById("toasts").appendChild(t);
+  setTimeout(function () { t.classList.add("out"); }, 4000);
+  setTimeout(function () { t.remove(); }, 4400);
 }
 
-async function poll() {
-  const banner = document.getElementById("error-banner");
-  try {
-    const res = await fetch("/api/status", { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    fetchFail = false;
-    banner.classList.remove("visible");
-    render(data);
-  } catch (e) {
-    fetchFail = true;
-    banner.classList.add("visible");
-  }
-}
-
-function ctlMsg(text, kind) {
-  const m = document.getElementById("ctl-msg");
-  m.textContent = text || "";
-  m.className = kind || "";
-}
-
-async function ctlFetch(url, opts) {
-  const res = await fetch(url, Object.assign({ cache: "no-store" }, opts || {}));
+async function api(path, opts) {
+  const res = await fetch(path, Object.assign({ cache: "no-store" }, opts || {}));
   let data = null;
   try { data = await res.json(); } catch (e) { data = { raw: "" }; }
   return { status: res.status, data: data };
 }
+function btnBusy(btn, on, label) {
+  if (!btn) return;
+  if (on) {
+    btn.dataset.label = btn.textContent;
+    btn.textContent = "…";
+    btn.disabled = true;
+  } else {
+    btn.textContent = btn.dataset.label || label;
+    btn.disabled = false;
+  }
+}
 
-async function loadControlStatus() {
+let wantedEpisodes = {};
+function renderStatus(data) {
+  const daemon = data.daemon || {};
+  const reachable = !!daemon.reachable;
+  const pd = document.getElementById("p-dot");
+  const pt = document.getElementById("p-text");
+  if (reachable && daemon.paused) { pd.className = "dot running"; pt.textContent = "daemon paused"; }
+  else if (reachable) { pd.className = "dot up"; pt.textContent = "daemon running"; }
+  else { pd.className = "dot down"; pt.textContent = "daemon down" + (daemon.error ? " (" + esc(daemon.error) + ")" : ""); }
+
+  const qd = document.getElementById("q-dot");
+  const qt = document.getElementById("q-text");
+  const queue = data.queue || {};
+  qd.className = queue.wanted ? "dot running" : "dot up";
+  qt.textContent = "queue: " + (queue.wanted != null ? queue.wanted + " wanted" : "?");
+
+  document.getElementById("st-daemon").textContent = reachable ? (daemon.paused ? "paused" : "running") : "stopped";
+  document.getElementById("st-daemon").className = "val " + (reachable ? (daemon.paused ? "run" : "ok") : "err");
+  document.getElementById("st-uptime").textContent = daemon.uptime_s != null ? fmtDur(daemon.uptime_s) : "–";
+  document.getElementById("st-queue").textContent = queue.wanted != null ? queue.wanted : "–";
+  const lp = daemon.last_pass || {};
+  document.getElementById("st-lastpass").textContent = lp.processed != null
+    ? (lp.processed + " processed · " + (lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?") + " d/s/f")
+    : "–";
+  const lpe = document.getElementById("st-lastpass");
+  lpe.className = "val" + ((lp.failed || 0) > 0 ? " err" : "");
+  document.getElementById("st-failures").textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
+  document.getElementById("st-failures").className = "val" + ((daemon.consecutive_failures || 0) > 0 ? " err" : "");
+  document.getElementById("st-started").textContent = daemon.started_at ? relTime(daemon.started_at) : "–";
+  document.getElementById("st-runonce").textContent = daemon.run_once_requested ? "yes" : "no";
+  const sc = data.state_counts || {};
+  document.getElementById("st-counts").textContent = sc.total != null
+    ? (sc.done + " done · " + sc.error + " err · " + sc.pending + " pend (" + sc.total + ")")
+    : "–";
+
+  renderGpu(data.gpu || {}, data.llama || {});
+  renderEpisodes(data.episodes || {});
+  renderCtlStatus(daemon);
+}
+
+function renderGpu(gpu, llama) {
+  const el = document.getElementById("gpu-card");
+  let html;
+  if (gpu.available && (gpu.gpus || []).length) {
+    const g = gpu.gpus[0];
+    const used = g.memory_used_mb, total = g.memory_total_mb;
+    const pct = used != null && total ? Math.round((used / total) * 100) : null;
+    html =
+      '<div class="gpu-row"><span class="gpu-name">' + esc(g.name) + "</span>" +
+      '<span class="gpu-util">' + (g.util_pct != null ? g.util_pct + "%" : "?") + "</span></div>" +
+      '<div class="vram"><div class="vram-bar"><div class="vram-fill" style="width:' + (pct != null ? pct : 0) + '%"></div></div>' +
+      '<div class="vram-txt">VRAM ' + fmtMB(used) + " / " + fmtMB(total) + (pct != null ? " (" + pct + "%)" : "") + "</div></div>" +
+      '<div class="model-row">' +
+      '<span class="pill"><span class="dot ' + (llama.up ? "up" : "down") + '"></span>' +
+      "<span>" + (llama.up ? "llama-server up" + (llama.latency_ms != null ? " (" + llama.latency_ms + "ms)" : "") : "llama-server down") + "</span></span>" +
+      (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") +
+      "</div>";
+  } else {
+    html = '<div class="muted">GPU unavailable' +
+      (gpu.error ? " — " + esc(gpu.error) : "") + "</div>" +
+      '<div class="model-row"><span class="pill"><span class="dot ' + (llama.up ? "up" : "down") + '"></span>' +
+      "<span>" + (llama.up ? "llama-server up" + (llama.latency_ms != null ? " (" + llama.latency_ms + "ms)" : "") : "llama-server down") + "</span></span>" +
+      (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") + "</div>";
+  }
+  el.innerHTML = html;
+}
+
+function renderEpisodes(episodes) {
+  const el = document.getElementById("episodes-list");
+  const ids = Object.keys(episodes);
+  if (!ids.length) {
+    el.innerHTML = '<div class="muted">no per-episode records yet</div>';
+    return;
+  }
+  ids.sort(function (a, b) {
+    return String(episodes[b].ts || "").localeCompare(String(episodes[a].ts || ""));
+  });
+  const rows = [];
+  for (const id of ids.slice(0, 15)) {
+    const e = episodes[id];
+    const w = wantedEpisodes[id] || {};
+    const label = [w.series, w.episode].filter(Boolean).join(" ") || "ep " + id;
+    rows.push(
+      '<div class="episode-row"><div class="left">' +
+      '<span class="badge ' + statusClass(e.status) + '">' + esc(e.status) + "</span>" +
+      '<span class="ep-label">' + esc(label) + "</span></div>" +
+      '<div class="right">' +
+      (e.refine ? '<span title="refined" style="color:var(--ok)">✓</span>' : "") +
+      (e.language ? '<span class="badge lang">' + esc(e.language) + "</span>" : "") +
+      (e.elapsed_s != null ? "<span>" + fmtDur(e.elapsed_s) + "</span>" : "") +
+      "<span>" + relTime(e.ts) + "</span></div></div>"
+    );
+  }
+  el.innerHTML = rows.join("");
+}
+
+let selected = {};
+let exclusions = {};
+
+function renderWanted(data) {
+  const wl = document.getElementById("wanted-list");
+  const items = data.items || [];
+  wantedEpisodes = {};
+  exclusions = data.exclusions || {};
+  for (const it of items) {
+    wantedEpisodes[String(it.sonarrEpisodeId)] = it;
+    if (!(String(it.sonarrEpisodeId) in selected)) selected[String(it.sonarrEpisodeId)] = false;
+  }
+  for (const k of Object.keys(selected)) {
+    if (!wantedEpisodes[k]) delete selected[k];
+  }
+  if (!items.length) {
+    wl.innerHTML = '<div class="muted">no wanted episodes</div>';
+    updateToolbar();
+    return;
+  }
+  const cards = [];
+  for (const ep of items) {
+    const st = ep.state || {};
+    const q = ep.quality || {};
+    const key = String(ep.sonarrEpisodeId);
+    const excluded = !!exclusions[key];
+    const flags = [q.source, q.resolution, q.codec, q.audio].filter(Boolean)
+      .map(function (f) { return '<span class="badge q">' + esc(f) + "</span>"; }).join("");
+    const missing = (ep.missing || []).map(function (l) { return esc(l); }).join(", ");
+    const subs = ep.subtitle_files || [];
+    const subTxt = subs.length
+      ? '<div class="ep-title" style="font-size:11px">' + esc(subs.length) + " sub file(s): " + esc(subs[0].split("/").pop()) + "</div>"
+      : "";
+    cards.push(
+      '<div class="card">' +
+      '<div class="ep-head"><span style="display:flex;align-items:center;gap:8px;min-width:0">' +
+      '<input type="checkbox" class="ep-check" data-check="' + ep.sonarrEpisodeId + '"' + (selected[key] ? " checked" : "") + ">" +
+      '<span class="ep-series">' + esc(ep.series) + "</span></span>" +
+      '<span class="ep-code">' + esc(ep.episode) + "</span></div>" +
+      '<div class="ep-title">' + esc(ep.title) + "</div>" +
+      subTxt +
+      '<div class="ep-meta">' +
+      '<div class="flags">' + flags +
+      '<span class="badge ' + statusClass(st.status) + '">' + esc(st.status) + "</span>" +
+      (ep.lang_states ? Object.keys(ep.lang_states).map(function (l) {
+        const ls = ep.lang_states[l];
+        return '<span class="badge lang ' + statusClass(ls.status) + '">' + esc(l) + ":" + esc(ls.status) + "</span>";
+      }).join("") : "") +
+      (excluded ? '<span class="badge excluded">EXCLUDED</span>' : "") +
+      (ep.refine ? '<span class="badge ai">refined</span>' : "") +
+      "</div>" +
+      '<span class="missing">missing: ' + (missing || "none") + "</span></div>" +
+      '<div class="ep-actions">' +
+      '<button class="btn-retry" data-act="retry" data-id="' + ep.sonarrEpisodeId + '">Retry</button>' +
+      '<button class="btn-skip" data-act="skip" data-id="' + ep.sonarrEpisodeId + '">Skip</button>' +
+      '<button class="btn-del" data-act="delete" data-id="' + ep.sonarrEpisodeId + '">Delete</button>' +
+      '<button class="' + (excluded ? "btn-excluded" : "btn-exclude") + '" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + ep.sonarrEpisodeId + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
+      "</div></div>"
+    );
+  }
+  wl.innerHTML = cards.join("");
+  updateToolbar();
+}
+
+function updateToolbar() {
+  const boxes = document.querySelectorAll('#wanted-list .ep-check');
+  const sel = Object.keys(selected).filter(function (k) { return selected[k]; });
+  document.getElementById("sel-count").textContent = sel.length + " selected";
+  const sa = document.getElementById("sel-all");
+  if (sa) {
+    sa.checked = boxes.length > 0 && sel.length === boxes.length;
+    sa.indeterminate = sel.length > 0 && sel.length < boxes.length;
+  }
+  for (const act of ["retry", "skip", "delete", "exclude"]) {
+    const b = document.getElementById("batch-" + act);
+    if (b) b.disabled = sel.length === 0;
+  }
+}
+
+function toggleSelect(id, on) {
+  selected[String(id)] = !!on;
+  updateToolbar();
+}
+
+function selectAll(on) {
+  for (const k of Object.keys(selected)) selected[k] = on;
+  const boxes = document.querySelectorAll('#wanted-list .ep-check');
+  for (const b of boxes) b.checked = on;
+  updateToolbar();
+}
+
+function renderActivity(data) {
+  const al = document.getElementById("activity-list");
+  const items = data.items || [];
+  if (!items.length) {
+    al.innerHTML = '<div class="muted">no recent activity</div>';
+    return;
+  }
+  const rows = [];
+  for (const it of items) {
+    const label = [it.series, it.episode].filter(Boolean).join(" ") || "";
+    const head = label ? label : (it.title ? it.title : "?");
+    rows.push(
+      '<div class="activity"><div class="left">' +
+      '<span class="dot ' + (it.kind === "bazarr" ? "up" : "running") + '"></span>' +
+      "<div><div class=\"act-label\">" + esc(head) + (it.title && label ? " — " + esc(it.title) : "") + "</div>" +
+      '<div class="act-detail">' + esc(it.detail || "") + "</div></div></div>" +
+      '<div class="right">' +
+      (it.ai ? '<span class="badge ai">AI</span>' : "") +
+      (it.language ? '<span class="badge lang">' + esc(it.language) + "</span>" : "") +
+      (it.elapsed_s != null ? "<span>" + fmtDur(it.elapsed_s) + "</span>" : "") +
+      "<span>" + (relTime(it.ts) || esc(it.relative || "")) + "</span>" +
+      (it.episode_id != null ? '<button class="act-del" data-act="delete" data-id="' + it.episode_id + '">Del</button>' : "") +
+      "</div></div>"
+    );
+  }
+  al.innerHTML = rows.join("");
+}
+
+function renderCtlStatus(daemon) {
   const el = document.getElementById("ctl-status");
   const pa = document.getElementById("act-pause");
   const re = document.getElementById("act-resume");
-  try {
-    const { status, data } = await ctlFetch("/api/control/status");
-    if (status !== 200) {
-      el.innerHTML = '<div class="muted">control API unreachable (' + esc(data.error || status) + ")</div>";
-      pa.disabled = true; re.disabled = true;
-      return;
-    }
-    const lp = data.last_pass || {};
-    const sc = data.state_counts || {};
-    const paused = !!data.paused;
-    const rows = [
-      ["daemon state", paused ? '<span class="val run">paused</span>' : '<span class="val ok">running</span>'],
-      ["uptime", '<span class="val">' + esc(data.uptime_s != null ? data.uptime_s + "s" : "?") + "</span>"],
-      ["run-once requested", '<span class="val">' + (data.run_once_requested ? "yes" : "no") + "</span>"],
-      ["consecutive failures", '<span class="val">' + esc(data.consecutive_failures ?? "?") + "</span>"],
-      ["last pass processed", '<span class="val">' + esc(lp.processed ?? "?") + "</span>"],
-      ["last pass done/skipped/failed", '<span class="val">' + esc((lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?")) + "</span>"],
-      ["last pass wanted before/after", '<span class="val">' + esc((lp.wanted_before ?? "?") + "/" + (lp.wanted_after ?? "?")) + "</span>"],
-      ["state counts done", '<span class="val ok">' + esc(sc.done ?? "?") + "</span>"],
-      ["state counts error", '<span class="val err">' + esc(sc.error ?? "?") + "</span>"],
-      ["state counts pending", '<span class="val">' + esc(sc.pending ?? "?") + "</span>"],
-      ["state counts total", '<span class="val">' + esc(sc.total ?? "?") + "</span>"],
-      ["started at", '<span class="val">' + esc(data.started_at || "?") + "</span>"],
-    ];
-    el.innerHTML = '<div class="ctl-grid">' + rows.map(function (r) {
-      return '<div class="ctl-stat"><div class="lbl">' + r[0] + '</div><div class="val">' + r[1] + "</div></div>";
-    }).join("") + "</div>";
-    pa.disabled = paused;
-    re.disabled = !paused;
-  } catch (e) {
-    el.innerHTML = '<div class="muted">control API unreachable (' + esc(e.message) + ")</div>";
+  const reachable = !!daemon.reachable;
+  if (!reachable) {
+    el.innerHTML = '<div class="muted" style="grid-column:1/-1">control daemon unreachable (' + esc(daemon.error || "?") + ")</div>";
     pa.disabled = true; re.disabled = true;
+    return;
   }
+  const paused = !!daemon.paused;
+  const lp = daemon.last_pass || {};
+  const rows = [
+    ["daemon state", paused ? '<span class="val run">paused</span>' : '<span class="val ok">running</span>'],
+    ["uptime", '<span class="val">' + esc(fmtDur(daemon.uptime_s)) + "</span>"],
+    ["run-once requested", '<span class="val">' + (daemon.run_once_requested ? "yes" : "no") + "</span>"],
+    ["consecutive failures", '<span class="val' + ((daemon.consecutive_failures || 0) > 0 ? " err" : "") + '">' + esc(daemon.consecutive_failures ?? "?") + "</span>"],
+    ["last pass processed", '<span class="val">' + esc(lp.processed ?? "?") + "</span>"],
+    ["last pass done/skipped/failed", '<span class="val">' + esc((lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?")) + "</span>"],
+    ["last pass wanted before/after", '<span class="val">' + esc((lp.wanted_before ?? "?") + "/" + (lp.wanted_after ?? "?")) + "</span>"],
+    ["started at", '<span class="val">' + esc(daemon.started_at || "?") + "</span>"],
+  ];
+  el.innerHTML = rows.map(function (r) {
+    return '<div class="ctl-stat"><div class="lbl">' + r[0] + '</div><div class="val">' + r[1] + "</div></div>";
+  }).join("");
+  pa.disabled = paused;
+  re.disabled = !paused;
+}
+
+async function pollStatus() {
+  try {
+    const { status, data } = await api("/api2/status");
+    if (status !== 200) throw new Error("HTTP " + status);
+    document.getElementById("error-banner").classList.remove("visible");
+    renderStatus(data);
+    document.getElementById("refresh-ind").textContent = "updated " + relTime(data.updated_at);
+  } catch (e) {
+    document.getElementById("error-banner").classList.add("visible");
+  }
+}
+
+async function pollLists() {
+  try {
+    const [w, a] = await Promise.all([api("/api2/wanted"), api("/api2/activity")]);
+    if (w.status === 200) renderWanted(w.data);
+    if (a.status === 200) renderActivity(a.data);
+  } catch (e) {}
+}
+
+for (const el of ["wanted-list", "activity-list"]) {
+  document.getElementById(el).addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-act]");
+    if (!btn) return;
+    episodeAction(btn.dataset.act, btn.dataset.id, btn);
+  });
+}
+
+document.getElementById("wanted-list").addEventListener("change", function (ev) {
+  const cb = ev.target.closest("input[data-check]");
+  if (!cb) return;
+  toggleSelect(cb.dataset.check, cb.checked);
+});
+
+const selAll = document.getElementById("sel-all");
+if (selAll) {
+  selAll.addEventListener("change", function () { selectAll(selAll.checked); });
+}
+const selClear = document.getElementById("sel-clear");
+if (selClear) {
+  selClear.addEventListener("click", function () { selectAll(false); });
+}
+for (const act of ["retry", "skip", "delete", "exclude"]) {
+  const b = document.getElementById("batch-" + act);
+  if (b) b.addEventListener("click", function () { batchAction(act); });
+}
+
+async function batchAction(act) {
+  const ids = Object.keys(selected).filter(function (k) { return selected[k]; });
+  if (!ids.length) return;
+  if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) { return; }
+  const btn = document.getElementById("batch-" + act);
+  btnBusy(btn, true);
+  let ok = 0, failed = 0;
+  for (const id of ids) {
+    try {
+      const { status } = await api("/api2/episode/" + id + "/" + act, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      if (status === 200) ok++; else failed++;
+    } catch (e) { failed++; }
+  }
+  btnBusy(btn, false);
+  toast(act + " batch: " + ok + " ok" + (failed ? ", " + failed + " failed" : ""), failed ? "err" : "ok");
+  if (act === "exclude" || !failed) selectAll(false);
+  pollLists();
+  pollStatus();
+}
+
+async function episodeAction(act, id, btn) {
+  const ep = wantedEpisodes[String(id)];
+  const lang = (ep && ep.missing && ep.missing.length === 1) ? ep.missing[0] : null;
+  if (act === "delete") {
+    if (!confirm("Delete subtitles for episode " + id + (lang ? " (" + lang + ")" : "") + "?")) { return; }
+  }
+  btnBusy(btn, true);
+  try {
+    const opts = { method: "POST" };
+    if (lang !== null) {
+      opts.headers = { "Content-Type": "application/json" };
+      opts.body = JSON.stringify({ language: lang });
+    }
+    const { status, data } = await api("/api2/episode/" + id + "/" + act, opts);
+    if (status === 200) {
+      toast("episode " + id + ": " + act + " recorded", "ok");
+      if (act === "exclude" || act === "unexclude") {
+        selected[String(id)] = false;
+      }
+      pollLists();
+      pollStatus();
+    } else {
+      toast("episode " + id + ": " + act + " failed — " + esc((data && data.error) || status), "err");
+    }
+  } catch (e) {
+    toast("episode " + id + ": " + act + " failed — " + esc(e.message), "err");
+  }
+  btnBusy(btn, false);
 }
 
 const DEFAULT_KEYS = ["MAX_EPS_PER_RUN", "TARGET_LANGS", "TRANSLATE_BASE", "TRANSLATE_MODEL", "MAX_TRANSLATE_WORKERS"];
@@ -423,103 +753,102 @@ function ctlRow(key, value) {
     ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
     : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
   return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
-    '<td><button class="mini" onclick="setConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Set</button> ' +
-    '<button class="mini unset" onclick="unsetConfigKey(\'' + esc(key).replace(/'/g, "\\'") + '\')">Unset</button></td></tr>';
+    '<td><button class="mini" onclick="setConfigKey(' + JSON.stringify(key) + ')">Set</button> ' +
+    '<button class="mini unset" onclick="unsetConfigKey(' + JSON.stringify(key) + ')">Unset</button></td></tr>';
 }
 
 async function loadControlConfig() {
   const el = document.getElementById("ctl-config");
   try {
-    const { status, data } = await ctlFetch("/api/control/config");
+    const { status, data } = await api("/api2/config");
     if (status !== 200) {
-      el.innerHTML = '<div class="muted">control API unreachable (' + esc(data.error || status) + ")</div>";
+      el.innerHTML = '<div class="muted">config unavailable (' + esc((data && data.error) || status) + ")</div>";
       return;
     }
     const keys = DEFAULT_KEYS.concat(Object.keys(data).sort()).filter(function (k, i, a) {
       return a.indexOf(k) === i;
     });
     let html = '<table><tr><th>Key</th><th>Value</th><th></th></tr>';
-    for (const k of keys) {
-      html += ctlRow(k, data[k] != null ? data[k] : "");
-    }
-    html += '<tr><td><input type="text" id="ctl-new-key" placeholder="KEY" style="width:160px"></td>' +
-      '<td><input type="text" id="ctl-new-val" placeholder="VALUE" style="width:200px"></td>' +
+    for (const k of keys) html += ctlRow(k, data[k] != null ? data[k] : "");
+    html += '<tr><td><input type="text" id="ctl-new-key" placeholder="KEY" style="max-width:140px"></td>' +
+      '<td><input type="text" id="ctl-new-val" placeholder="VALUE"></td>' +
       '<td><button class="mini" onclick="addKey()">Add</button></td></tr></table>';
     el.innerHTML = html;
   } catch (e) {
-    el.innerHTML = '<div class="muted">control API unreachable (' + esc(e.message) + ")</div>";
+    el.innerHTML = '<div class="muted">config unavailable (' + esc(e.message) + ")</div>";
   }
 }
 
 function addKey() {
   const k = document.getElementById("ctl-new-key").value.trim();
   const v = document.getElementById("ctl-new-val").value;
-  if (!k) { ctlMsg("key required", "err"); return; }
+  if (!k) { toast("key required", "err"); return; }
   setConfigKey(k, v);
 }
 
 async function setConfigKey(key, value) {
-  const input = document.querySelector('#ctl-config input[data-key="' + CSS.escape(key) + '"]');
+  let input = null;
+  try { input = document.querySelector('#ctl-config input[data-key="' + CSS.escape(key) + '"]'); } catch (e) {}
   const val = (value !== undefined && value !== null) ? value : (input ? input.value : "");
   if (val === "***") {
-    ctlMsg("secret keys are masked; re-enter the actual value to change", "err");
+    toast("secret keys are masked; re-enter the actual value to change", "err");
     return;
   }
   const body = {}; body[key] = val;
   try {
-    const { status, data } = await ctlFetch("/api/control/config", {
+    const { status, data } = await api("/api2/config", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (status === 200) {
-      ctlMsg("applied " + key + "=" + val, "ok");
+      toast("applied " + key + "=" + val, "ok");
       loadControlConfig();
     } else {
-      ctlMsg("set failed: " + esc(data.error || status), "err");
+      toast("set failed: " + esc((data && data.error) || status), "err");
     }
   } catch (e) {
-    ctlMsg("set failed: " + esc(e.message), "err");
+    toast("set failed: " + esc(e.message), "err");
   }
 }
 
 async function unsetConfigKey(key) {
   const body = {}; body[key] = null;
   try {
-    const { status, data } = await ctlFetch("/api/control/config", {
+    const { status, data } = await api("/api2/config", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     if (status === 200) {
-      ctlMsg("unset " + key, "ok");
+      toast("unset " + key, "ok");
       loadControlConfig();
     } else {
-      ctlMsg("unset failed: " + esc(data.error || status), "err");
+      toast("unset failed: " + esc((data && data.error) || status), "err");
     }
   } catch (e) {
-    ctlMsg("unset failed: " + esc(e.message), "err");
+    toast("unset failed: " + esc(e.message), "err");
   }
 }
 
 async function ctlAction(a) {
-  ctlMsg("sending " + a + "…");
+  const btn = document.getElementById("act-" + a);
+  btnBusy(btn, true);
   try {
-    const { status, data } = await ctlFetch("/api/control/action", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: a }),
-    });
+    const { status, data } = await api("/api2/" + a, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     if (status === 200) {
-      ctlMsg(a + " ok: " + JSON.stringify(data));
-      loadControlStatus();
+      toast(a + " ok", "ok");
+      pollStatus();
     } else {
-      ctlMsg(a + " failed: " + esc(data.error || status), "err");
+      toast(a + " failed: " + esc((data && data.error) || status), "err");
     }
   } catch (e) {
-    ctlMsg(a + " failed: " + esc(e.message), "err");
+    toast(a + " failed: " + esc(e.message), "err");
   }
+  btnBusy(btn, false);
 }
 
-poll();
-setInterval(poll, 15000);
-loadControlStatus();
+pollStatus();
+pollLists();
 loadControlConfig();
-setInterval(loadControlStatus, 15000);
+setInterval(pollStatus, 5000);
+setInterval(pollLists, 20000);
 </script>
 </body>
 </html>
