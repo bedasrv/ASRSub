@@ -264,6 +264,7 @@ class ControlAPIv2:
         except OSError:
             pass
         latest = {}
+        latest_by_lang = {}
         for e in entries:
             ep = e.get("sonarrEpisodeId")
             if ep is None:
@@ -273,7 +274,14 @@ class ControlAPIv2:
             new_epoch = _parse_ts(e.get("ts"))
             if cur is None or (new_epoch or -1) >= (cur_epoch or -1):
                 latest[ep] = e
-        return entries, latest
+            lang = e.get("language")
+            if lang is not None:
+                key = (ep, lang)
+                lcur = latest_by_lang.get(key)
+                lcur_epoch = _parse_ts(lcur.get("ts")) if lcur else None
+                if lcur is None or (new_epoch or -1) >= (lcur_epoch or -1):
+                    latest_by_lang[key] = e
+        return entries, latest, latest_by_lang
 
     def _refine_latest(self):
         latest = {}
@@ -609,7 +617,7 @@ class ControlAPIv2:
         return 200, self._mask(self._env())
 
     def _h_status(self, body, id=None):
-        entries, latest = self._state()
+        entries, latest, _lbl = self._state()
         refine = self._refine_latest()
         daemon = self._daemon_status()
         wanted = self._bazarr_wanted()
@@ -641,7 +649,7 @@ class ControlAPIv2:
         }
 
     def _h_activity(self, body, id=None):
-        entries, _latest = self._state()
+        entries, _latest, _lbl = self._state()
         wanted = self._bazarr_wanted()
         items = []
         for e in entries[-40:]:
@@ -686,7 +694,7 @@ class ControlAPIv2:
 
     def _h_wanted(self, body, id=None):
         wanted_json = self._bazarr_wanted()
-        _entries, latest = self._state()
+        _entries, latest, latest_by_lang = self._state()
         refine = self._refine_latest()
         daemon = self._daemon_status()
         data = wanted_json.get("data", []) or []
@@ -723,6 +731,18 @@ class ControlAPIv2:
                     "elapsed_s": st.get("elapsed_s"),
                     "ts": st.get("ts"),
                 }
+            lang_states = {}
+            for lang, lst in ((l, r) for (e, l), r in latest_by_lang.items() if e == ep_id):
+                lstatus = lst.get("status", "new")
+                if daemon.get("reachable") and lstatus not in ("done", "error"):
+                    l_epoch = _parse_ts(lst.get("ts"))
+                    if l_epoch is not None and now - l_epoch <= 1800:
+                        lstatus = "running"
+                lang_states[lang] = {
+                    "status": lstatus,
+                    "elapsed_s": lst.get("elapsed_s"),
+                    "ts": lst.get("ts"),
+                }
             rf = refine.get(ep_id)
             items.append(
                 {
@@ -735,6 +755,7 @@ class ControlAPIv2:
                     "quality": self._quality_flags(details.get(ep_id)),
                     "subtitle_files": self._subs_cached(ep_id, details.get(ep_id)),
                     "state": state,
+                    "lang_states": lang_states,
                     "refine": (
                         {"status": rf.get("status"), "ts": rf.get("ts")} if rf else None
                     ),

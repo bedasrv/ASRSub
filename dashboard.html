@@ -79,11 +79,11 @@ h2 { font-size: 15px; margin: 14px 0 6px; }
   border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 600; color: #fff;
   white-space: nowrap;
 }
+.badge.lang { background: var(--accent); }
 .badge.new { background: var(--new); }
 .badge.done { background: var(--ok); }
 .badge.error { background: var(--err); }
 .badge.running { background: var(--run); }
-.badge.lang { background: var(--accent); }
 .badge.ai { background: #9333ea; }
 .badge.q { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
 .muted { color: var(--new); }
@@ -542,6 +542,10 @@ function renderWanted(data) {
       '<div class="ep-meta">' +
       '<div class="flags">' + flags +
       '<span class="badge ' + statusClass(st.status) + '">' + esc(st.status) + "</span>" +
+      (ep.lang_states ? Object.keys(ep.lang_states).map(function (l) {
+        const ls = ep.lang_states[l];
+        return '<span class="badge lang ' + statusClass(ls.status) + '">' + esc(l) + ":" + esc(ls.status) + "</span>";
+      }).join("") : "") +
       (excluded ? '<span class="badge excluded">EXCLUDED</span>' : "") +
       (ep.refine ? '<span class="badge ai">refined</span>' : "") +
       "</div>" +
