@@ -902,6 +902,8 @@ class ControlAPIv2:
                 title = det.get("title")
                 season = det.get("season_number")
                 epnum = det.get("episode_number")
+            if w is None and not series:
+                continue  # ghost: episode deleted from Sonarr, not wanted
             items.append(
                 {
                     "sonarr_episode_id": eid,

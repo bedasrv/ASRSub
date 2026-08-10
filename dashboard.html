@@ -752,8 +752,8 @@ function renderLibrary(data) {
       '<div class="card lib-row">' +
       '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + '></label>' +
       '<div class="lib-main">' +
-      '<div class="lib-series">' + esc(it.series) + (it.wanted ? ' <span class="chip chip-wanted">WANTED</span>' : "") + "</div>" +
-      '<div class="lib-sub">' + esc(it.episode) + (it.title ? " · " + esc(it.title) : "") + "</div>" +
+      '<div class="lib-series">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="chip chip-wanted">WANTED</span>' : "") + "</div>" +
+      '<div class="lib-sub">' + (it.episode || '<span class="muted">—</span>') + (it.title ? " · " + esc(it.title) : "") + "</div>" +
       (chips ? '<div class="chips-row">' + chips + "</div>" : "") +
       '<div class="row-actions">' +
       '<button class="m3-btn outlined" data-act="retry" data-id="' + id + '">Retry</button>' +
