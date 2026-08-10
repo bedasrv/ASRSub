@@ -47,6 +47,11 @@ def api2_wanted():
     return _resp(*api2.handle("GET", "/api2/wanted"))
 
 
+@app.get("/api2/library")
+def api2_library():
+    return _resp(*api2.handle("GET", "/api2/library"))
+
+
 @app.get("/api2/config")
 def api2_config():
     return _resp(*api2.handle("GET", "/api2/config"))

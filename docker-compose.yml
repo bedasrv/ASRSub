@@ -20,8 +20,10 @@ services:
 
   dashboard:
     image: asrsub:latest
+    runtime: nvidia
     network_mode: host
     environment:
+      - NVIDIA_VISIBLE_DEVICES=all
       - TZ=Asia/Jakarta
     volumes:
       - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline

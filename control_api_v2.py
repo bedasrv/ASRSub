@@ -12,6 +12,8 @@ Endpoints (all JSON; errors as {"error": ...}):
     GET  /api2/status     pipeline state + GPU + llama-server + queue depth + per-episode progress
     GET  /api2/activity   state.jsonl tail + Bazarr history merged, newest first, episode titles
     GET  /api2/wanted     Bazarr wanted list with quality flags + missing langs + per-episode state
+    GET  /api2/library    Bazarr wanted + state + exclusions merged, one item per episode
+                          (sorted by series/season/episode, capped at 1000)
     GET  /api2/config     pipeline.env + config.overrides.json merged, secrets masked
     POST /api2/config     set/unset overrides (JSON body key=value; null unsets)
     GET  /api2/health     {"ok": true}
@@ -166,6 +168,7 @@ class ControlAPIv2:
             "/api2/status": self._h_status,
             "/api2/activity": self._h_activity,
             "/api2/wanted": self._h_wanted,
+            "/api2/library": self._h_library,
             "/api2/config": self._h_config,
             "/api2/health": self._h_health,
             "/api2/exclusions": self._h_exclusions,
@@ -510,7 +513,16 @@ class ControlAPIv2:
         now = time.time()
         if cached and now - cached[0] < 300:
             return cached[1]
-        det = {"series": None, "episode": None, "title": None, "quality": None, "media": None}
+        det = {
+            "series": None,
+            "episode": None,
+            "title": None,
+            "series_id": None,
+            "season_number": None,
+            "episode_number": None,
+            "quality": None,
+            "media": None,
+        }
         cfg = self._env()
         url_base = cfg.get("SONARR_URL", "").rstrip("/")
         if not url_base:
@@ -531,6 +543,8 @@ class ControlAPIv2:
                 ),
                 "title": data.get("title"),
                 "series_id": data.get("seriesId"),
+                "season_number": data.get("seasonNumber"),
+                "episode_number": data.get("episodeNumber"),
                 "path": ef.get("path"),
                 "quality": {"resolution": q.get("resolution"), "source": q.get("name")},
                 "media": {
@@ -823,6 +837,102 @@ class ControlAPIv2:
             "exclusions": exclusions,
             "updated_at": _now_iso(),
         }
+
+    def _h_library(self, body, id=None):
+        """Merged library: one item per episode across Bazarr wanted + state
+        history + exclusions, with per-language status. Read-only."""
+        wanted_json = self._bazarr_wanted()
+        _entries, latest, latest_by_lang = self._state()
+        wanted_data = wanted_json.get("data", []) or []
+        wanted_by_id = {}
+        for it in wanted_data:
+            eid = it.get("sonarrEpisodeId")
+            if isinstance(eid, int) and eid not in wanted_by_id:
+                wanted_by_id[eid] = it
+        exclusions = self._read_exclusions()
+        excluded_ids = {
+            r.get("episode_id")
+            for r in exclusions
+            if isinstance(r.get("episode_id"), int)
+        }
+        ep_ids = {eid for eid in (set(wanted_by_id) | set(latest) | excluded_ids) if isinstance(eid, int)}
+        detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id]
+        details = {}
+        if detail_ids:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for eid, det in zip(detail_ids, ex.map(self._ep_detail, detail_ids)):
+                    details[eid] = det
+        langs = {}
+        for (eid, lang), rec in latest_by_lang.items():
+            langs.setdefault(eid, {})[lang] = {
+                "status": rec.get("status"),
+                "ts": rec.get("ts"),
+                "elapsed_s": rec.get("elapsed_s"),
+            }
+        for eid, w in wanted_by_id.items():
+            entry = langs.setdefault(eid, {})
+            for m in (w.get("missing_subtitles") or []):
+                if not isinstance(m, dict):
+                    continue
+                code = m.get("code2")
+                if code and code not in entry:
+                    entry[code] = {"status": "wanted", "ts": None, "elapsed_s": None}
+        for eid in excluded_ids:
+            for lang in langs.get(eid, {}):
+                langs[eid][lang]["status"] = "excluded"
+        items = []
+        for eid in ep_ids:
+            w = wanted_by_id.get(eid)
+            if w is not None:
+                series = w.get("seriesTitle")
+                episode = self._episode_number_label(w.get("episode_number"))
+                title = w.get("episodeTitle")
+                season, epnum = w.get("seasonNumber"), w.get("episodeNumber")
+                if not isinstance(season, int) or not isinstance(epnum, int):
+                    m = EP_LABEL_RE.search(str(w.get("episode_number") or ""))
+                    if m:
+                        try:
+                            season, epnum = int(m.group(1)), int(m.group(2))
+                        except ValueError:
+                            pass
+            else:
+                det = details.get(eid) or {}
+                series = det.get("series")
+                episode = det.get("episode")
+                title = det.get("title")
+                season = det.get("season_number")
+                epnum = det.get("episode_number")
+            items.append(
+                {
+                    "sonarr_episode_id": eid,
+                    "series": series,
+                    "episode": episode,
+                    "title": title,
+                    "season": season,
+                    "episode_number": epnum,
+                    "wanted": eid in wanted_by_id,
+                    "languages": [
+                        {
+                            "language": lang,
+                            "status": st["status"],
+                            "ts": st["ts"],
+                            "elapsed_s": st["elapsed_s"],
+                        }
+                        for lang, st in sorted(langs.get(eid, {}).items())
+                    ],
+                }
+            )
+        items.sort(
+            key=lambda it: (
+                it["series"] or "",
+                it["season"] if isinstance(it["season"], int) else -1,
+                it["episode_number"] if isinstance(it["episode_number"], int) else -1,
+            )
+        )
+        out = {"items": items[:1000]}
+        if len(items) > 1000:
+            out["truncated"] = True
+        return 200, out
 
     def _append_action(self, kind, ep_id, body):
         lang = None
