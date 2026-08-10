@@ -126,8 +126,18 @@ def load_config():
     cfg["MAX_EPS_PER_RUN"] = int(
         os.environ.get("MAX_EPS_PER_RUN", cfg.get("MAX_EPS_PER_RUN", "8"))
     )
+    tl = cfg.get("TARGET_LANGS", "id,en")
+    if isinstance(tl, str) and tl.strip().startswith("["):
+        try:
+            import ast
+
+            tl = ast.literal_eval(tl)
+        except Exception:
+            tl = "id,en"
+    if isinstance(tl, list):
+        tl = ",".join(x for x in tl if isinstance(x, str))
     cfg["TARGET_LANGS"] = [
-        x.strip() for x in cfg.get("TARGET_LANGS", "id,en").split(",") if x.strip()
+        x.strip() for x in str(tl).split(",") if x.strip()
     ]
     cfg["STATE_FILE"] = STATE_FILE
     cfg["JELLYFIN_URL"] = cfg.get("JELLYFIN_URL") or JELLYFIN_URL
@@ -233,28 +243,34 @@ def load_records_jsonl(path):
 def consume_records_jsonl(path):
     """Read a jsonl and remove the consumed records in place.
 
-    Runs on a single "r+" handle: reads lines, then rewrites any bytes
-    appended after the last readline as the new file tail — the consumed
-    prefix is gone, records added by a concurrent writer survive, and no
-    record is processed twice."""
+    Holds an exclusive flock (fcntl) on the single "r+" handle around the
+    read/truncate/write, so a producer appending under the same flock
+    protocol is serialized: any bytes appended after our last readline are
+    rewritten as the new file tail — the consumed prefix is gone, concurrent
+    records survive, and no record is processed twice or lost."""
     records = []
     if os.path.exists(path):
         with open(path, "r+", encoding="utf-8") as fh:
-            while True:
-                line = fh.readline()
-                if not line:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(json.loads(line))
-                except Exception:
-                    continue
-            tail = fh.read()
-            fh.seek(0)
-            fh.truncate(0)
-            fh.write(tail)
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+                tail = fh.read()
+                fh.seek(0)
+                fh.truncate(0)
+                fh.write(tail)
+                fh.flush()
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
     return records
 
 
@@ -345,11 +361,13 @@ def choose_source(streams, target_lang):
             }
     jpn = next((s for s in streams if lang_of(s) == "jpn"), None)
     s = jpn if jpn is not None else streams[0]
+    tag = lang_of(s) or ""
+    asr_lang = {"jpn": "ja", "eng": "en"}.get(tag, "en")
     return {
         "stream_index": s["index"],
-        "asr_lang": "ja",
-        "needs_translate": True,
-        "src_lang": lang_of(s) or "?",
+        "asr_lang": asr_lang,
+        "needs_translate": asr_lang != target_lang,
+        "src_lang": tag or "?",
     }
 
 
@@ -386,6 +404,36 @@ def _media_fingerprint(path):
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
+def _asr_cache_dims():
+    """ASR config dimensions that change segmentation; cache entries written
+    under other dims are treated as a miss so stale cues are never served
+    (e.g. sensevoice production vs faster-whisper refine sharing one key)."""
+    dims = {"backend": ASR_BACKEND}
+    if ASR_BACKEND == "sensevoice":
+        for k in (
+            "SV_MAX_SEG_MS",
+            "SV_MAX_END_SILENCE_MS",
+            "SV_SPEECH_PAD_MS",
+            "SV_MIN_SPEECH_MS",
+        ):
+            dims[k] = os.environ.get(k, "")
+    else:
+        for k in (
+            "WHISPER_MODEL",
+            "WHISPER_BEAM",
+            "VAD_THRESHOLD",
+            "VAD_MIN_SILENCE_MS",
+            "VAD_MAX_SPEECH_S",
+            "VAD_MIN_SILENCE_AT_MAX",
+            "VAD_SPEECH_PAD_MS",
+            "SPLIT_MIN_SILENCE_MS",
+            "MAX_CUE_MS",
+            "HARD_GAP_MS",
+        ):
+            dims[k] = os.environ.get(k, "")
+    return dims
+
+
 def asr_cache_get(ep_id, asr_lang, media_path):
     key = f"{ep_id}_{asr_lang}"
     cues_path = os.path.join(ASR_CACHE_DIR, key + ".cues.json")
@@ -393,7 +441,9 @@ def asr_cache_get(ep_id, asr_lang, media_path):
     try:
         with open(meta_path) as fh:
             meta = json.load(fh)
-        if meta.get("fingerprint") == _media_fingerprint(media_path):
+        if meta.get("fingerprint") == _media_fingerprint(media_path) and meta.get(
+            "asr_dims"
+        ) == _asr_cache_dims():
             with open(cues_path) as fh:
                 cues = json.load(fh)
             if cues and isinstance(cues, list):
@@ -409,7 +459,10 @@ def asr_cache_put(ep_id, asr_lang, media_path, cues):
     with open(os.path.join(ASR_CACHE_DIR, key + ".cues.json"), "w") as fh:
         json.dump(cues, fh, ensure_ascii=False)
     with open(os.path.join(ASR_CACHE_DIR, key + ".json"), "w") as fh:
-        json.dump({"fingerprint": _media_fingerprint(media_path)}, fh)
+        json.dump(
+            {"fingerprint": _media_fingerprint(media_path), "asr_dims": _asr_cache_dims()},
+            fh,
+        )
 
 
 def asr_cues(cfg, wav_path, lang):
@@ -799,6 +852,8 @@ def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
         m = len(entries)
         if m == n:
             for k, t in entries:
+                if k < 1 or k > n:
+                    continue
                 groups.append((start + k - 1, start + k, re.sub(r"^>\s*", "", t)))
             continue
         entries_dict = dict(entries)
@@ -897,7 +952,9 @@ def translate_texts(
     series_title=None,
 ):
     lines = [c["text"] for c in cues]
-    if series_id and episode_id and prior_cache is not None:
+    if is_local_translate(cfg):
+        context_lines = []
+    elif series_id and episode_id and prior_cache is not None:
         if series_id not in prior_cache:
             prior_cache[series_id] = get_prior_context(cfg, series_id, episode_id)
         context_lines = prior_cache[series_id]
@@ -1039,12 +1096,15 @@ def consume_actions(cfg):
               languages (null = whole episode).
     - delete: NAS + TMP SRT files removed, done state cleared -> regenerates,
               then Jellyfin refresh so the removed subtitle is dropped.
+              "language" scopes the file deletion and state clearing to
+              matching languages (null = whole episode), like retry.
     Returns the set of episode ids to exclude this pass (skips)."""
     records = consume_records_jsonl(ACTIONS_FILE)
     if not records:
         return set()
     skip_ids, retry_ids, delete_ids = set(), set(), set()
     retry_langs = {}
+    delete_langs = {}
     for rec in records:
         eid = rec.get("episode_id")
         if not isinstance(eid, int):
@@ -1052,13 +1112,16 @@ def consume_actions(cfg):
         action = rec.get("type") or rec.get("action") or ""
         if action == "skip":
             skip_ids.add(eid)
-        elif action == "retry":
-            retry_ids.add(eid)
+        elif action in ("retry", "delete"):
+            ids = retry_ids if action == "retry" else delete_ids
+            langs = retry_langs if action == "retry" else delete_langs
+            ids.add(eid)
             lang = rec.get("language")
+            entry = langs.setdefault(eid, set())
             if isinstance(lang, str) and lang:
-                retry_langs.setdefault(eid, set()).add(lang)
-        elif action == "delete":
-            delete_ids.add(eid)
+                entry.add(lang)
+            else:
+                entry.add(None)  # null language = whole episode
     if retry_ids or delete_ids:
         states = load_state()
         kept = []
@@ -1069,9 +1132,10 @@ def consume_actions(cfg):
             drop = False
             if isinstance(eid, int) and eid in retry_ids:
                 langs = retry_langs.get(eid)
-                drop = not langs or lang in langs
+                drop = not langs or (None in langs) or (lang in langs)
             elif isinstance(eid, int) and eid in delete_ids:
-                drop = True
+                langs = delete_langs.get(eid)
+                drop = not langs or (None in langs) or (lang in langs)
             if drop:
                 changed = True
             else:
@@ -1079,7 +1143,11 @@ def consume_actions(cfg):
         if changed:
             rewrite_jsonl(STATE_FILE, kept)
     for eid in sorted(delete_ids):
-        deleted = _delete_episode_subtitles(cfg, eid)
+        langs = delete_langs.get(eid)
+        all_langs = not langs or None in langs
+        deleted = _delete_episode_subtitles(
+            cfg, eid, langs=None if all_langs else sorted(langs)
+        )
         log(f"action: delete episode {eid} (removed {len(deleted)} SRTs, state cleared)")
         media_path, title = "", None
         try:
@@ -1093,8 +1161,9 @@ def consume_actions(cfg):
             jellyfin_refresh(cfg, media_path, title)
     for eid in sorted(retry_ids):
         langs = retry_langs.get(eid)
+        all_langs = not langs or None in langs
         deleted = _delete_episode_subtitles(
-            cfg, eid, langs=sorted(langs) if langs else None
+            cfg, eid, langs=None if all_langs else sorted(langs)
         )
         log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
     for eid in sorted(skip_ids):
@@ -1202,7 +1271,7 @@ def process_after_asr(
     try:
         if decision["needs_translate"]:
             t_tr = time.time()
-            if not key:
+            if not key and not is_local_translate(cfg):
                 raise RuntimeError("translate needed but TRANSLATE_API_KEY empty")
             groups = translate_texts(
                 cfg,
@@ -1255,11 +1324,6 @@ def process_after_asr(
             }
         )
         log(f"done: {tag} {series} [{src}->{lang}] in {elapsed}s (upload 204)")
-        for f in (wav_path, srt_path):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
         return "done"
     except Exception as exc:
         append_state(
@@ -1274,6 +1338,12 @@ def process_after_asr(
         notify_hermes(cfg, ep_id, lang, series, tag, exc)
         halt_on_error(cfg, "process_episode", f"{series} [{lang}] {tag}", exc)
         return "failed"
+    finally:
+        for f in (wav_path, srt_path):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 # ---------- main ----------
@@ -1362,6 +1432,7 @@ def run_pass():
         log(f"excluded this pass: {len(before) - len(candidates)} of {before} episodes {sorted(excluded)}")
     candidates.sort(key=lambda x: x["sonarrEpisodeId"])
     candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
+    wanted_now = {it["sonarrEpisodeId"] for it in candidates}
 
     processed = done = skipped = failed = 0
     log(
@@ -1381,7 +1452,7 @@ def run_pass():
             missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
             langs = sorted(missing & target_langs)
             for lang in langs:
-                if (ep_id, lang) in done_keys:
+                if (ep_id, lang) in done_keys and ep_id not in wanted_now:
                     log(f"skip: S?E? {series} [{lang}] already done (state)")
                     skipped += 1
                     continue
@@ -1401,6 +1472,7 @@ def run_pass():
                         continue
                 processed += 1
                 t0 = time.time()
+                wav_path = srt_path = ""
                 try:
                     info = get_episode(cfg, ep_id)
                     season = info.get("seasonNumber", "?")
@@ -1498,6 +1570,12 @@ def run_pass():
                     )
                 except Exception as exc:
                     failed += 1
+                    for f in (wav_path, srt_path):
+                        if f:
+                            try:
+                                os.remove(f)
+                            except OSError:
+                                pass
                     append_state(
                         {
                             "sonarrEpisodeId": ep_id,
@@ -1721,6 +1799,9 @@ def main():
     _consecutive_failures = 0
     while True:
         if _paused and not _run_once_requested:
+            if _stop_requested:
+                log("stop requested while paused; exiting")
+                return 0
             log("paused; waiting")
             WAKE_EVENT.wait(timeout=900)
             WAKE_EVENT.clear()

@@ -17,6 +17,9 @@ Monkeypatches post_chat (no llama-server needed). Scenarios:
   - refine_regenerate_uses_asr_cues: regenerate_asr -> asr_cues + cache cue list
   - refine_cache_hit_uses_cues_directly: cache cues used as dicts, no parse_srt
   - actions_truncate_preserves_appended: tail-preserving consume keeps concurrent appends
+  - translate_offset_keys_clamped: m==n offset-numbered keys (2..n+1) clamped
+  - delete_lang_scoped_action: language-scoped delete + null language = all
+  - target_langs_json_list_override: TARGET_LANGS list override parses
 """
 
 import json
@@ -738,6 +741,112 @@ def test_actions_truncate_preserves_appended():
         o.STATE_FILE, o.ACTIONS_FILE = saved_state, saved_actions
         o._delete_episode_subtitles, o.jellyfin_refresh = saved_del, saved_jf
     print("PASS actions_truncate_preserves_appended")
+
+
+
+def test_translate_offset_keys_clamped():
+    """Model returns exactly n numbered lines but offset-numbered (2..n+1):
+    the m==n branch must drop out-of-range keys instead of producing a group
+    beyond the cue list (IndexError) or negative indices (silent wrap)."""
+
+    def fake_post_chat(cfg, messages, model, key, local=False):
+        return "\n".join(f"{i}. Baris offset {i}." for i in range(2, 12))
+
+    o.post_chat = fake_post_chat
+    groups = o._translate_merge_aware(
+        build_cfg(), fake_ja_lines(10), "Indonesian", "k"
+    )
+    assert len(groups) == 9, f"keys 2..10 kept, 11 dropped: {groups}"
+    assert [g[0] for g in groups] == list(range(1, 10)), groups
+    assert all(0 <= g[0] < 10 and g[1] <= 10 for g in groups), groups
+    cues = [
+        {"start": i * 1000, "end": i * 1000 + 900, "text": f"cue {i}"}
+        for i in range(10)
+    ]
+    for s, e, _t in groups:
+        assert 0 <= s < len(cues) and s < e <= len(cues), (s, e)
+    print("PASS translate_offset_keys_clamped")
+
+
+def test_delete_lang_scoped_action():
+    """delete action with language removes only that language's SRT files and
+    done-state; a retry with null language means the WHOLE episode."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    state_file = os.path.join(d, "state.jsonl")
+    actions_file = os.path.join(d, "actions.jsonl")
+    with open(state_file, "w", encoding="utf-8") as fh:
+        for eid, lang in ((30, "id"), (30, "en"), (40, "id"), (40, "en")):
+            fh.write(
+                json.dumps({"sonarrEpisodeId": eid, "language": lang, "status": "done"})
+                + "\n"
+            )
+    with open(actions_file, "w", encoding="utf-8") as fh:
+        fh.write('{"action": "delete", "episode_id": 30, "language": "en", "ts": "t"}\n')
+        fh.write('{"type": "retry", "episode_id": 40, "ts": "t"}\n')
+
+    ep_dir = os.path.join(d, "ep")
+    os.makedirs(ep_dir)
+    mkv30 = os.path.join(ep_dir, "Ep30.mkv")
+    mkv40 = os.path.join(ep_dir, "Ep40.mkv")
+    for p in (
+        mkv30,
+        os.path.join(ep_dir, "Ep30.id.srt"),
+        os.path.join(ep_dir, "Ep30.en.srt"),
+        mkv40,
+        os.path.join(ep_dir, "Ep40.id.srt"),
+        os.path.join(ep_dir, "Ep40.en.srt"),
+    ):
+        open(p, "w").close()
+    tmp_dir = os.path.join(d, "tmp")
+    os.makedirs(tmp_dir)
+    for p in (
+        os.path.join(tmp_dir, "30_id.srt"),
+        os.path.join(tmp_dir, "30_en.srt"),
+        os.path.join(tmp_dir, "40_id.srt"),
+        os.path.join(tmp_dir, "40_en.srt"),
+    ):
+        open(p, "w").close()
+
+    saved_state, saved_actions = o.STATE_FILE, o.ACTIONS_FILE
+    saved_get_episode, saved_jf = o.get_episode, o.jellyfin_refresh
+    o.STATE_FILE, o.ACTIONS_FILE = state_file, actions_file
+    o.get_episode = lambda cfg, eid: {
+        "title": f"Ep Title {eid}",
+        "episodeFile": {"path": os.path.join(ep_dir, f"Ep{eid}.mkv")},
+    }
+    refreshes = []
+    o.jellyfin_refresh = lambda cfg, media_path, title=None: refreshes.append(
+        (media_path, title)
+    )
+    try:
+        cfg = build_cfg()
+        cfg["TARGET_LANGS"] = ["id", "en"]
+        cfg["TMP_DIR"] = tmp_dir
+        o.consume_actions(cfg)
+    finally:
+        o.STATE_FILE, o.ACTIONS_FILE = saved_state, saved_actions
+        o.get_episode, o.jellyfin_refresh = saved_get_episode, saved_jf
+
+    assert not os.path.exists(os.path.join(ep_dir, "Ep30.en.srt")), "en srt removed"
+    assert os.path.isfile(os.path.join(ep_dir, "Ep30.id.srt")), "id srt stays"
+    assert not os.path.exists(os.path.join(tmp_dir, "30_en.srt")), "tmp en srt removed"
+    assert os.path.isfile(os.path.join(tmp_dir, "30_id.srt")), "tmp id srt stays"
+    assert not os.path.exists(os.path.join(ep_dir, "Ep40.id.srt")), "null retry all NAS"
+    assert not os.path.exists(os.path.join(ep_dir, "Ep40.en.srt")), "null retry all NAS"
+    assert not os.path.exists(os.path.join(tmp_dir, "40_id.srt")), "null retry all tmp"
+    assert not os.path.exists(os.path.join(tmp_dir, "40_en.srt")), "null retry all tmp"
+    keys = {
+        (r["sonarrEpisodeId"], r["language"])
+        for r in o.load_records_jsonl(state_file)
+    }
+    assert (30, "id") in keys, "id done state stays"
+    assert (30, "en") not in keys, "en done state cleared"
+    assert (40, "id") not in keys, "null retry clears all state"
+    assert (40, "en") not in keys, "null retry clears all state"
+    assert len(refreshes) == 1, refreshes
+    print("PASS delete_lang_scoped_action")
 
 
 if __name__ == "__main__":
