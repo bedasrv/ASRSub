@@ -16,6 +16,7 @@
   --surface-variant: #e3e0ec; --on-surface-variant: #49454f;
   --surface-container-low: #f7f2fa; --surface-container: #f3edf7; --surface-container-high: #ece6f0;
   --outline: #79747e; --outline-variant: #cac4d0;
+  --divider: var(--outline-variant);
   --inverse-surface: #313033; --inverse-on-surface: #f4eff4;
   --ok: #2e7d32; --run: #b26a00;
   --r-s: 8px; --r-m: 12px; --r-l: 16px; --r-xl: 28px; --r-full: 999px;
@@ -87,31 +88,31 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .retry-banner.visible { display: flex; }
 .retry-banner button { flex: none; }
 
-/* ============ Data tables (file-manager list view) ============ */
-.table-wrap { overflow-x: auto; }
-@media (min-width: 840px) { .table-wrap { overflow-x: visible; } }
-.data-table { width: 100%; min-width: 560px; border-collapse: separate; border-spacing: 0; }
-@media (min-width: 840px) { .data-table { min-width: 0; } }
-.data-table th {
-  position: sticky; top: 0; z-index: 5;
-  background: var(--surface-container-high); color: var(--on-surface-variant);
-  font-size: 10px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase;
-  text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--outline-variant); white-space: nowrap;
+/* ============ Flex row list (file-manager list view) ============ */
+.f-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--divider);
 }
-.data-table td { padding: 4px 8px; border-bottom: 1px solid var(--outline-variant); font-size: 13px; line-height: 18px; vertical-align: middle; }
-.data-table tbody tr:nth-child(even) { background: var(--surface-container-low); }
-.data-table tbody tr:hover { background: var(--surface-container-high); }
-.data-table th.td-check, .data-table td.td-check { width: 40px; padding-left: 4px; padding-right: 4px; }
-.data-table th.td-actions, .data-table td.td-actions { width: 44px; text-align: right; white-space: nowrap; }
-.data-table th.td-status, .data-table td.td-status { text-align: right; white-space: nowrap; }
-.data-table th.td-langs, .data-table td.td-langs { text-align: right; white-space: nowrap; }
-.td-title { min-width: 180px; }
-.t-title { font-size: 13px; font-weight: 500; line-height: 18px; }
-.t-title .t-pill { margin-left: 6px; vertical-align: 1px; }
-.t-sub { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
-.td-time { white-space: nowrap; }
-.td-dur { font-size: 11px; line-height: 14px; color: var(--on-surface-variant); display: block; margin-top: 1px; }
-.act-time { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); display: block; }
+.f-row:hover { background: var(--surface-container-high); }
+.f-left { flex: 1 1 auto; min-width: 0; }
+.f-title {
+  font-size: 13px; font-weight: 600; line-height: 18px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.f-title .t-pill { margin-left: 6px; vertical-align: 1px; }
+.f-sub {
+  font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.f-right { flex: 0 0 auto; text-align: right; min-width: 0; }
+.fr-line1 { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+.fr-line2 { display: flex; justify-content: flex-end; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
+@media (max-width: 479px) {
+  .f-row { flex-wrap: wrap; }
+  .f-right { flex: 1 0 100%; }
+  .fr-line1 { justify-content: flex-start; }
+  .fr-line2 { justify-content: flex-start; }
+}
 .kebab {
   border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
   width: 28px; height: 28px; border-radius: 6px;
@@ -153,11 +154,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.pending { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .t-pill.excluded, .t-pill.new { background: var(--surface-variant); color: var(--on-surface-variant); }
 .t-pill.ai { background: var(--tertiary-container); color: var(--on-tertiary-container); }
-@media (max-width: 839px) {
-  .data-table th:first-child, .data-table td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 4; }
-  .data-table.sel-on th:nth-child(2), .data-table.sel-on td:nth-child(2) { position: sticky; left: 40px; background: var(--surface); z-index: 4; }
-  .data-table thead th:first-child, .data-table.sel-on thead th:nth-child(2) { z-index: 6; }
-}
 
 /* ============ Status page ============ */
 .gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px; }
@@ -417,7 +413,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <button class="m3-btn tonal" id="batch-exclude" data-batch="exclude" disabled>Exclude</button>
         <button class="m3-btn text" id="sel-clear">Clear</button>
       </div>
-      <div class="table-wrap" id="library-list"><div class="empty">loading…</div></div>
+      <div id="library-list"><div class="empty">loading…</div></div>
     </section>
 
     <!-- ============ Activity ============ -->
@@ -430,7 +426,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         </div>
         <span class="search-count" id="act-search-count"></span>
       </div>
-      <div class="table-wrap" id="activity-list"><div class="empty">loading…</div></div>
+      <div id="activity-list"><div class="empty">loading…</div></div>
     </section>
 
     <!-- ============ Status ============ -->
@@ -792,14 +788,6 @@ function setSearchCount(id, n, m) {
 
 const KEBAB_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
 
-function libTableHead() {
-  return '<table class="data-table' + (selMode ? " sel-on" : "") + '"><thead><tr>' +
-    (selMode ? '<th class="td-check"></th>' : "") +
-    "<th>Title / Episode</th><th>Status</th><th>Language(s)</th>" +
-    '<th class="td-actions"></th>' +
-    "</tr></thead><tbody>";
-}
-
 function libStatusCell(it, excluded) {
   if (it.wanted) return '<span class="t-pill wanted">wanted</span>';
   if (excluded) return '<span class="t-pill excluded">excluded</span>';
@@ -817,16 +805,17 @@ function libRowHTML(it) {
   const langs = (it.languages || []).map(langChip).join("");
   const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
   return (
-    "<tr>" +
-    (selMode ? '<td class="td-check"><label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label></td>" : "") +
-    '<td class="td-title">' +
-    '<div class="t-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="t-pill wanted">wanted</span>' : "") + "</div>" +
-    '<div class="t-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
-    "</td>" +
-    '<td class="td-status">' + libStatusCell(it, excluded) + "</td>" +
-    '<td class="td-langs">' + (langs || '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-actions"><button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for episode ' + id + '">' + KEBAB_SVG + "</button></td>" +
-    "</tr>"
+    '<div class="f-row">' +
+    (selMode ? '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label>" : "") +
+    '<div class="f-left">' +
+    '<div class="f-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="t-pill wanted">wanted</span>' : "") + "</div>" +
+    '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
+    "</div>" +
+    '<div class="f-right">' +
+    '<div class="fr-line1">' + libStatusCell(it, excluded) +
+    '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for episode ' + id + '">' + KEBAB_SVG + "</button></div>" +
+    (langs ? '<div class="fr-line2">' + langs + "</div>" : "") +
+    "</div></div>"
   );
 }
 
@@ -887,7 +876,7 @@ function renderLibrary(data) {
     updateSelBar();
     return;
   }
-  list.innerHTML = libTableHead() + filtered.map(libRowHTML).join("") + "</tbody></table>";
+  list.innerHTML = filtered.map(libRowHTML).join("");
   updateSelBar();
 }
 
@@ -932,10 +921,6 @@ let activityItems = {};
 let lastActivity = [];
 let actQuery = "";
 
-const TABLE_HEAD_ACT = '<table class="data-table"><thead><tr>' +
-  '<th class="td-time">Time</th><th>Title / Episode</th><th>Status</th><th>Language(s)</th>' +
-  "</tr></thead><tbody>";
-
 function actRowHTML(it) {
   const tsIso = it.ts ? new Date(it.ts).toISOString() : "";
   const rt = relTime(it.ts) || esc(it.relative || "");
@@ -943,17 +928,18 @@ function actRowHTML(it) {
   const stBadges = [];
   if (it.kind === "pipeline" && it.detail) stBadges.push('<span class="t-pill ' + statusClass(it.detail) + '">' + esc(it.detail) + "</span>");
   if (it.ai) stBadges.push('<span class="t-pill ai">AI</span>');
-  const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
+  const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "") + (rt ? " · " + rt : "");
+  const titleAttr = esc((dur ? "elapsed " + dur + " · " : "") + (tsIso || it.ts || ""));
   return (
-    "<tr>" +
-    '<td class="td-time"><span class="act-time" title="' + esc(tsIso || it.ts || "") + '">' + (rt || "—") + "</span>" + (dur ? '<span class="td-dur">' + dur + "</span>" : "") + "</td>" +
-    '<td class="td-title">' +
-    '<div class="t-title">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') + "</div>" +
-    '<div class="t-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
-    "</td>" +
-    '<td class="td-status">' + (stBadges.join(" ") || '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-langs">' + (it.language ? '<span class="lang-badge done">' + esc(it.language) + "</span>" : '<span class="muted">—</span>') + "</td>" +
-    "</tr>"
+    '<div class="f-row">' +
+    '<div class="f-left">' +
+    '<div class="f-title" title="' + titleAttr + '">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') + "</div>" +
+    '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
+    "</div>" +
+    '<div class="f-right">' +
+    '<div class="fr-line1">' + (stBadges.join(" ") || '<span class="muted">—</span>') + "</div>" +
+    (it.language ? '<div class="fr-line2"><span class="lang-badge done">' + esc(it.language) + "</span></div>" : "") +
+    "</div></div>"
   );
 }
 
@@ -984,7 +970,7 @@ function renderActivity(data) {
   for (const it of filtered) {
     if (it.episode_id != null) activityItems[String(it.episode_id)] = it;
   }
-  al.innerHTML = TABLE_HEAD_ACT + filtered.map(actRowHTML).join("") + "</tbody></table>";
+  al.innerHTML = filtered.map(actRowHTML).join("");
 }
 
 async function pollActivity() {
@@ -1128,11 +1114,18 @@ function openRowMenu(id, btn) {
   const r = btn.getBoundingClientRect();
   rowMenu.hidden = false;
   openMenuId = id;
-  let right = Math.max(8, Math.round(window.innerWidth - r.right - 4));
+  rowMenu.style.right = Math.round(window.innerWidth - r.right - 4) + "px";
+  rowMenu.style.left = "auto";
+  const mw = rowMenu.offsetWidth;
+  if (r.right + 4 - mw < 8) {
+    rowMenu.style.right = "auto";
+    let left = Math.round(r.left + 4);
+    if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - mw - 8);
+    rowMenu.style.left = Math.max(8, left) + "px";
+  }
   let top = Math.round(r.bottom + 4);
   const mh = rowMenu.offsetHeight;
   if (top + mh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - mh - 4);
-  rowMenu.style.right = right + "px";
   rowMenu.style.top = top + "px";
 }
 
