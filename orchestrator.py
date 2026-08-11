@@ -525,6 +525,93 @@ def extract_wav(path, stream_index, out_path):
         raise RuntimeError(f"ffmpeg extract failed: {p.stderr.strip()}")
 
 
+def extract_subtitle_sidecars(container_path, tdarr_id=""):
+    """Background task for POST /tdarr-webhook: pull ASS/SSA subtitle streams
+    (language tags jpn/eng) out of the mux and write deterministic
+    {stem}.{lang}.srt sidecars next to the video (-y overwrites so upgrades
+    refresh stale sidecars). Defensive: file missing on NFS or no matching
+    streams -> log and return; never raises. Wakes the main loop on success."""
+    try:
+        media_path = map_path(container_path)
+        if not os.path.isfile(media_path):
+            log(
+                f"tdarr-webhook: file missing on NFS: {media_path} (id={tdarr_id})"
+            )
+            return
+        p = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=index,codec_type,codec_name:stream_tags=language",
+                "-of",
+                "json",
+                media_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if p.returncode != 0:
+            log(
+                f"tdarr-webhook: ffprobe failed for {media_path}: {p.stderr.strip()}"
+            )
+            return
+        data = json.loads(p.stdout)
+        matches = [
+            s
+            for s in data.get("streams", [])
+            if s.get("codec_type") == "subtitle"
+            and s.get("codec_name") in ("ass", "ssa")
+            and (s.get("tags") or {}).get("language") in ("jpn", "eng")
+        ]
+        if not matches:
+            log(
+                f"tdarr-webhook: no ASS/SSA jpn/eng subtitle streams in {media_path}"
+            )
+            return
+        stem = os.path.splitext(media_path)[0]
+        extracted = []
+        for s in matches:
+            lang = s["tags"]["language"]
+            out_path = f"{stem}.{lang}.srt"
+            pp = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    media_path,
+                    "-map",
+                    f"0:s:m:language:{lang}",
+                    "-c:s",
+                    "srt",
+                    out_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=900,
+            )
+            if pp.returncode == 0 and os.path.isfile(out_path):
+                if out_path not in extracted:
+                    extracted.append(out_path)
+            else:
+                log(
+                    f"tdarr-webhook: ffmpeg extract [{lang}] failed for {media_path}: {pp.stderr.strip()}"
+                )
+        if extracted:
+            log(
+                f"tdarr-webhook: extracted {len(extracted)} sidecar(s) for "
+                f"{os.path.basename(media_path)}: {[os.path.basename(x) for x in extracted]}"
+            )
+            WAKE_EVENT.set()
+    except Exception as exc:
+        log(f"tdarr-webhook: extraction failed for {container_path}: {exc}")
+
+
 def _media_fingerprint(path):
     st = os.stat(path)
     return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
@@ -1847,6 +1934,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             WAKE_EVENT.set()
             self._send_json(200, {"ok": True})
             return
+        if path == "/tdarr-webhook":
+            try:
+                raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                body = json.loads(raw.decode("utf-8") or "{}")
+                file_path = body.get("file") or ""
+                tdarr_id = body.get("_id") or ""
+            except Exception:
+                file_path, tdarr_id = "", ""
+            if file_path:
+                threading.Thread(
+                    target=extract_subtitle_sidecars,
+                    args=(file_path, tdarr_id),
+                    daemon=True,
+                ).start()
+            else:
+                log("tdarr-webhook: received POST without 'file' field")
+            self._send_json(200, {"ok": True})
+            return
         if not self._check_auth():
             return
         if path == "/config":
@@ -1916,7 +2021,7 @@ def start_webhook_listener():
         return
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     log(
-        f"control API + webhook listener on :{WEBHOOK_PORT} (GET /status, /config, /health; POST /config /pause /resume /run-once /wake /sonarr-webhook)"
+        f"control API + webhook listener on :{WEBHOOK_PORT} (GET /status, /config, /health; POST /config /pause /resume /run-once /wake /sonarr-webhook /tdarr-webhook)"
     )
 
 
