@@ -90,32 +90,32 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
 /* ============ Flex row list (file-manager list view) ============ */
 .f-row {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: stretch;
   gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--divider);
 }
 .f-row:hover { background: var(--surface-container-high); }
-.f-left { flex: 1 1 auto; min-width: 0; }
+.f-left {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; justify-content: center;
+}
 .f-title {
   font-size: 13px; font-weight: 600; line-height: 18px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.f-title .t-pill { margin-left: 6px; vertical-align: 1px; }
 .f-sub {
   font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.f-right { flex: 0 0 auto; text-align: right; min-width: 0; }
-.fr-line1 { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
-.fr-line2 { display: flex; justify-content: flex-end; gap: 4px; flex-wrap: wrap; margin-top: 2px; }
-@media (max-width: 479px) {
-  .f-row { flex-wrap: wrap; }
-  .f-right { flex: 1 0 100%; }
-  .fr-line1 { justify-content: flex-start; }
-  .fr-line2 { justify-content: flex-start; }
+.f-right {
+  flex: 0 0 auto; min-width: 0;
+  display: flex; flex-direction: column; align-items: flex-end; justify-content: center;
+  gap: 6px;
 }
+.fr-line1 { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.fr-line2 { display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
 .kebab {
   border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
-  width: 28px; height: 28px; border-radius: 6px;
+  width: 20px; height: 20px; border-radius: 4px;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .kebab:hover { background: var(--surface-variant); color: var(--on-surface); }
@@ -137,8 +137,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .rm-item.rm-danger { color: var(--error); }
 .rm-item.rm-danger:hover { background: var(--error-container); }
 .lang-badge {
-  display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--r-full);
-  font-size: 11px; font-weight: 600; line-height: 20px; white-space: nowrap;
+  display: inline-flex; align-items: center; line-height: 1; padding: 3px 8px;
+  border-radius: var(--r-full); font-size: 11px; font-weight: 600; white-space: nowrap;
 }
 .lang-badge.done { background: var(--secondary-container); color: var(--on-secondary-container); }
 .lang-badge.error { background: var(--error-container); color: var(--on-error-container); }
@@ -808,7 +808,7 @@ function libRowHTML(it) {
     '<div class="f-row">' +
     (selMode ? '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label>" : "") +
     '<div class="f-left">' +
-    '<div class="f-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="t-pill wanted">wanted</span>' : "") + "</div>" +
+    '<div class="f-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + "</div>" +
     '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
     "</div>" +
     '<div class="f-right">' +
