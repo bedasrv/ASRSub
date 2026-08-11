@@ -529,26 +529,27 @@ _SUB_TITLE_SKIP = ("commentary", "description")
 
 
 def _subtitle_streams(path):
-    """All subtitle streams with per-stream packet counts via
-    ffprobe -count_packets (needed to pick the most-complete track per
-    language). Raises on ffprobe failure."""
+    """All subtitle streams with mkvmerge statistics tags (NUMBER_OF_FRAMES,
+    a packet-count proxy present on this library's muxes) and disposition.
+    No -count_packets: that forces ffprobe to scan the whole file and times
+    out over NFS on large muxes. Header-only read, fast. Raises on ffprobe
+    failure."""
     p = subprocess.run(
         [
             "ffprobe",
             "-v",
             "error",
-            "-count_packets",
             "-select_streams",
             "s",
             "-show_entries",
-            "stream=index,codec_type,codec_name,nb_read_packets:stream_tags=language,title",
+            "stream=index,codec_type,codec_name:stream_disposition=default,forced,hearing_impaired:stream_tags=language,title,NUMBER_OF_FRAMES",
             "-of",
             "json",
             path,
         ],
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=120,
     )
     if p.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {p.stderr.strip()}")
@@ -556,10 +557,13 @@ def _subtitle_streams(path):
 
 
 def _pick_best_subtitle(streams, lang):
-    """Best ASS/SSA stream for a language: most packets, skipping tracks whose
-    title contains 'commentary'/'description' (drpeppershaker convention).
-    Returns the stream dict or None."""
-    best, best_packets = None, -1
+    """Best ASS/SSA stream for a language, skipping tracks whose title
+    contains 'commentary'/'description' (drpeppershaker convention). Primary
+    score is the mkvmerge NUMBER_OF_FRAMES statistics tag (no whole-file
+    read); if every candidate lacks it, fall back to disposition order:
+    non-forced, then not hearing_impaired, then lower index. Returns the
+    stream dict or None."""
+    cands = []
     for s in streams:
         tags = s.get("tags") or {}
         if s.get("codec_type") != "subtitle":
@@ -571,25 +575,38 @@ def _pick_best_subtitle(streams, lang):
         title = (tags.get("title") or "").lower()
         if any(k in title for k in _SUB_TITLE_SKIP):
             continue
+        cands.append(s)
+    if not cands:
+        return None
+    scored = []
+    for s in cands:
         try:
-            packets = int(s.get("nb_read_packets") or 0)
+            frames = int((s.get("tags") or {}).get("NUMBER_OF_FRAMES") or 0)
         except (TypeError, ValueError):
-            packets = 0
-        if packets > best_packets:
-            best, best_packets = s, packets
-    return best
+            frames = 0
+        scored.append((frames, s))
+    if any(f > 0 for f, _ in scored):
+        return max(scored, key=lambda fs: fs[0])[1]
+    return min(
+        cands,
+        key=lambda s: (
+            int((s.get("disposition") or {}).get("forced") or 0),
+            int((s.get("disposition") or {}).get("hearing_impaired") or 0),
+            s["index"],
+        ),
+    )
 
 
 def extract_subtitle_sidecars(container_path, tdarr_id=""):
     """Background task for POST /tdarr-webhook: pull the single best ASS/SSA
-    subtitle stream per language (jpn/eng, most packets, skipping
-    commentary/description titles) out of the mux and write deterministic
-    {stem}.{lang}.srt sidecars next to the video. Extracts with the exact
-    stream index (-map 0:<index>, never a language matcher), writes to
-    {stem}.{lang}.srt.tmp and os.replace()s on success so a failed run never
-    leaves a 0-byte file or clobbers a good sidecar. Defensive: missing file,
-    no matching streams, or ffmpeg failure -> log and return; never raises.
-    Wakes the main loop on success."""
+    subtitle stream per language (jpn/eng, scored by mkvmerge NUMBER_OF_FRAMES
+    with a disposition fallback, skipping commentary/description titles) out
+    of the mux and write deterministic {stem}.{lang}.srt sidecars next to the
+    video. Extracts with the exact stream index (-map 0:<index>, never a
+    language matcher), writes to {stem}.{lang}.srt.tmp and os.replace()s on
+    success so a failed run never leaves a 0-byte file or clobbers a good
+    sidecar. Defensive: missing file, no matching streams, or ffmpeg failure
+    -> log and return; never raises. Wakes the main loop on success."""
     try:
         media_path = map_path(container_path)
         if not os.path.isfile(media_path):
