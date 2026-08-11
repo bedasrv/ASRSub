@@ -996,6 +996,260 @@ def test_validate_retry_target():
     print("PASS validate_retry_target")
 
 
+def _write_srt(path, cues, ratio_kind="jpn"):
+    """Write a minimal SRT whose cleaned text is mostly CJK (jpn) or latin
+    (eng), with cues spread across the given span."""
+    with open(path, "w", encoding="utf-8") as fh:
+        for i, (start_ms, end_ms, text) in enumerate(cues, 1):
+            fh.write(f"{i}\n{o._fmt_ms(start_ms)} --> {o._fmt_ms(end_ms)}\n{text}\n\n")
+    return path
+
+
+def test_ladder_registry():
+    """registry upsert/get/load: append-only, latest row wins, created_ts kept,
+    source/source_path/source_hash round-tripped."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    saved = o.REGISTRY_FILE
+    o.REGISTRY_FILE = os.path.join(d, "subtitle_registry.jsonl")
+    try:
+        e1 = o.registry_upsert(5, "id", "asr")
+        time.sleep(0.01)
+        e2 = o.registry_upsert(5, "id", "jpn", source_path="/x.jpn.srt", source_hash="abc")
+        e3 = o.registry_upsert(6, "en", "eng")
+        assert e1["created_ts"] == e2["created_ts"], (e1, e2)
+        assert e2["updated_ts"] >= e1["updated_ts"]
+        assert e2["source"] == "jpn" and e2["source_hash"] == "abc"
+        reg = o.load_registry()
+        assert set(reg) == {(5, "id"), (6, "en")}, set(reg)
+        assert reg[(5, "id")]["source"] == "jpn", "latest row must win"
+        assert o.registry_get(5, "id")["source"] == "jpn"
+        assert o.registry_get(99, "id") is None
+    finally:
+        o.REGISTRY_FILE = saved
+    print("PASS ladder_registry")
+
+
+def test_ladder_clean_ass_text():
+    """{\\an8} override blocks and <font> tags stripped; \\N preserved as a
+    line break; blank lines collapse."""
+    src = '<font size="75">{\\an8}(フリーレン)\\N王都が見えてきたね</font>'
+    out = o.clean_ass_text(src)
+    assert "\\an8" not in out and "font" not in out, out
+    assert "(フリーレン)\n王都が見えてきたね" == out, out
+    assert o.clean_ass_text("{\\an8}♪~") == "♪~"
+    assert o.clean_ass_text("a\\nb") == "a\nb"
+    print("PASS ladder_clean_ass_text")
+
+
+def test_ladder_assess_gates():
+    """assess_source_file: min cues, min chars, CJK/latin ratio, span
+    tolerance all enforced; ok result carries cleaned cues + source_hash."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    p = os.path.join(d, "sub.srt")
+    cfg = build_cfg()
+    cfg["LADDER_MIN_CUES"] = "40"
+    cfg["LADDER_MIN_CHARS"] = "1500"
+    cfg["LADDER_MIN_CJK"] = "0.6"
+    cfg["LADDER_SPAN_TOLERANCE"] = "0.15"
+
+    # too few cues
+    _write_srt(p, [(i * 1000, i * 1000 + 800, "テストの台詞です。" + "あいうえお") for i in range(10)])
+    v = o.assess_source_file(cfg, p, "jpn", 60.0)
+    assert not v["ok"] and "cues" in v["reason"], v
+    # not enough chars
+    _write_srt(p, [(i * 1000, i * 1000 + 800, "テスト") for i in range(60)])
+    v = o.assess_source_file(cfg, p, "jpn", 60.0)
+    assert not v["ok"] and "chars" in v["reason"], v
+    # low CJK ratio (mostly latin) rejected for jpn
+    lines = [(i * 1000, i * 1000 + 800, "This is an english subtitle line for the gate test. " + "a" * 20) for i in range(80)]
+    _write_srt(p, lines)
+    v = o.assess_source_file(cfg, p, "jpn", 80.0)
+    assert not v["ok"] and "ratio" in v["reason"], v
+    # latin ratio passes for eng
+    v = o.assess_source_file(cfg, p, "eng", 80.0)
+    assert v["ok"], v
+    # span mismatch rejected
+    _write_srt(p, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    v = o.assess_source_file(cfg, p, "jpn", 600.0)
+    assert not v["ok"] and "span" in v["reason"], v
+    # everything passes at the right duration; span is last cue END
+    v = o.assess_source_file(cfg, p, "jpn", 60.8)
+    assert v["ok"], v
+    assert len(v["cues"]) == 60 and all("{" not in c["text"] for c in v["cues"])
+    assert isinstance(v["source_hash"], str) and len(v["source_hash"]) == 64, v["source_hash"]
+    print("PASS ladder_assess_gates")
+
+
+def test_ladder_detect_sidecar():
+    """detect_ladder_source picks the external jpn sidecar over ASR; a
+    gate-failing sidecar falls through to eng then asr; kind is reported."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    eng = os.path.join(d, "Ep.eng.srt")
+    cfg = build_cfg()
+    cfg["TARGET_LANGS"] = ["id", "en"]
+    cfg["TMP_DIR"] = d
+
+    # passing jpn sidecar -> jpn
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+    assert v["kind"] == "jpn" and v["source_path"] == jpn, v
+    assert v["cues"] and len(v["cues"]) == 60
+
+    # gate-failing jpn (too few cues) -> eng sidecar
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テスト") for i in range(5)])
+    _write_srt(eng, [(i * 1000, i * 1000 + 800, "This is a perfectly good english subtitle line for the test.") for i in range(60)])
+    v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+    assert v["kind"] == "eng", v
+
+    # no usable sidecar -> asr
+    os.remove(jpn)
+    os.remove(eng)
+    v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+    assert v["kind"] == "asr" and v["source_path"] is None, v
+    print("PASS ladder_detect_sidecar")
+
+
+def test_ladder_marker_fallback():
+    """srt_has_ai_marker only accepts the marker in the FIRST cue;
+    sub_is_ai_owned trusts the registry, falls back to the marker."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    sub = os.path.join(d, "Ep.id.srt")
+    _write_srt(sub, [(500, 1500, o.AI_MARKER), (2000, 3000, "Dia menoleh.")])
+    assert o.srt_has_ai_marker(sub)
+    sub2 = os.path.join(d, "Ep2.id.srt")
+    _write_srt(sub2, [(2000, 3000, "Dia menoleh."), (3000, 4000, o.AI_MARKER)])
+    assert not o.srt_has_ai_marker(sub2), "marker must be first cue only"
+    media = os.path.join(d, "Ep.mkv")
+    open(media, "w").close()
+    registry = {}
+    assert o.sub_is_ai_owned(registry, 1, "id", media), "marker fallback -> owned"
+    registry[(1, "id")] = {"source": "jpn"}
+    assert o.sub_is_ai_owned(registry, 1, "id", media)
+    foreign = os.path.join(d, "Ep3.id.srt")
+    _write_srt(foreign, [(2000, 3000, "Foreign sub without marker.")])
+    media3 = os.path.join(d, "Ep3.mkv")
+    open(media3, "w").close()
+    assert not o.sub_is_ai_owned({}, 3, "id", media3), "no registry + no marker -> foreign"
+    print("PASS ladder_marker_fallback")
+
+
+def test_ladder_audio_id():
+    """audio_stream_signature is stable for identical streams, distinct when
+    any signature dimension changes (format duration included), and never
+    contains the episode id."""
+    s1 = [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+           "channel_layout": "stereo", "duration": "1500.0"}]
+    s2 = [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+           "channel_layout": "stereo", "duration": "1500.0"}]
+    s3 = [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+           "channel_layout": "5.1", "duration": "1500.0"}]
+    a1 = o.audio_stream_signature(s1)
+    assert a1 == o.audio_stream_signature(s2)
+    assert a1 != o.audio_stream_signature(s3)
+    assert len(a1) == 32 and all(c in "0123456789abcdef" for c in a1)
+    assert "42" not in a1
+    s4 = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "1500.0"}]
+    )
+    s4.format_duration = 1500.0
+    assert o.audio_stream_signature(s4) != o.audio_stream_signature(s1), (
+        "format duration must feed the signature"
+    )
+    print("PASS ladder_audio_id")
+
+
+def test_ladder_upgrade_guards():
+    """run_upgrades: cooldown skips fresh rows, refine-history skips refined,
+    source-hash dedup skips identical, budget caps upgrades, foreign subs
+    never upgraded."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    saved_reg = o.REGISTRY_FILE
+    saved_refine = o.REFINE_STATE_FILE
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    o.REFINE_STATE_FILE = os.path.join(d, "refine.jsonl")
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    old = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def row(ep_id, lang, source, updated, source_hash=""):
+        return {"episode_id": ep_id, "lang": lang, "source": source,
+                "source_path": "", "source_hash": source_hash,
+                "created_ts": updated, "updated_ts": updated}
+
+    rows = [
+        row(10, "id", "asr", old),              # fresh-worthy, budget upgrade
+        row(11, "id", "asr", now),              # cooldown -> skip
+        row(12, "id", "asr", old),              # refined -> skip
+        row(13, "id", "eng", old, source_hash="same"),  # hash dedup -> skip
+    ]
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    with open(o.REFINE_STATE_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ep_id": 12, "lang": "id", "status": "done"}, ensure_ascii=False) + "\n")
+
+    media = os.path.join(d, "Ep.mkv")
+    open(media, "w").close()
+
+    saved_get_episode = o.get_episode
+    saved_detect = o.detect_ladder_source
+    saved_process = o.process_ladder
+    o.get_episode = lambda cfg, eid: {
+        "hasFile": True,
+        "title": "Ep",
+        "episodeFile": {"path": media},
+        "seriesId": 1,
+        "seasonNumber": 1,
+        "episodeNumber": eid,
+    }
+    o.detect_ladder_source = lambda *a, **k: {
+        "kind": "jpn", "source_path": "/jpn.srt",
+        "source_hash": "same" if len(a) > 4 and a[4] == 13 else "newhash",
+        "cues": [{"start": "00:00:00,000", "end": "00:00:01,000", "text": "x"}],
+        "duration_s": 1.0, "tmp": False,
+    }
+    processed = []
+
+    def fake_process_ladder(cfg, key, ep_id, lang, series, tag, source, info, prior_cache=None):
+        o.registry_upsert(ep_id, lang, "jpn", source_path="/jpn.srt", source_hash="newhash")
+        processed.append((ep_id, lang))
+        return "done"
+
+    o.process_ladder = fake_process_ladder
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["LADDER_UPGRADE_BUDGET"] = "1"
+        cfg["LADDER_COOLDOWN_H"] = "24"
+        stats = o.run_upgrades(cfg, "k")
+        assert stats["upgraded"] == 1, stats
+        assert processed == [(10, "id")], processed
+        # second call: ep 10 already jpn in registry -> nothing to upgrade
+        stats2 = o.run_upgrades(cfg, "k")
+        assert stats2["upgraded"] == 0, stats2
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.REFINE_STATE_FILE = saved_refine
+        o.get_episode = saved_get_episode
+        o.detect_ladder_source = saved_detect
+        o.process_ladder = saved_process
+    print("PASS ladder_upgrade_guards")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
