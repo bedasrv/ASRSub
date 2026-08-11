@@ -525,12 +525,71 @@ def extract_wav(path, stream_index, out_path):
         raise RuntimeError(f"ffmpeg extract failed: {p.stderr.strip()}")
 
 
+_SUB_TITLE_SKIP = ("commentary", "description")
+
+
+def _subtitle_streams(path):
+    """All subtitle streams with per-stream packet counts via
+    ffprobe -count_packets (needed to pick the most-complete track per
+    language). Raises on ffprobe failure."""
+    p = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_packets",
+            "-select_streams",
+            "s",
+            "-show_entries",
+            "stream=index,codec_type,codec_name,nb_read_packets:stream_tags=language,title",
+            "-of",
+            "json",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if p.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {p.stderr.strip()}")
+    return json.loads(p.stdout).get("streams", [])
+
+
+def _pick_best_subtitle(streams, lang):
+    """Best ASS/SSA stream for a language: most packets, skipping tracks whose
+    title contains 'commentary'/'description' (drpeppershaker convention).
+    Returns the stream dict or None."""
+    best, best_packets = None, -1
+    for s in streams:
+        tags = s.get("tags") or {}
+        if s.get("codec_type") != "subtitle":
+            continue
+        if s.get("codec_name") not in ("ass", "ssa"):
+            continue
+        if tags.get("language") != lang:
+            continue
+        title = (tags.get("title") or "").lower()
+        if any(k in title for k in _SUB_TITLE_SKIP):
+            continue
+        try:
+            packets = int(s.get("nb_read_packets") or 0)
+        except (TypeError, ValueError):
+            packets = 0
+        if packets > best_packets:
+            best, best_packets = s, packets
+    return best
+
+
 def extract_subtitle_sidecars(container_path, tdarr_id=""):
-    """Background task for POST /tdarr-webhook: pull ASS/SSA subtitle streams
-    (language tags jpn/eng) out of the mux and write deterministic
-    {stem}.{lang}.srt sidecars next to the video (-y overwrites so upgrades
-    refresh stale sidecars). Defensive: file missing on NFS or no matching
-    streams -> log and return; never raises. Wakes the main loop on success."""
+    """Background task for POST /tdarr-webhook: pull the single best ASS/SSA
+    subtitle stream per language (jpn/eng, most packets, skipping
+    commentary/description titles) out of the mux and write deterministic
+    {stem}.{lang}.srt sidecars next to the video. Extracts with the exact
+    stream index (-map 0:<index>, never a language matcher), writes to
+    {stem}.{lang}.srt.tmp and os.replace()s on success so a failed run never
+    leaves a 0-byte file or clobbers a good sidecar. Defensive: missing file,
+    no matching streams, or ffmpeg failure -> log and return; never raises.
+    Wakes the main loop on success."""
     try:
         media_path = map_path(container_path)
         if not os.path.isfile(media_path):
@@ -538,44 +597,22 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
                 f"tdarr-webhook: file missing on NFS: {media_path} (id={tdarr_id})"
             )
             return
-        p = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=index,codec_type,codec_name:stream_tags=language",
-                "-of",
-                "json",
-                media_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if p.returncode != 0:
-            log(
-                f"tdarr-webhook: ffprobe failed for {media_path}: {p.stderr.strip()}"
-            )
+        try:
+            streams = _subtitle_streams(media_path)
+        except Exception as exc:
+            log(f"tdarr-webhook: ffprobe failed for {media_path}: {exc}")
             return
-        data = json.loads(p.stdout)
-        matches = [
-            s
-            for s in data.get("streams", [])
-            if s.get("codec_type") == "subtitle"
-            and s.get("codec_name") in ("ass", "ssa")
-            and (s.get("tags") or {}).get("language") in ("jpn", "eng")
-        ]
-        if not matches:
-            log(
-                f"tdarr-webhook: no ASS/SSA jpn/eng subtitle streams in {media_path}"
-            )
-            return
-        stem = os.path.splitext(media_path)[0]
         extracted = []
-        for s in matches:
-            lang = s["tags"]["language"]
-            out_path = f"{stem}.{lang}.srt"
+        for lang in ("jpn", "eng"):
+            best = _pick_best_subtitle(streams, lang)
+            if best is None:
+                log(
+                    f"tdarr-webhook: no ASS/SSA '{lang}' subtitle stream in {media_path}"
+                )
+                continue
+            index = best["index"]
+            out_path = f"{os.path.splitext(media_path)[0]}.{lang}.srt"
+            tmp_path = out_path + ".tmp"
             pp = subprocess.run(
                 [
                     "ffmpeg",
@@ -586,22 +623,32 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
                     "-i",
                     media_path,
                     "-map",
-                    f"0:s:m:language:{lang}",
+                    f"0:{index}",
                     "-c:s",
                     "srt",
-                    out_path,
+                    "-f",
+                    "srt",
+                    tmp_path,
                 ],
                 capture_output=True,
                 text=True,
                 timeout=900,
             )
-            if pp.returncode == 0 and os.path.isfile(out_path):
-                if out_path not in extracted:
-                    extracted.append(out_path)
+            if (
+                pp.returncode == 0
+                and os.path.isfile(tmp_path)
+                and os.path.getsize(tmp_path) > 0
+            ):
+                os.replace(tmp_path, out_path)
+                extracted.append(out_path)
             else:
                 log(
                     f"tdarr-webhook: ffmpeg extract [{lang}] failed for {media_path}: {pp.stderr.strip()}"
                 )
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
         if extracted:
             log(
                 f"tdarr-webhook: extracted {len(extracted)} sidecar(s) for "
