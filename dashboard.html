@@ -102,23 +102,39 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .data-table tbody tr:nth-child(even) { background: var(--surface-container-low); }
 .data-table tbody tr:hover { background: var(--surface-container-high); }
 .data-table th.td-check, .data-table td.td-check { width: 40px; padding-left: 4px; padding-right: 4px; }
-.data-table th.td-actions, .data-table td.td-actions { text-align: right; white-space: nowrap; }
-.td-series { font-weight: 500; min-width: 140px; }
-.td-ep { min-width: 120px; }
-.td-langs { white-space: nowrap; }
-.td-status { white-space: nowrap; }
+.data-table th.td-actions, .data-table td.td-actions { width: 44px; text-align: right; white-space: nowrap; }
+.data-table th.td-status, .data-table td.td-status { text-align: right; white-space: nowrap; }
+.data-table th.td-langs, .data-table td.td-langs { text-align: right; white-space: nowrap; }
+.td-title { min-width: 180px; }
+.t-title { font-size: 13px; font-weight: 500; line-height: 18px; }
+.t-title .t-pill { margin-left: 6px; vertical-align: 1px; }
+.t-sub { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
 .td-time { white-space: nowrap; }
 .td-dur { font-size: 11px; line-height: 14px; color: var(--on-surface-variant); display: block; margin-top: 1px; }
-.act-code { color: var(--primary); font-weight: 600; }
 .act-time { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); display: block; }
-.t-act {
-  border: none; background: transparent; color: var(--primary); cursor: pointer;
-  font-size: 12px; font-weight: 500; line-height: 18px; padding: 2px 6px; border-radius: 4px; white-space: nowrap;
+.kebab {
+  border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
+  width: 28px; height: 28px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
-.t-act:hover { background: var(--primary-container); }
-.t-act:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.t-act.danger { color: var(--error); }
-.t-act.danger:hover { background: var(--error-container); }
+.kebab:hover { background: var(--surface-variant); color: var(--on-surface); }
+.kebab:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.row-menu {
+  position: fixed; z-index: 60; min-width: 148px; padding: 4px;
+  display: flex; flex-direction: column;
+  background: var(--surface-container-high); border: 1px solid var(--outline-variant);
+  border-radius: var(--r-s); box-shadow: var(--sh2);
+}
+.row-menu[hidden] { display: none; }
+.rm-item {
+  border: none; background: transparent; color: var(--on-surface); cursor: pointer;
+  font-size: 13px; font-weight: 500; line-height: 18px; text-align: left;
+  padding: 6px 10px; border-radius: 4px;
+}
+.rm-item:hover { background: var(--surface-variant); }
+.rm-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.rm-item.rm-danger { color: var(--error); }
+.rm-item.rm-danger:hover { background: var(--error-container); }
 .lang-badge {
   display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: var(--r-full);
   font-size: 11px; font-weight: 600; line-height: 20px; white-space: nowrap;
@@ -139,8 +155,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.ai { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 @media (max-width: 839px) {
   .data-table th:first-child, .data-table td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 4; }
-  .data-table th:nth-child(2), .data-table td:nth-child(2) { position: sticky; left: 40px; background: var(--surface); z-index: 4; }
-  .data-table thead th:first-child, .data-table thead th:nth-child(2) { z-index: 6; }
+  .data-table.sel-on th:nth-child(2), .data-table.sel-on td:nth-child(2) { position: sticky; left: 40px; background: var(--surface); z-index: 4; }
+  .data-table thead th:first-child, .data-table.sel-on thead th:nth-child(2) { z-index: 6; }
 }
 
 /* ============ Status page ============ */
@@ -222,6 +238,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .fchip:hover { background: var(--surface-variant); }
 .fchip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
 .fchip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.sel-toggle { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 12px; }
+.sel-toggle svg { flex: none; }
 
 /* ============ Library page ============ */
 #sel-bar {
@@ -382,6 +400,10 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           <button type="button" class="fchip" data-status="pending">Pending</button>
           <button type="button" class="fchip" data-status="excluded">Excluded</button>
         </div>
+        <button type="button" class="fchip sel-toggle" id="sel-toggle" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
+          Select
+        </button>
       </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
@@ -501,6 +523,12 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 </button>
 
 <div id="toasts"></div>
+<div id="row-menu" class="row-menu" hidden>
+  <button type="button" class="rm-item" data-act="retry">Retry</button>
+  <button type="button" class="rm-item" data-act="skip">Skip</button>
+  <button type="button" class="rm-item rm-danger" data-act="delete">Delete</button>
+  <button type="button" class="rm-item" data-act="exclude">Exclude</button>
+</div>
 <script>
 const LS_THEME = "asr-dash-theme";
 const ICONS = { auto: "🔄", light: "☀️", dark: "🌙" };
@@ -730,7 +758,7 @@ function updateSelBar() {
     if (b) b.disabled = n === 0;
   }
   const allBtn = document.getElementById("sel-all-btn");
-  if (allBtn) allBtn.textContent = n > 0 && n === Object.keys(libraryItems).length ? "None" : "All";
+  if (allBtn) allBtn.textContent = n > 0 && n === libVisible.length ? "None" : "All";
   updateFab();
 }
 
@@ -740,7 +768,7 @@ function toggleSelect(id, on) {
 }
 
 function selectAll(on) {
-  for (const k of Object.keys(libraryItems)) selected[k] = on;
+  for (const k of libVisible) selected[k] = on;
   const boxes = document.querySelectorAll("#library-list .m3-check");
   for (const b of boxes) b.checked = on;
   updateSelBar();
@@ -754,16 +782,23 @@ function langChip(l) {
 
 let libQuery = "";
 let libStatus = "";
+let selMode = false;
+let libVisible = [];
 
 function setSearchCount(id, n, m) {
   const el = document.getElementById(id);
   if (el) el.textContent = m > 0 ? n + " / " + m : "";
 }
 
-const TABLE_HEAD_LIB = '<table class="data-table"><thead><tr>' +
-  '<th class="td-check"></th><th>Series / Title</th><th>Episode</th><th>Language(s)</th><th>Status</th>' +
-  '<th class="td-actions">Actions</th>' +
-  "</tr></thead><tbody>";
+const KEBAB_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
+
+function libTableHead() {
+  return '<table class="data-table' + (selMode ? " sel-on" : "") + '"><thead><tr>' +
+    (selMode ? '<th class="td-check"></th>' : "") +
+    "<th>Title / Episode</th><th>Status</th><th>Language(s)</th>" +
+    '<th class="td-actions"></th>' +
+    "</tr></thead><tbody>";
+}
 
 function libStatusCell(it, excluded) {
   if (it.wanted) return '<span class="t-pill wanted">wanted</span>';
@@ -780,20 +815,18 @@ function libRowHTML(it) {
   const id = String(it.sonarr_episode_id);
   const excluded = !!libraryExcluded[id];
   const langs = (it.languages || []).map(langChip).join("");
-  const ep = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
+  const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
   return (
     "<tr>" +
-    '<td class="td-check"><label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label></td>" +
-    '<td class="td-series">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="t-pill wanted">wanted</span>' : "") + "</td>" +
-    '<td class="td-ep">' + (ep ? ep : '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-langs">' + (langs || '<span class="muted">—</span>') + "</td>" +
+    (selMode ? '<td class="td-check"><label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label></td>" : "") +
+    '<td class="td-title">' +
+    '<div class="t-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + (it.wanted ? ' <span class="t-pill wanted">wanted</span>' : "") + "</div>" +
+    '<div class="t-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
+    "</td>" +
     '<td class="td-status">' + libStatusCell(it, excluded) + "</td>" +
-    '<td class="td-actions">' +
-    '<button class="t-act" data-act="retry" data-id="' + id + '">Retry</button>' +
-    '<button class="t-act" data-act="skip" data-id="' + id + '">Skip</button>' +
-    '<button class="t-act danger" data-act="delete" data-id="' + id + '">Delete</button>' +
-    '<button class="t-act" data-act="' + (excluded ? "unexclude" : "exclude") + '" data-id="' + id + '">' + (excluded ? "Unexclude" : "Exclude") + "</button>" +
-    "</td></tr>"
+    '<td class="td-langs">' + (langs || '<span class="muted">—</span>') + "</td>" +
+    '<td class="td-actions"><button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for episode ' + id + '">' + KEBAB_SVG + "</button></td>" +
+    "</tr>"
   );
 }
 
@@ -832,6 +865,7 @@ function renderLibrary(data) {
     if (!libraryItems[k]) delete selected[k];
   }
   const bar = document.getElementById("sel-bar");
+  libVisible = [];
   setSearchCount("lib-search-count", 0, items.length);
   if (!items.length) {
     bar.hidden = true;
@@ -841,9 +875,10 @@ function renderLibrary(data) {
     updateSelBar();
     return;
   }
-  bar.hidden = false;
+  bar.hidden = !selMode;
   const q = libQuery.trim().toLowerCase();
   const filtered = items.filter(function (it) { return libMatches(it, q); });
+  libVisible = filtered.map(function (it) { return String(it.sonarr_episode_id); });
   setSearchCount("lib-search-count", filtered.length, items.length);
   if (!filtered.length) {
     list.innerHTML = q
@@ -852,7 +887,7 @@ function renderLibrary(data) {
     updateSelBar();
     return;
   }
-  list.innerHTML = TABLE_HEAD_LIB + filtered.map(libRowHTML).join("") + "</tbody></table>";
+  list.innerHTML = libTableHead() + filtered.map(libRowHTML).join("") + "</tbody></table>";
   updateSelBar();
 }
 
@@ -898,8 +933,7 @@ let lastActivity = [];
 let actQuery = "";
 
 const TABLE_HEAD_ACT = '<table class="data-table"><thead><tr>' +
-  '<th class="td-time">Time</th><th>Series</th><th>Episode</th><th>Language</th><th>Status</th>' +
-  '<th class="td-actions">Actions</th>' +
+  '<th class="td-time">Time</th><th>Title / Episode</th><th>Status</th><th>Language(s)</th>' +
   "</tr></thead><tbody>";
 
 function actRowHTML(it) {
@@ -909,18 +943,16 @@ function actRowHTML(it) {
   const stBadges = [];
   if (it.kind === "pipeline" && it.detail) stBadges.push('<span class="t-pill ' + statusClass(it.detail) + '">' + esc(it.detail) + "</span>");
   if (it.ai) stBadges.push('<span class="t-pill ai">AI</span>');
-  const ep = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
-  const acts = it.episode_id != null
-    ? '<button class="t-act danger" data-act="delete" data-id="' + esc(it.episode_id) + '">Delete</button>'
-    : "";
+  const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
   return (
     "<tr>" +
     '<td class="td-time"><span class="act-time" title="' + esc(tsIso || it.ts || "") + '">' + (rt || "—") + "</span>" + (dur ? '<span class="td-dur">' + dur + "</span>" : "") + "</td>" +
-    '<td class="td-series">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-ep">' + (ep ? ep : '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-langs">' + (it.language ? '<span class="lang-badge done">' + esc(it.language) + "</span>" : '<span class="muted">—</span>') + "</td>" +
+    '<td class="td-title">' +
+    '<div class="t-title">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') + "</div>" +
+    '<div class="t-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
+    "</td>" +
     '<td class="td-status">' + (stBadges.join(" ") || '<span class="muted">—</span>') + "</td>" +
-    '<td class="td-actions">' + acts + "</td>" +
+    '<td class="td-langs">' + (it.language ? '<span class="lang-badge done">' + esc(it.language) + "</span>" : '<span class="muted">—</span>') + "</td>" +
     "</tr>"
   );
 }
@@ -1077,7 +1109,72 @@ async function episodeAction(act, id, btn, langOverride) {
   btnBusy(btn, false);
 }
 
+const rowMenu = document.getElementById("row-menu");
+let openMenuId = null;
+
+function closeRowMenu() {
+  rowMenu.hidden = true;
+  openMenuId = null;
+}
+
+function openRowMenu(id, btn) {
+  if (openMenuId === id) { closeRowMenu(); return; }
+  rowMenu.dataset.id = id;
+  const exclBtn = rowMenu.querySelector("[data-act='exclude'], [data-act='unexclude']");
+  if (exclBtn) {
+    if (libraryExcluded[String(id)]) { exclBtn.dataset.act = "unexclude"; exclBtn.textContent = "Unexclude"; }
+    else { exclBtn.dataset.act = "exclude"; exclBtn.textContent = "Exclude"; }
+  }
+  const r = btn.getBoundingClientRect();
+  rowMenu.hidden = false;
+  openMenuId = id;
+  let right = Math.max(8, Math.round(window.innerWidth - r.right - 4));
+  let top = Math.round(r.bottom + 4);
+  const mh = rowMenu.offsetHeight;
+  if (top + mh > window.innerHeight - 4) top = Math.max(4, window.innerHeight - mh - 4);
+  rowMenu.style.right = right + "px";
+  rowMenu.style.top = top + "px";
+}
+
+if (rowMenu) {
+  rowMenu.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-act]");
+    if (!btn) return;
+    const id = rowMenu.dataset.id;
+    closeRowMenu();
+    episodeAction(btn.dataset.act, id, btn);
+  });
+}
+
+document.addEventListener("click", function (ev) {
+  if (!openMenuId) return;
+  if (rowMenu.contains(ev.target) || ev.target.closest("button[data-menu]")) return;
+  closeRowMenu();
+});
+document.addEventListener("keydown", function (ev) {
+  if (ev.key === "Escape") closeRowMenu();
+});
+
+const selToggle = document.getElementById("sel-toggle");
+if (selToggle) {
+  selToggle.addEventListener("click", function () {
+    selMode = !selMode;
+    selToggle.classList.toggle("active", selMode);
+    selToggle.setAttribute("aria-pressed", selMode ? "true" : "false");
+    if (!selMode) selected = {};
+    closeRowMenu();
+    if (lastLibrary) renderLibrary(lastLibrary);
+    updateSelBar();
+  });
+}
+
 document.getElementById("library-list").addEventListener("click", function (ev) {
+  const kb = ev.target.closest("button[data-menu]");
+  if (kb) {
+    ev.stopPropagation();
+    openRowMenu(kb.dataset.menu, kb);
+    return;
+  }
   const btn = ev.target.closest("button[data-act]");
   if (btn) episodeAction(btn.dataset.act, btn.dataset.id, btn);
 });
@@ -1086,18 +1183,12 @@ document.getElementById("library-list").addEventListener("change", function (ev)
   if (!cb) return;
   toggleSelect(cb.dataset.check, cb.checked);
 });
-document.getElementById("activity-list").addEventListener("click", function (ev) {
-  const btn = ev.target.closest("button[data-act]");
-  if (!btn) return;
-  const actIt = activityItems[String(btn.dataset.id)];
-  episodeAction(btn.dataset.act, btn.dataset.id, btn, actIt ? actIt.language : undefined);
-});
 
 const selAllBtn = document.getElementById("sel-all-btn");
 if (selAllBtn) {
   selAllBtn.addEventListener("click", function () {
     const n = selectedIds().length;
-    if (n > 0 && n === Object.keys(libraryItems).length) selectAll(false);
+    if (n > 0 && n === libVisible.length) selectAll(false);
     else selectAll(true);
   });
 }
