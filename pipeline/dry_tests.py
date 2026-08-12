@@ -3078,6 +3078,83 @@ def test_retime_mixed_threshold_kept():
     assert all(b >= a for a, b in zip(starts, starts[1:])), starts
     print("PASS retime_mixed_threshold_kept")
 
+def test_retime_zero_length_asr_filtered():
+    """A whisper-artifact ASR segment with end <= start (zero length) is
+    filtered before any mapping; the surviving segments map order-preservingly
+    (including a duplicate-segment group), no reject, all durations real."""
+    asr = [
+        {"start": 5000.0, "end": 8000.0, "text": "スピーチです。0"},
+        {"start": 7000.0, "end": 6000.0, "text": "ghost zero-length"},
+        {"start": 10000.0, "end": 13000.0, "text": "スピーチです。2"},
+    ]
+    sub = [{"start": i * 3000.0, "end": i * 3000.0 + 2500,
+            "text": f"字幕の台詞です。{i}"} for i in range(3)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert abs(out[0]["start"] - 5000.0) < 1e-6, out[0]
+    print("PASS retime_zero_length_asr_filtered")
+
+
+def test_retime_regression_anchors_dropped():
+    """False-match regressions: matching yields [(0,5),(1,2),(2,7)] — the
+    (1,2) anchor goes BACKWARD (asr 2 < 5) and is dropped; the monotonic
+    subset [(0,5),(2,7)] is used, output stays monotonic and mixed."""
+    asr = [{"start": 1000.0 + i * 4000, "end": 1000.0 + i * 4000 + 3000,
+            "text": f"スピーチです。{i}"} for i in range(8)]
+    sub = [
+        {"start": 0.0, "end": 2500.0, "text": asr[5]["text"]},
+        {"start": 3000.0, "end": 5500.0, "text": asr[2]["text"]},
+        {"start": 6000.0, "end": 8500.0, "text": asr[7]["text"]},
+    ]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "mixed", stats
+    assert stats["anchors"] == 2, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert out[0]["start"] == asr[5]["start"], out[0]
+    assert out[2]["start"] == asr[7]["start"], out[2]
+    print("PASS retime_regression_anchors_dropped")
+
+
+def test_retime_duplicate_segment_group():
+    """10 sub cues vs 8 ASR segments: consecutive sub cues map to the SAME
+    segment — grouped cues share the segment start, each end capped at the
+    segment's OWN end (never clamped against an equal start), monotonic,
+    no cue shorter than 0.05s."""
+    asr = [{"start": 5000.0 + i * 4000, "end": 5000.0 + i * 4000 + 3500,
+            "text": f"スピーチです。{i}"} for i in range(8)]
+    sub = [{"start": i * 3500.0, "end": i * 3500.0 + 3000,
+            "text": f"字幕の台詞です。{i}"} for i in range(10)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "order", stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    assert all(c["end"] <= c["start"] + 3500.0 + 1e-9 for c in out),         "group cues end within their segment end"
+    print("PASS retime_duplicate_segment_group")
+
+
+def test_retime_e14_zero_length_segment():
+    """E14-style: 445 ASR cues with garbage text, ONE zero-length whisper
+    artifact among them — the artifact is filtered, order mode maps against
+    the remaining 444 real segments, first cue near the first real speech
+    segment, no reject, no degenerate cues."""
+    asr = [{"start": 6700.0 + i * 4000, "end": 6700.0 + i * 4000 + 3000,
+            "text": f"Nice rack. {i}"} for i in range(445)]
+    asr[300] = {"start": 10000.0, "end": 10000.0, "text": "ghost"}
+    sub = [{"start": 1000.0 + i * 4100, "end": 1000.0 + i * 4100 + 2800,
+            "text": f"日本語の台詞です。{i}"} for i in range(445)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 1800.0)
+    assert out is not None and stats["method"] == "order", stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert abs(out[0]["start"] - asr[0]["start"]) < 2000.0, out[0]
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    print("PASS retime_e14_zero_length_segment")
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -1486,16 +1486,21 @@ def retime_external_cues(
     anchors when the score >= text_threshold (0.55). 1 sub cue -> best ASR
     cue; 1 ASR cue may anchor multiple sub cues. Texts shorter than 2
     normalized chars are never anchor candidates (junk on 1-char SDH cues).
+    Anchor regressions (later sub cue -> earlier asr cue) are dropped. ASR
+    segments with end <= start (whisper zero-length artifacts) are filtered
+    before any mapping.
     When the anchored fraction is below min_anchor_frac (0.25) the anchors
     are too sparse to extrapolate from (Ghost Stories E14: 1/344 -> a wall
     of 0.000 -> 0.000 cues): ALL text anchors are discarded and the pure
     order-preserving mapping is used instead.
 
     Strategy 2 (order-preserving fallback): for unanchored cues / eng subs,
-    sub cue i maps to speech segment round(i * len(seg)/len(cue)). When this
-    mapping is needed and len(seg)/len(cue) > max_ratio (3.0) or < 1/max_ratio
-    (release mismatch), the whole sub is REJECTED (None) — same semantics as
-    the old gate reject.
+    sub cue i maps to speech segment round(i * len(seg)/len(cue)); cues that
+    map to the SAME segment form a group (all start at the segment start,
+    each end capped at the segment's own end, then the next-group clamp).
+    When this mapping is needed and len(seg)/len(cue) > max_ratio (3.0) or
+    < 1/max_ratio (release mismatch), the whole sub is REJECTED (None) — same
+    semantics as the old gate reject.
 
     Re-timing: an anchored cue starts at its ASR cue start, end = start +
     original duration; an unanchored cue interpolates the start shift between
@@ -1529,6 +1534,17 @@ def retime_external_cues(
             "total": total,
             "matched_frac": 0.0,
         }
+    # whisper-artifact segments with end <= start (zero length) poison both
+    # the anchor and the order mapping with same-start collisions: drop them
+    # up front and rebuild the list (indices stay continuous in the new list)
+    asr_cues = [c for c in asr_cues if c["end"] - c["start"] > 0]
+    if not asr_cues:
+        return None, {
+            "method": None,
+            "anchors": 0,
+            "total": total,
+            "matched_frac": 0.0,
+        }
     seg_ratio = len(asr_cues) / float(total)
     anchors = (
         _retime_text_anchors(sub_cues, asr_cues, text_threshold)
@@ -1555,12 +1571,23 @@ def retime_external_cues(
     duration_ms = video_duration_s * 1000.0 if video_duration_s else None
 
     def _build(use_anchors):
+        """Build the retimed cues for the given anchors ([] = pure order).
+        Order mode GROUPS cues by mapped segment: every cue in a group starts
+        at the segment start and its end is capped at the segment's OWN end —
+        never clamped against a start equal to its own (that collapsed
+        duplicate-segment groups to negative durations) — then the global
+        next-different-start - 0.05 clamp applies. Returns (out, group_ends):
+        group_ends is a per-cue segment-end ceiling in order mode, None in
+        anchor modes."""
         anchored_idx = set(i for i, _ in use_anchors)
         starts = [0.0] * total
+        group_ends = None
         if not use_anchors:
+            group_ends = [0.0] * total
             for i in range(total):
                 seg = min(round(i * len(asr_cues) / float(total)), len(asr_cues) - 1)
                 starts[i] = asr_cues[seg]["start"]
+                group_ends[i] = asr_cues[seg]["end"]
         else:
             for i, j in use_anchors:
                 starts[i] = asr_cues[j]["start"]
@@ -1595,29 +1622,35 @@ def retime_external_cues(
             start = max(0.0, starts[i])
             dur = max(0.0, sub_cues[i]["end"] - sub_cues[i]["start"])
             end = start + dur
+            if group_ends is not None:
+                end = min(end, group_ends[i])
             if i < total - 1:
-                end = min(end, max(0.0, starts[i + 1]) - 50.0)
+                nxt = max(0.0, starts[i + 1])
+                if nxt > start + 1e-9 or group_ends is None:
+                    end = min(end, nxt - 50.0)
             elif duration_ms:
                 end = min(end, duration_ms)
             if end < start:
                 end = start
             out.append({"start": start, "end": end, "text": sub_cues[i]["text"]})
-        return out
+        return out, group_ends
 
     def _valid(cues):
         prev = None
-        for c in cues:
+        for i, c in enumerate(cues):
             if c["start"] < 0.0:
-                return False
-            if c["end"] - c["start"] < 50.0:
-                return False
+                return False, f"cue {i} start<0"
+            dur = (c["end"] - c["start"]) / 1000.0
+            if dur < 0.05:
+                return False, f"cue {i} dur={dur:.2f}s"
             if prev is not None and c["start"] < prev:
-                return False
+                return False, f"cue {i} start {c['start']} < prev {prev}"
             prev = c["start"]
-        return True
+        return True, None
 
-    out = _build(anchors)
-    if not _valid(out):
+    out, _ = _build(anchors)
+    ok, detail = _valid(out)
+    if not ok:
         if method != "order":
             # degenerate extrapolation (zero-duration / inverted cues):
             # fall back to the pure order-preserving mapping
@@ -1627,15 +1660,12 @@ def retime_external_cues(
                 "total": total,
                 "matched_frac": 0.0,
             }
-            out = _build([])
-        if not _valid(out):
-            stats["reason"] = (
-                "degenerate output: non-monotonic starts, negative starts, "
-                "or cues shorter than 0.05s"
-            )
+            out, _ = _build([])
+            ok, detail = _valid(out)
+        if not ok:
+            stats["reason"] = f"order: {detail}"
             return None, stats
     return out, stats
-
 
 def _retime_norm_text(text):
     """Normalize a cue text for anchor matching: strip ASS/SSA styling and
@@ -1671,7 +1701,9 @@ def _retime_text_anchors(sub_cues, asr_cues, threshold):
     """Best-match text anchors: [(sub_idx, asr_idx)] — every sub cue whose
     best ASR character-bigram Jaccard score >= threshold anchors to that ASR
     cue. One ASR cue may anchor many sub cues; cues whose normalized text is
-    empty (SDH/music/speaker-only) or shorter than 2 chars never anchor."""
+    empty (SDH/music/speaker-only) or shorter than 2 chars never anchor.
+    Returns the MONOTONIC subset: regressions (a later sub cue anchoring to
+    an earlier asr cue) are dropped so the retimed starts stay ordered."""
     norm_sub = [_retime_norm_text(c["text"]) for c in sub_cues]
     norm_asr = [_retime_norm_text(c["text"]) for c in asr_cues]
     anchors = []
@@ -1687,7 +1719,19 @@ def _retime_text_anchors(sub_cues, asr_cues, threshold):
                 best_j, best_s = j, s
         if best_j is not None and best_s >= threshold:
             anchors.append((i, best_j))
-    return anchors
+    # False matches can anchor a later sub cue to an EARLIER asr cue
+    # (Jaadugar S01E04: sub#77 -> asr#88 while the previous anchor was
+    # asr#177; sub#272 -> asr#159). A regression inverts the retimed starts
+    # and the degenerate guard would then discard EVERY anchor. Keep only
+    # the monotonic subset: drop any anchor whose asr index goes BACKWARD
+    # relative to the best (max) asr index seen so far.
+    kept, max_j = [], -1
+    for i, j in anchors:
+        if j < max_j:
+            continue
+        max_j = j
+        kept.append((i, j))
+    return kept
 
 
 def _infer_sub_lang(cues):
