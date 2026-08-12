@@ -142,6 +142,7 @@ RETIME_ENABLED = os.environ.get("RETIME_ENABLED", "true").lower() in (
 )
 RETIME_TEXT_THRESHOLD = float(os.environ.get("RETIME_TEXT_THRESHOLD", "0.55"))
 RETIME_MAX_RATIO = float(os.environ.get("RETIME_MAX_RATIO", "3.0"))
+RETIME_MIN_ANCHOR_FRAC = float(os.environ.get("RETIME_MIN_ANCHOR_FRAC", "0.25"))
 
 _stop_requested = False
 _paused = False
@@ -207,9 +208,13 @@ def load_config():
         cfg["RETIME_MAX_RATIO"] = float(
             cfg.get("RETIME_MAX_RATIO", RETIME_MAX_RATIO)
         )
+        cfg["RETIME_MIN_ANCHOR_FRAC"] = float(
+            cfg.get("RETIME_MIN_ANCHOR_FRAC", RETIME_MIN_ANCHOR_FRAC)
+        )
     except (TypeError, ValueError):
         cfg["RETIME_TEXT_THRESHOLD"] = RETIME_TEXT_THRESHOLD
         cfg["RETIME_MAX_RATIO"] = RETIME_MAX_RATIO
+        cfg["RETIME_MIN_ANCHOR_FRAC"] = RETIME_MIN_ANCHOR_FRAC
     tl = cfg.get("TARGET_LANGS", "id,en")
     if isinstance(tl, str) and tl.strip().startswith("["):
         try:
@@ -278,6 +283,7 @@ def _ladder_cfg(cfg):
         "retime_enabled": _gb("RETIME_ENABLED", RETIME_ENABLED),
         "retime_text_threshold": _gf("RETIME_TEXT_THRESHOLD", RETIME_TEXT_THRESHOLD),
         "retime_max_ratio": _gf("RETIME_MAX_RATIO", RETIME_MAX_RATIO),
+        "retime_min_anchor_frac": _gf("RETIME_MIN_ANCHOR_FRAC", RETIME_MIN_ANCHOR_FRAC),
     }
 
 
@@ -1462,6 +1468,7 @@ def retime_external_cues(
     video_duration_s,
     text_threshold=None,
     max_ratio=None,
+    min_anchor_frac=None,
 ):
     """Re-time external subtitle cues against ASR speech anchors.
 
@@ -1477,7 +1484,12 @@ def retime_external_cues(
     （…） and music notes, drop punctuation and the long-vowel mark, fold
     katakana<->hiragana), score by character-bigram Jaccard; the best ASR cue
     anchors when the score >= text_threshold (0.55). 1 sub cue -> best ASR
-    cue; 1 ASR cue may anchor multiple sub cues.
+    cue; 1 ASR cue may anchor multiple sub cues. Texts shorter than 2
+    normalized chars are never anchor candidates (junk on 1-char SDH cues).
+    When the anchored fraction is below min_anchor_frac (0.25) the anchors
+    are too sparse to extrapolate from (Ghost Stories E14: 1/344 -> a wall
+    of 0.000 -> 0.000 cues): ALL text anchors are discarded and the pure
+    order-preserving mapping is used instead.
 
     Strategy 2 (order-preserving fallback): for unanchored cues / eng subs,
     sub cue i maps to speech segment round(i * len(seg)/len(cue)). When this
@@ -1493,15 +1505,23 @@ def retime_external_cues(
     cue — never dropped. Ends are clamped to next_start - 0.05s (last cue:
     video duration), starts never negative.
 
+    Degenerate-output guard (every method): the retimed cues must have
+    non-decreasing starts, every start >= 0 and every duration >= 0.05s.
+    On violation the anchors are discarded and the retime is retried in pure
+    order mode; a still-invalid order result is REJECTED (None, stats carries
+    a reason) so the caller falls through to the next rung.
+
     Returns (retimed_cues, stats) or (None, stats) on reject (empty/None
-    asr_cues, or order ratio out of bounds). stats = {"method":
-    "text"|"order"|"mixed", "anchors": n, "total": m, "matched_frac": n/m}.
-    Deterministic pure logic — no I/O."""
+    asr_cues, order ratio out of bounds, or degenerate output). stats =
+    {"method": "text"|"order"|"mixed", "anchors": n, "total": m,
+    "matched_frac": n/m, "reason": str?}. Deterministic pure logic — no I/O."""
     total = len(sub_cues)
     if text_threshold is None:
         text_threshold = RETIME_TEXT_THRESHOLD
     if max_ratio is None:
         max_ratio = RETIME_MAX_RATIO
+    if min_anchor_frac is None:
+        min_anchor_frac = RETIME_MIN_ANCHOR_FRAC
     if not sub_cues or not asr_cues:
         return None, {
             "method": None,
@@ -1515,6 +1535,8 @@ def retime_external_cues(
         if sub_lang == "jpn"
         else []
     )
+    if anchors and len(anchors) / float(total) < min_anchor_frac:
+        anchors = []  # too sparse to trust: pure order mapping
     if anchors:
         method = "text" if len(anchors) == total else "mixed"
     else:
@@ -1530,54 +1552,88 @@ def retime_external_cues(
         seg_ratio > max_ratio or seg_ratio < 1.0 / max_ratio
     ):
         return None, stats
-    anchored_idx = set(i for i, _ in anchors)
-    starts = [0.0] * total
-    if method == "order":
-        for i in range(total):
-            seg = min(round(i * len(asr_cues) / float(total)), len(asr_cues) - 1)
-            starts[i] = asr_cues[seg]["start"]
-    else:
-        for i, j in anchors:
-            starts[i] = asr_cues[j]["start"]
-        if method == "mixed":
-            pts = sorted(anchors)
-            for i in range(total):
-                if i in anchored_idx:
-                    continue
-                t_i = sub_cues[i]["start"]
-                prev = next((pt for pt in reversed(pts) if pt[0] < i), None)
-                nxt = next((pt for pt in pts if pt[0] > i), None)
-                if prev is not None and nxt is not None:
-                    t_p, j_p = prev
-                    t_n, j_n = nxt
-                    s_p = asr_cues[j_p]["start"] - sub_cues[t_p]["start"]
-                    s_n = asr_cues[j_n]["start"] - sub_cues[t_n]["start"]
-                    denom = sub_cues[t_n]["start"] - sub_cues[t_p]["start"]
-                    frac = (t_i - sub_cues[t_p]["start"]) / denom if denom else 0.0
-                    starts[i] = t_i + s_p + frac * (s_n - s_p)
-                elif prev is not None:
-                    j_p = prev[1]
-                    starts[i] = (
-                        t_i + asr_cues[j_p]["start"] - sub_cues[prev[0]]["start"]
-                    )
-                else:
-                    j_n = nxt[1]
-                    starts[i] = (
-                        t_i + asr_cues[j_n]["start"] - sub_cues[nxt[0]]["start"]
-                    )
     duration_ms = video_duration_s * 1000.0 if video_duration_s else None
-    out = []
-    for i in range(total):
-        start = max(0.0, starts[i])
-        dur = max(0.0, sub_cues[i]["end"] - sub_cues[i]["start"])
-        end = start + dur
-        if i < total - 1:
-            end = min(end, max(0.0, starts[i + 1]) - 50.0)
-        elif duration_ms:
-            end = min(end, duration_ms)
-        if end < start:
-            end = start
-        out.append({"start": start, "end": end, "text": sub_cues[i]["text"]})
+
+    def _build(use_anchors):
+        anchored_idx = set(i for i, _ in use_anchors)
+        starts = [0.0] * total
+        if not use_anchors:
+            for i in range(total):
+                seg = min(round(i * len(asr_cues) / float(total)), len(asr_cues) - 1)
+                starts[i] = asr_cues[seg]["start"]
+        else:
+            for i, j in use_anchors:
+                starts[i] = asr_cues[j]["start"]
+            if len(use_anchors) < total:
+                pts = sorted(use_anchors)
+                for i in range(total):
+                    if i in anchored_idx:
+                        continue
+                    t_i = sub_cues[i]["start"]
+                    prev = next((pt for pt in reversed(pts) if pt[0] < i), None)
+                    nxt = next((pt for pt in pts if pt[0] > i), None)
+                    if prev is not None and nxt is not None:
+                        t_p, j_p = prev
+                        t_n, j_n = nxt
+                        s_p = asr_cues[j_p]["start"] - sub_cues[t_p]["start"]
+                        s_n = asr_cues[j_n]["start"] - sub_cues[t_n]["start"]
+                        denom = sub_cues[t_n]["start"] - sub_cues[t_p]["start"]
+                        frac = (t_i - sub_cues[t_p]["start"]) / denom if denom else 0.0
+                        starts[i] = t_i + s_p + frac * (s_n - s_p)
+                    elif prev is not None:
+                        j_p = prev[1]
+                        starts[i] = (
+                            t_i + asr_cues[j_p]["start"] - sub_cues[prev[0]]["start"]
+                        )
+                    else:
+                        j_n = nxt[1]
+                        starts[i] = (
+                            t_i + asr_cues[j_n]["start"] - sub_cues[nxt[0]]["start"]
+                        )
+        out = []
+        for i in range(total):
+            start = max(0.0, starts[i])
+            dur = max(0.0, sub_cues[i]["end"] - sub_cues[i]["start"])
+            end = start + dur
+            if i < total - 1:
+                end = min(end, max(0.0, starts[i + 1]) - 50.0)
+            elif duration_ms:
+                end = min(end, duration_ms)
+            if end < start:
+                end = start
+            out.append({"start": start, "end": end, "text": sub_cues[i]["text"]})
+        return out
+
+    def _valid(cues):
+        prev = None
+        for c in cues:
+            if c["start"] < 0.0:
+                return False
+            if c["end"] - c["start"] < 50.0:
+                return False
+            if prev is not None and c["start"] < prev:
+                return False
+            prev = c["start"]
+        return True
+
+    out = _build(anchors)
+    if not _valid(out):
+        if method != "order":
+            # degenerate extrapolation (zero-duration / inverted cues):
+            # fall back to the pure order-preserving mapping
+            stats = {
+                "method": "order",
+                "anchors": 0,
+                "total": total,
+                "matched_frac": 0.0,
+            }
+            out = _build([])
+        if not _valid(out):
+            stats["reason"] = (
+                "degenerate output: non-monotonic starts, negative starts, "
+                "or cues shorter than 0.05s"
+            )
+            return None, stats
     return out, stats
 
 
@@ -1615,16 +1671,16 @@ def _retime_text_anchors(sub_cues, asr_cues, threshold):
     """Best-match text anchors: [(sub_idx, asr_idx)] — every sub cue whose
     best ASR character-bigram Jaccard score >= threshold anchors to that ASR
     cue. One ASR cue may anchor many sub cues; cues whose normalized text is
-    empty (SDH/music/speaker-only) never anchor."""
+    empty (SDH/music/speaker-only) or shorter than 2 chars never anchor."""
     norm_sub = [_retime_norm_text(c["text"]) for c in sub_cues]
     norm_asr = [_retime_norm_text(c["text"]) for c in asr_cues]
     anchors = []
     for i, ns in enumerate(norm_sub):
-        if not ns:
+        if len(ns) < 2:  # 1-char junk (e.g. "あっ！" -> "あっ") never anchors
             continue
         best_j, best_s = None, 0.0
         for j, na in enumerate(norm_asr):
-            if not na:
+            if len(na) < 2:
                 continue
             s = _bigram_jaccard(ns, na)
             if s > best_s:
@@ -1786,6 +1842,7 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
             duration,
             text_threshold=lc["retime_text_threshold"],
             max_ratio=lc["retime_max_ratio"],
+            min_anchor_frac=lc["retime_min_anchor_frac"],
         )
         if retimed is None:
             log(

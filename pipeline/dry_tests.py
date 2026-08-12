@@ -2815,9 +2815,14 @@ def test_retime_sdh_never_dropped():
 
 def test_retime_end_clamp():
     """Ends clamped to next cue start - 0.05s; the last cue end clamped to
-    the video duration; starts never negative."""
-    asr = [{"start": 10000.0 + i * 20000, "end": 10000.0 + i * 20000 + 5000,
-            "text": f"セリフの内容です。{i}"} for i in range(3)]
+    the video duration; starts never negative. (The last anchor sits before
+    the duration clamp point so the clamped last cue keeps a real duration
+    >= 0.05s and passes the degenerate guard.)"""
+    asr = [
+        {"start": 10000.0, "end": 15000.0, "text": "セリフの内容です。0"},
+        {"start": 30000.0, "end": 35000.0, "text": "セリフの内容です。1"},
+        {"start": 45000.0, "end": 50000.0, "text": "セリフの内容です。2"},
+    ]
     sub = [
         {"start": 0.0, "end": 30000.0, "text": asr[0]["text"]},
         {"start": 5000.0, "end": 25000.0, "text": "はやい"},
@@ -2830,6 +2835,7 @@ def test_retime_end_clamp():
     assert out[-1]["end"] <= 50.0 * 1000, out[-1]
     assert all(c["start"] >= 0.0 for c in out), out
     assert out[0]["end"] - out[0]["start"] <= 20000.0 - 50.0 + 1e-6, out[0]
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
     print("PASS retime_end_clamp")
 
 
@@ -2993,6 +2999,84 @@ def test_retime_subtitle_glue_ass_and_reject():
             setattr(o, n, val)
     print("PASS retime_subtitle_glue_ass_and_reject")
 
+
+def test_retime_ghost_stories_e14_pattern():
+    """Ghost Stories S01E14: 344 ja sub cues vs 344 ASR cues whose text is
+    English hallucination, plus ONE accidental 1-char match — the 1-char
+    text is ignored (< 2 normalized chars) and anchors/total (0/344) <
+    RETIME_MIN_ANCHOR_FRAC anyway: pure ORDER mode; the first retimed cue
+    lands within 2s of the first speech segment, real durations, monotonic."""
+    asr = [{"start": 6700.0 + i * 4000, "end": 6700.0 + i * 4000 + 3000,
+            "text": f"I love that! {i}"} for i in range(344)]
+    asr[172]["text"] = "あ"  # accidental 1-char candidate: must not anchor
+    sub = [{"start": 1000.0 + i * 4100, "end": 1000.0 + i * 4100 + 2800,
+            "text": f"日本語の台詞です。{i}"} for i in range(344)]
+    sub[172]["text"] = "あ"  # would Jaccard 1.0 vs asr[172] if not skipped
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 1400.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert stats["anchors"] == 0, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), "monotonic"
+    assert abs(out[0]["start"] - asr[0]["start"]) < 2000.0, (out[0], asr[0])
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    print("PASS retime_ghost_stories_e14_pattern")
+
+
+def test_retime_sparse_anchors_force_order():
+    """3 real text anchors out of 344 cues (matched_frac 0.009 < 0.25): all
+    text anchors are DISCARDED — pure order mode, never the extrapolating
+    mixed mode that produced the 0.000 -> 0.000 degenerate cues."""
+    asr = [{"start": 5000.0 + i * 4000, "end": 5000.0 + i * 4000 + 3000,
+            "text": f"スピーチの音声です。{i}"} for i in range(344)]
+    sub = [{"start": i * 4100.0, "end": i * 4100.0 + 2800,
+            "text": f"日本語の台詞です。{i}"} for i in range(344)]
+    for k, j in ((10, 100), (200, 200), (300, 300)):
+        sub[j]["text"] = asr[k]["text"]  # three real matches, far too sparse
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 1400.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert stats["anchors"] == 0, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), "monotonic"
+    assert abs(out[0]["start"] - asr[0]["start"]) < 2000.0, out[0]
+    print("PASS retime_sparse_anchors_force_order")
+
+
+def test_retime_degenerate_guard_fallback():
+    """Belt-and-braces: an anchor set whose extrapolation collapses the early
+    cues to 0.000 -> 0.000 (zero durations) trips the degenerate guard; the
+    output falls back to pure ORDER mapping — all starts >= 0, real
+    durations, monotonic."""
+    asr = [{"start": 0.0 + i * 500, "end": 0.0 + i * 500 + 2000,
+            "text": f"スピーチの内容です。{i}"} for i in range(10)]
+    sub = [{"start": 2000.0 + i * 2000, "end": 2000.0 + i * 2000 + 2500,
+            "text": f"字幕の台詞です。{i}"} for i in range(10)]
+    for j in (5, 6, 7):  # 3/10 = 0.3 >= 0.25: mixed kept, then guard trips
+        sub[j]["text"] = asr[j]["text"]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert stats["anchors"] == 0, stats
+    assert all(c["start"] >= 0.0 for c in out), out
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_degenerate_guard_fallback")
+
+
+def test_retime_mixed_threshold_kept():
+    """matched_frac 0.5 (>= RETIME_MIN_ANCHOR_FRAC 0.25): the anchor set is
+    KEPT and mixed interpolation is used — never discarded to order."""
+    asr = [{"start": 5000.0 + i * 4000, "end": 5000.0 + i * 4000 + 3000,
+            "text": f"セリフの内容です。{i}"} for i in range(10)]
+    sub = [{"start": i * 4000.0, "end": i * 4000.0 + 3000,
+            "text": f"字幕の台詞です。{i}"} for i in range(10)]
+    for j in range(0, 10, 2):
+        sub[j]["text"] = asr[j]["text"]  # 5/10 = 0.5
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "mixed", stats
+    assert stats["anchors"] == 5 and stats["matched_frac"] == 0.5, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_mixed_threshold_kept")
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
