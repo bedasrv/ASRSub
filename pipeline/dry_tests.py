@@ -2415,6 +2415,116 @@ def test_regen_registry_idempotence():
 
 
 
+def test_regen_candidates_skip_registered_before_cap():
+    """Pre-cap filter: pairs already registered (source asr/jpn/eng, found by
+    episode_id) are NOT added as candidates, so MAX_EPS_PER_RUN slices a
+    moving window of unregistered pairs — 10 done pairs, 2 registered
+    (ep 1 id+en), cap 8 -> exactly the 8 unregistered ep 2..5 pairs, with no
+    in-loop 'already registered' skips."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {ep: _mk_regen_info(d, f"Ep{ep}.mkv", ep) for ep in range(1, 6)}
+    state = [
+        {"sonarrEpisodeId": ep, "language": lang, "status": "done"}
+        for ep in range(1, 6)
+        for lang in ("id", "en")
+    ]
+    registry_rows = [
+        {"stem": os.path.join(d, "Ep1"), "lang": "id", "episode_id": 1, "source": "asr"},
+        {"stem": os.path.join(d, "Ep1"), "lang": "en", "episode_id": 1, "source": "jpn"},
+    ]
+    stats, mocks = _run_pass_regen(
+        d,
+        infos,
+        wanted=[],
+        state=state,
+        regen=True,
+        max_eps=8,
+        target_langs=["id", "en"],
+        registry_rows=registry_rows,
+    )
+    assert stats["done"] == 8 and stats["skipped"] == 0 and stats["failed"] == 0, stats
+    submits = sorted((a[2], a[3]) for a in mocks["submit"])
+    expected = sorted((ep, lang) for ep in range(2, 6) for lang in ("id", "en"))
+    assert submits == expected, submits
+    assert len(submits) == 8 and all(ep > 1 for ep, _ in submits), submits
+    assert any("regen candidates=8" in line for line in mocks["log"]), mocks["log"]
+    assert not any("already registered" in line for line in mocks["log"]), (
+        "pre-cap filter must remove registered pairs before they reach the loop"
+    )
+    print("PASS regen_candidates_skip_registered_before_cap")
+
+
+def test_regen_candidates_include_unregistered_after_registered():
+    """Cap headroom does not resurrect registered pairs: 6 done pairs,
+    2 registered (ep 1 id+en), cap 8 -> candidates are exactly the 4
+    unregistered ep 2..3 pairs."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {ep: _mk_regen_info(d, f"Ep{ep}.mkv", ep) for ep in range(1, 4)}
+    state = [
+        {"sonarrEpisodeId": ep, "language": lang, "status": "done"}
+        for ep in range(1, 4)
+        for lang in ("id", "en")
+    ]
+    registry_rows = [
+        {"stem": os.path.join(d, "Ep1"), "lang": "id", "episode_id": 1, "source": "asr"},
+        {"stem": os.path.join(d, "Ep1"), "lang": "en", "episode_id": 1, "source": "jpn"},
+    ]
+    stats, mocks = _run_pass_regen(
+        d,
+        infos,
+        wanted=[],
+        state=state,
+        regen=True,
+        max_eps=8,
+        target_langs=["id", "en"],
+        registry_rows=registry_rows,
+    )
+    assert stats["done"] == 4 and stats["skipped"] == 0 and stats["failed"] == 0, stats
+    submits = sorted((a[2], a[3]) for a in mocks["submit"])
+    assert submits == sorted((ep, lang) for ep in (2, 3) for lang in ("id", "en")), submits
+    assert all(ep > 1 for ep, _ in submits), submits
+    assert any("regen candidates=4" in line for line in mocks["log"]), mocks["log"]
+    print("PASS regen_candidates_include_unregistered_after_registered")
+
+
+def test_registry_by_episode_returns_row():
+    """registry_by_episode(ep_id, lang): finds the latest row with a matching
+    episode_id + lang; rows with null episode_id never match; missing pair or
+    lang mismatch -> None."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    saved = o.REGISTRY_FILE
+    o.REGISTRY_FILE = os.path.join(d, "subtitle_registry.jsonl")
+    try:
+        rows = [
+            {"stem": "/tv/Ep1", "lang": "id", "episode_id": 1, "source": "asr"},
+            {"stem": "/tv/Ep1", "lang": "en", "episode_id": 1, "source": "jpn"},
+            {"stem": "/tv/Ep2", "lang": "id", "episode_id": 2, "source": "eng"},
+            {"stem": "/tv/EpX", "lang": "id", "episode_id": None, "source": "embedded"},
+        ]
+        with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+        assert o.registry_by_episode(1, "id")["source"] == "asr"
+        assert o.registry_by_episode(1, "en")["source"] == "jpn"
+        assert o.registry_by_episode(2, "id")["source"] == "eng"
+        assert o.registry_by_episode(99, "id") is None, "missing pair -> None"
+        assert o.registry_by_episode(1, "fr") is None, "lang mismatch -> None"
+        assert o.registry_by_episode(None, "id") is None, "null-episode_id row must not match"
+        with open(o.REGISTRY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"stem": "/tv/Ep1", "lang": "id", "episode_id": 1, "source": "asr2"}) + "\n")
+        assert o.registry_by_episode(1, "id")["source"] == "asr2", "latest row wins"
+    finally:
+        o.REGISTRY_FILE = saved
+    print("PASS registry_by_episode_returns_row")
+
+
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
