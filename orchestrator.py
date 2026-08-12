@@ -1487,8 +1487,8 @@ def retime_external_cues(
     cue; 1 ASR cue may anchor multiple sub cues. Texts shorter than 2
     normalized chars are never anchor candidates (junk on 1-char SDH cues).
     Anchor regressions (later sub cue -> earlier asr cue) are dropped. ASR
-    segments with end <= start (whisper zero-length artifacts) are filtered
-    before any mapping.
+    segments shorter than 100ms (whisper zero-length/20ms artifacts) are
+    filtered before any mapping.
     When the anchored fraction is below min_anchor_frac (0.25) the anchors
     are too sparse to extrapolate from (Ghost Stories E14: 1/344 -> a wall
     of 0.000 -> 0.000 cues): ALL text anchors are discarded and the pure
@@ -1534,10 +1534,12 @@ def retime_external_cues(
             "total": total,
             "matched_frac": 0.0,
         }
-    # whisper-artifact segments with end <= start (zero length) poison both
-    # the anchor and the order mapping with same-start collisions: drop them
-    # up front and rebuild the list (indices stay continuous in the new list)
-    asr_cues = [c for c in asr_cues if c["end"] - c["start"] > 0]
+    # whisper-artifact segments poison both the anchor and the order mapping
+    # with same-start collisions: zero-length (end <= start) AND sub-100ms
+    # segments (VAD speech segments are never that short — E14's cache has a
+    # 20ms one) are dropped up front, rebuilding the list (indices stay
+    # continuous in the new list)
+    asr_cues = [c for c in asr_cues if c["end"] - c["start"] >= 100.0]
     if not asr_cues:
         return None, {
             "method": None,
@@ -1621,15 +1623,20 @@ def retime_external_cues(
         for i in range(total):
             start = max(0.0, starts[i])
             dur = max(0.0, sub_cues[i]["end"] - sub_cues[i]["start"])
+            # never let a clamp shrink a cue below start + min(50ms, original
+            # duration): dense back-to-back cues (cue end == next cue start,
+            # Jaadugar S01E04) must keep >= 0.05s or _valid fails and the
+            # guard would discard every legit anchor
+            floor = start + min(50.0, dur)
             end = start + dur
             if group_ends is not None:
-                end = min(end, group_ends[i])
+                end = max(floor, min(end, group_ends[i]))
             if i < total - 1:
                 nxt = max(0.0, starts[i + 1])
                 if nxt > start + 1e-9 or group_ends is None:
-                    end = min(end, nxt - 50.0)
+                    end = max(floor, min(end, nxt - 50.0))
             elif duration_ms:
-                end = min(end, duration_ms)
+                end = max(floor, min(end, duration_ms))
             if end < start:
                 end = start
             out.append({"start": start, "end": end, "text": sub_cues[i]["text"]})

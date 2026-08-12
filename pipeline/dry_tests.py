@@ -3042,16 +3042,18 @@ def test_retime_sparse_anchors_force_order():
 
 
 def test_retime_degenerate_guard_fallback():
-    """Belt-and-braces: an anchor set whose extrapolation collapses the early
-    cues to 0.000 -> 0.000 (zero durations) trips the degenerate guard; the
-    output falls back to pure ORDER mapping — all starts >= 0, real
-    durations, monotonic."""
-    asr = [{"start": 0.0 + i * 500, "end": 0.0 + i * 500 + 2000,
-            "text": f"スピーチの内容です。{i}"} for i in range(10)]
-    sub = [{"start": 2000.0 + i * 2000, "end": 2000.0 + i * 2000 + 2500,
-            "text": f"字幕の台詞です。{i}"} for i in range(10)]
-    for j in (5, 6, 7):  # 3/10 = 0.3 >= 0.25: mixed kept, then guard trips
-        sub[j]["text"] = asr[j]["text"]
+    """Belt-and-braces: a mixed build whose interpolation produces an
+    INVERTED start (an out-of-order sub cue start extrapolates before the
+    previous cue) trips the degenerate guard; the output falls back to pure
+    ORDER mapping — all starts >= 0, real durations, monotonic."""
+    asr = [{"start": 10000.0 + i * 4000, "end": 10000.0 + i * 4000 + 3000,
+            "text": f"スピーチの内容です。{i}"} for i in range(4)]
+    sub = [
+        {"start": 3000.0, "end": 5500.0, "text": asr[0]["text"]},
+        {"start": 0.0, "end": 2500.0, "text": "はやい"},
+        {"start": 6000.0, "end": 8500.0, "text": asr[2]["text"]},
+        {"start": 9000.0, "end": 11500.0, "text": asr[3]["text"]},
+    ]
     out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
     assert out is not None and stats["method"] == "order", stats
     assert stats["anchors"] == 0, stats
@@ -3154,6 +3156,68 @@ def test_retime_e14_zero_length_segment():
     assert abs(out[0]["start"] - asr[0]["start"]) < 2000.0, out[0]
     assert all(c["end"] - c["start"] >= 50.0 for c in out), out
     print("PASS retime_e14_zero_length_segment")
+
+def test_retime_dense_mixed_cues_keep_duration():
+    """Dense back-to-back cues: two anchored cues whose starts land 30ms
+    apart — the end clamp must never shrink a cue below start + min(50ms,
+    original duration); BOTH keep >= 0.05s, method stays mixed (NOT order),
+    output valid."""
+    asr = [
+        {"start": 10000.0, "end": 12000.0, "text": "セリフです。0"},
+        {"start": 10030.0, "end": 12030.0, "text": "セリフです。1"},
+    ]
+    sub = [
+        {"start": 0.0, "end": 2000.0, "text": asr[0]["text"]},
+        {"start": 30.0, "end": 2030.0, "text": asr[1]["text"]},
+        {"start": 60.0, "end": 2060.0, "text": "はやい"},
+    ]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "mixed", stats
+    assert stats["anchors"] == 2, stats
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_dense_mixed_cues_keep_duration")
+
+
+def test_retime_tiny_segment_filtered():
+    """A 20ms whisper segment (end > start but < 100ms) is dropped by the
+    sub-100ms ASR filter; order mapping works, no reject, real durations."""
+    asr = [
+        {"start": 5000.0, "end": 8000.0, "text": "スピーチです。0"},
+        {"start": 9000.0, "end": 9020.0, "text": "tiny 20ms ghost"},
+        {"start": 10000.0, "end": 13000.0, "text": "スピーチです。2"},
+    ]
+    sub = [{"start": i * 3000.0, "end": i * 3000.0 + 2500,
+            "text": f"字幕の台詞です。{i}"} for i in range(3)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_tiny_segment_filtered")
+
+
+def test_retime_jaadugar_shape_dense():
+    """Jaadugar-shape repro: 10 dense back-to-back sub cues anchored with
+    shifts ~+8.1s down to 0 (plus one SDH cue) — mixed mode survives the
+    dense-cue end clamps, all durations >= 0.05s, monotonic, no reject."""
+    asr = [{"start": 8100.0 + i * 30, "end": 8100.0 + i * 30 + 2500,
+            "text": f"セリフの内容です。{i}"} for i in range(10)]
+    sub = []
+    for i in range(10):
+        s = 1000.0 * i
+        if i == 5:
+            sub.append({"start": s, "end": s + 1000, "text": "♬ ♬"})
+        else:
+            sub.append({"start": s, "end": s + 1000, "text": asr[i]["text"]})
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and stats["method"] == "mixed", stats
+    assert stats["anchors"] == 9, stats
+    assert all(c["end"] - c["start"] >= 50.0 for c in out), out
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_jaadugar_shape_dense")
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
