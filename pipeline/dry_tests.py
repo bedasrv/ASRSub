@@ -1853,6 +1853,217 @@ def test_ladder_align_ass_conversion():
     print("PASS ladder_align_ass_conversion")
 
 
+def _run_pass_single_episode(tmp_dir, media_path):
+    """Drive one full run_pass() pass with a single wanted Indonesian episode
+    and every I/O boundary monkeypatched (no HTTP, no ffmpeg, no ASR).
+    Returns (stats, mocks, state_file)."""
+    cfg = build_cfg()
+    cfg["TARGET_LANGS"] = ["id"]
+    cfg["TRANSLATE_API_KEY"] = "test-key"
+    cfg["MAX_EPS_PER_RUN"] = 8
+    cfg["TMP_DIR"] = tmp_dir
+    wanted = {
+        "total": 1,
+        "data": [
+            {
+                "sonarrEpisodeId": 101,
+                "seriesTitle": "TestShow",
+                "missing_subtitles": [{"code2": "id"}],
+            }
+        ],
+    }
+    info = {
+        "hasFile": True,
+        "seasonNumber": 1,
+        "episodeNumber": 2,
+        "seriesId": 99,
+        "episodeFile": {"path": media_path},
+    }
+    mocks = {
+        "get_wanted_calls": [],
+        "probe": [],
+        "choose": [],
+        "extract": [],
+        "asr": [],
+        "submit": [],
+        "state_writes": [],
+        "log": [],
+    }
+    saved = {}
+
+    def save(name):
+        saved[name] = getattr(o, name)
+
+    for n in (
+        "load_config",
+        "consume_actions",
+        "load_state",
+        "get_wanted",
+        "parse_exclusions",
+        "get_episode",
+        "probe_audio",
+        "choose_source",
+        "detect_ladder_source",
+        "asr_cache_get",
+        "extract_wav",
+        "asr_cues",
+        "asr_cache_put",
+        "process_after_asr",
+        "run_upgrades",
+        "log",
+        "notify_hermes",
+        "halt_on_error",
+        "append_state",
+    ):
+        save(n)
+    o.load_config = lambda: cfg
+    o.consume_actions = lambda cfg_: set()
+    o.load_state = lambda: []
+    o.get_wanted = lambda cfg_: mocks["get_wanted_calls"].append(1) or wanted
+    o.parse_exclusions = lambda: set()
+    o.get_episode = lambda cfg_, ep_id: info
+    o.probe_audio = lambda path: mocks["probe"].append(path) or [
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "tags": {"language": "jpn"},
+            "channels": 2,
+            "duration": "100.0",
+        }
+    ]
+    o.choose_source = (
+        lambda streams, lang: mocks["choose"].append(lang)
+        or {
+            "stream_index": 1,
+            "asr_lang": "ja",
+            "needs_translate": True,
+            "src_lang": "jpn",
+        }
+    )
+    o.detect_ladder_source = lambda *a, **k: {"kind": "asr", "source_path": None}
+    o.asr_cache_get = lambda *a: None
+    o.extract_wav = lambda path, idx, out: mocks["extract"].append((path, idx)) or open(out, "w").close()
+    o.asr_cues = (
+        lambda cfg_, wav, lang: mocks["asr"].append(lang)
+        or [{"start": 0, "end": 1000, "text": "Halo dunia."}]
+    )
+    o.asr_cache_put = lambda *a: None
+    o.process_after_asr = lambda *a, **k: mocks["submit"].append(a) or "done"
+    o.run_upgrades = lambda *a, **k: {"upgraded": 0, "checked": 0}
+    o.log = lambda msg: mocks["log"].append(msg)
+    o.notify_hermes = lambda *a, **k: None
+    o.halt_on_error = lambda *a, **k: None
+    o.append_state = lambda entry: mocks["state_writes"].append(entry)
+    saved_state_file = o.STATE_FILE
+    state_file = os.path.join(tmp_dir, "state.jsonl")
+    o.STATE_FILE = state_file
+    try:
+        stats = o.run_pass()
+    finally:
+        for name, val in saved.items():
+            setattr(o, name, val)
+        o.STATE_FILE = saved_state_file
+    return stats, mocks, state_file
+
+
+def test_pass_skip_existing_id_sidecar():
+    """wanted-pass skips an episode whose {stem}.id.srt already exists on
+    disk (Bazarr grabbed it): no probe/ASR/translate work, no state write."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    open(os.path.join(d, "Ep.id.srt"), "w").close()
+    stats, mocks, state_file = _run_pass_single_episode(d, mkv)
+    assert stats["skipped"] == 1, stats
+    assert stats["done"] == 0 and stats["failed"] == 0, stats
+    assert not mocks["probe"], "probe_audio must not run for a skipped episode"
+    assert not mocks["choose"] and not mocks["extract"] and not mocks["asr"]
+    assert not mocks["submit"], "process_after_asr must not run"
+    assert not mocks["state_writes"], "no state write on skip"
+    assert not os.path.exists(state_file), "state.jsonl must not be created"
+    assert any(
+        "target-lang sidecar exists (Ep.id.srt)" in line
+        for line in mocks["log"]
+    ), mocks["log"]
+    print("PASS pass_skip_existing_id_sidecar")
+
+
+def test_pass_skip_existing_id_hi_sidecar():
+    """An existing {stem}.id.hi.srt also skips ASR (rule includes non-HI and
+    HI variants alike)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    open(os.path.join(d, "Ep.id.hi.srt"), "w").close()
+    stats, mocks, state_file = _run_pass_single_episode(d, mkv)
+    assert stats["skipped"] == 1, stats
+    assert stats["done"] == 0 and stats["failed"] == 0, stats
+    assert not mocks["probe"] and not mocks["asr"] and not mocks["submit"]
+    assert not mocks["state_writes"]
+    assert not os.path.exists(state_file)
+    assert any(
+        "target-lang sidecar exists (Ep.id.hi.srt)" in line
+        for line in mocks["log"]
+    ), mocks["log"]
+    print("PASS pass_skip_existing_id_hi_sidecar")
+
+
+def test_pass_no_id_sidecar_processes():
+    """jpn/eng sidecars on disk are NOT target-language: the episode is still
+    processed normally (probe + ASR path run, done=1)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    for name in ("Ep.jpn.srt", "Ep.eng.srt"):
+        open(os.path.join(d, name), "w").close()
+    stats, mocks, state_file = _run_pass_single_episode(d, mkv)
+    assert stats["done"] == 1 and stats["skipped"] == 0, stats
+    assert len(mocks["probe"]) == 1 and len(mocks["extract"]) == 1
+    assert mocks["asr"] == ["ja"], mocks["asr"]
+    assert len(mocks["submit"]) == 1
+    assert not mocks["state_writes"], "normal pass may not write state in dry run"
+    print("PASS pass_no_id_sidecar_processes")
+
+
+def test_target_sidecar_exists_patterns():
+    """The skip contract: {stem}.id/.ind srt with optional .hi, case-
+    insensitive; jpn/eng/other files never match."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Show.S01.E02.mkv")
+    open(mkv, "w").close()
+    for name in (
+        "Show.S01.E02.id.srt",
+        "Show.S01.E02.id.hi.srt",
+        "Show.S01.E02.ind.srt",
+        "Show.S01.E02.ind.hi.srt",
+        "Show.S01.E02.ID.SRT",
+        "Show.S01.E02.Id.Hi.Srt",
+    ):
+        open(os.path.join(d, name), "w").close()
+        assert o.target_sidecar_exists(mkv) == os.path.join(d, name), name
+        os.remove(os.path.join(d, name))
+    for name in (
+        "Show.S01.E02.jpn.srt",
+        "Show.S01.E02.eng.srt",
+        "Show.S01.E02.eng.hi.srt",
+        "Show.S01.E02.idx",
+        "Show.S01.E02.id.srtx",
+        "Show.S01.E02id.srt",
+        "Show.S01.E03.id.srt",
+    ):
+        open(os.path.join(d, name), "w").close()
+    assert o.target_sidecar_exists(mkv) is None, "non-target files must not match"
+    print("PASS target_sidecar_exists_patterns")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

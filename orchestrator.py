@@ -688,6 +688,28 @@ def map_path(container_path):
     return container_path
 
 
+def target_sidecar_exists(media_path):
+    """Cheap file-glob guard: does a target-language (Indonesian) subtitle
+    sidecar already exist on disk next to the media file? Bazarr may have
+    grabbed {stem}.id.srt / {stem}.id.hi.srt / {stem}.ind.srt /
+    {stem}.ind.hi.srt independently of this pipeline; re-transcribing such an
+    episode would waste GPU + API tokens. File-glob only: no probing, no
+    transcription, no state writes. Returns the matched sidecar path or None."""
+    d = os.path.dirname(media_path)
+    basename_stem = os.path.splitext(os.path.basename(media_path))[0]
+    pat = re.compile(
+        r"^" + re.escape(basename_stem) + r"\.i(n)?d(\.hi)?\.srt$",
+        re.IGNORECASE,
+    )
+    try:
+        for name in os.listdir(d):
+            if pat.match(name):
+                return os.path.join(d, name)
+    except OSError:
+        return None
+    return None
+
+
 class _AudioStreams(list):
     """probe_audio result: a stream list with a format_duration side-channel
     for the ASR cache-key signature (kept off the stream dicts so
@@ -2925,6 +2947,15 @@ def run_pass():
                         )
                         skipped += 1
                         continue
+                    if lang == "id":
+                        target_sidecar = target_sidecar_exists(media_path)
+                        if target_sidecar:
+                            log(
+                                f"wanted: skip {tag} {series} [{lang}]: "
+                                f"target-lang sidecar exists ({os.path.basename(target_sidecar)})"
+                            )
+                            skipped += 1
+                            continue
                     streams = probe_audio(media_path)
                     audio_id = audio_stream_signature(streams)
                     decision = choose_source(streams, lang)
