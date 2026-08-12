@@ -3727,6 +3727,319 @@ def test_jellyfin_refresh_movie_item_type():
     print("PASS jellyfin_refresh_movie_item_type")
 
 
+def test_order_pass_candidates_priority_and_slice():
+    """Priority helper: series wanted -> movie candidates -> series regen,
+    capped at max_eps; movies_remaining is the FULL pre-cap movie count."""
+    wanted = [{"sonarrEpisodeId": 1}, {"sonarrEpisodeId": 2}]
+    movies = [
+        {"sonarrEpisodeId": 10, "movie": True},
+        {"sonarrEpisodeId": 11, "movie": True},
+    ]
+    regen = [
+        {"sonarrEpisodeId": 20, "regen": True},
+        {"sonarrEpisodeId": 21, "regen": True},
+    ]
+    ordered, remaining = o._order_pass_candidates(wanted, movies, regen, 8)
+    assert [c["sonarrEpisodeId"] for c in ordered] == [1, 2, 10, 11, 20, 21], ordered
+    assert remaining == 2
+    ordered2, rem2 = o._order_pass_candidates(wanted, movies, regen, 4)
+    assert [c["sonarrEpisodeId"] for c in ordered2] == [1, 2, 10, 11], ordered2
+    assert rem2 == 2, "movies_remaining must be the full pre-slice list"
+    ordered3, rem3 = o._order_pass_candidates(wanted, movies, regen, 1)
+    assert [c["sonarrEpisodeId"] for c in ordered3] == [1], ordered3
+    assert rem3 == 2
+    ordered4, rem4 = o._order_pass_candidates([], [], [], 8)
+    assert ordered4 == [] and rem4 == 0
+    print("PASS order_pass_candidates_priority_and_slice")
+
+
+def test_pass_priority_wanted_movies_regen():
+    """run_pass candidate order: series wanted -> movies -> regen. With a
+    full cap every class is processed in that order; shrinking the cap
+    starves regen first, then movies, never series wanted. The wanted-total
+    log reports movies remaining from the FULL pre-cap candidate list."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    wanted = [
+        {"sonarrEpisodeId": 1, "seriesTitle": "Show", "missing_subtitles": [{"code2": "id"}]},
+        {"sonarrEpisodeId": 2, "seriesTitle": "Show", "missing_subtitles": [{"code2": "id"}]},
+    ]
+    m1 = os.path.join(d, "Alpha.mkv")
+    m2 = os.path.join(d, "Beta.mkv")
+    open(m1, "w").close()
+    open(m2, "w").close()
+    movies = [
+        {"radarrId": 101, "title": "Alpha", "monitored": True, "path": m1},
+        {"radarrId": 102, "title": "Beta", "monitored": True, "path": m2},
+    ]
+    infos = {1: _mk_regen_info(d, "Ep1.mkv", 1), 2: _mk_regen_info(d, "Ep2.mkv", 2)}
+    for eid in (3, 4):
+        infos[eid] = _mk_regen_info(d, f"Ep{eid}.mkv", eid)
+    state = [
+        {"sonarrEpisodeId": 3, "language": "id", "status": "done", "seriesTitle": "Show"},
+        {"sonarrEpisodeId": 4, "language": "id", "status": "done", "seriesTitle": "Show"},
+    ]
+    stats, mocks = _run_pass_movie(
+        d,
+        movies,
+        wanted=wanted,
+        state=state,
+        infos=infos,
+        movie_library=True,
+        regen=True,
+        max_eps=8,
+        target_langs=["id"],
+    )
+    assert stats["processed"] == 6 and stats["done"] == 6, stats
+
+    def idx(sub):
+        hits = [i for i, l in enumerate(mocks["log"]) if sub in l]
+        assert hits, sub
+        return hits[0]
+
+    i_w1 = idx("proc: S01E01 Show [jpn->id]")
+    i_w2 = idx("proc: S01E02 Show [jpn->id]")
+    i_m1 = idx("movies: process Alpha [id]")
+    i_m2 = idx("movies: process Beta [id]")
+    i_r1 = idx("regen: process S01E03 Show [id]")
+    i_r2 = idx("regen: process S01E04 Show [id]")
+    assert i_w1 < i_w2 < i_m1 < i_m2 < i_r1 < i_r2, mocks["log"]
+    assert any(
+        "wanted total=" in l and "movies remaining=2" in l for l in mocks["log"]
+    ), mocks["log"]
+
+    stats2, mocks2 = _run_pass_movie(
+        d,
+        movies,
+        wanted=wanted,
+        state=state,
+        infos=infos,
+        movie_library=True,
+        regen=True,
+        max_eps=4,
+        target_langs=["id"],
+    )
+    assert stats2["processed"] == 4 and stats2["done"] == 4, stats2
+    assert not any("regen: process" in l for l in mocks2["log"]), mocks2["log"]
+    assert any("movies: process Alpha [id]" in l for l in mocks2["log"])
+    assert any("movies: process Beta [id]" in l for l in mocks2["log"])
+    assert any(
+        "wanted total=" in l and "movies remaining=2" in l for l in mocks2["log"]
+    ), mocks2["log"]
+
+    stats3, mocks3 = _run_pass_movie(
+        d,
+        movies,
+        wanted=wanted,
+        state=state,
+        infos=infos,
+        movie_library=True,
+        regen=True,
+        max_eps=2,
+        target_langs=["id"],
+    )
+    assert stats3["processed"] == 2 and stats3["done"] == 2, stats3
+    assert not any("movies: process" in l for l in mocks3["log"]), mocks3["log"]
+    assert not any("regen: process" in l for l in mocks3["log"]), mocks3["log"]
+    assert any(
+        "wanted total=" in l and "movies remaining=2" in l for l in mocks3["log"]
+    ), mocks3["log"]
+    print("PASS pass_priority_wanted_movies_regen")
+
+
+def test_prov_breakdown_unknown():
+    """Per-language provenance counts include an unknown bucket for rows
+    without source_kind, and by_lang totals sum exactly to rows."""
+    rows = [
+        {"lang": "id", "source_kind": "embedded"},
+        {"lang": "id"},
+        {"lang": "en", "source_kind": "external"},
+        {"lang": "en"},
+        {},
+    ]
+    totals, by_lang = api2.ControlAPIv2._prov_breakdown(rows)
+    assert totals == {"rows": 5, "embedded": 1, "external": 1, "unknown_kind": 3}, totals
+    assert by_lang["id"] == {"embedded": 1, "external": 0, "unknown": 1, "total": 2}, by_lang
+    assert by_lang["en"] == {"embedded": 0, "external": 1, "unknown": 1, "total": 2}, by_lang
+    assert by_lang["unknown"] == {"embedded": 0, "external": 0, "unknown": 1, "total": 1}, by_lang
+    assert sum(e["total"] for e in by_lang.values()) == totals["rows"]
+    print("PASS prov_breakdown_unknown")
+
+
+def _mk_api2(tmp_dir):
+    import tempfile
+
+    return api2.ControlAPIv2(
+        cfg={
+            "ENV_FILE": os.path.join(tmp_dir, "env"),
+            "STATE_FILE": os.path.join(tmp_dir, "state.jsonl"),
+            "REGISTRY_FILE": os.path.join(tmp_dir, "registry.jsonl"),
+            "REFINE_FILE": os.path.join(tmp_dir, "refine.jsonl"),
+            "ACTIONS_FILE": os.path.join(tmp_dir, "actions.jsonl"),
+            "EXCLUSIONS_FILE": os.path.join(tmp_dir, "exclusions.jsonl"),
+            "NAS_MEDIA_ROOT": tmp_dir,
+            "CONTROL_URL": "http://127.0.0.1:9",
+            "LLAMA_URL": "http://127.0.0.1:9",
+            "NVIDIA_SMI_CMD": ["false"],
+        }
+    )
+
+
+def test_library_includes_movies():
+    """/api2/library merges one kind=movie item per monitored Bazarr movie
+    (path non-empty) with per-language state (kind=movie rows keyed by
+    radarrId) plus registry prov labels; movies sort after series; total and
+    movies counts cover both."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    api = _mk_api2(d)
+    with open(api.opts["STATE_FILE"], "w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"sonarrEpisodeId": 5, "language": "id", "status": "done", "ts": "2026-01-01T00:00:00Z"}
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "sonarrEpisodeId": 501,
+                    "language": "id",
+                    "status": "done",
+                    "kind": "movie",
+                    "ts": "2026-01-01T00:00:01Z",
+                }
+            )
+            + "\n"
+        )
+    movie_path = "/data/jellyfin/radarr-movies/Die.Hard/Die.Hard.mkv"
+    movie_stem = os.path.join(d, "jellyfin", "radarr-movies", "Die.Hard", "Die.Hard")
+    with open(api.opts["REGISTRY_FILE"], "w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps({"stem": movie_stem, "lang": "id", "source": "bazarr", "source_kind": "external"})
+            + "\n"
+        )
+    api._bazarr_wanted = lambda: {
+        "total": 1,
+        "data": [
+            {
+                "sonarrEpisodeId": 5,
+                "seriesTitle": "Show",
+                "episode_number": "S01E05",
+                "seasonNumber": 1,
+                "episodeNumber": 5,
+            }
+        ],
+    }
+    api._bazarr_movies = lambda: {
+        "total": 1,
+        "data": [
+            {"radarrId": 501, "title": "Die Hard", "monitored": True, "path": movie_path},
+            {"radarrId": 502, "title": "Hidden", "monitored": False, "path": "/data/x.mkv"},
+            {"radarrId": 503, "title": "Nopath", "monitored": True, "path": ""},
+        ],
+    }
+    code, out = api.handle("GET", "/api2/library")
+    assert code == 200, out
+    assert out["total"] == 2 and out["movies"] == 1, out
+    assert [it["sonarr_episode_id"] for it in out["items"]] == [5, 501], out
+    mv = out["items"][1]
+    assert mv["kind"] == "movie", mv
+    assert mv["series"] == "Die Hard" and mv["episode"] == "MOVIE", mv
+    assert mv["title"] == "Die Hard" and mv["path"] == movie_path, mv
+    assert mv["wanted"] is False and mv["season"] is None and mv["episode_number"] is None, mv
+    langs = mv["languages"]
+    assert len(langs) == 1 and langs[0]["language"] == "id" and langs[0]["status"] == "done", langs
+    assert langs[0]["prov"] == "external" and langs[0]["source"] == "bazarr", langs
+    print("PASS library_includes_movies")
+
+
+def test_status_movies_block():
+    """/api2/status: movies block = monitored movies with path (total) vs
+    on-disk + AI-ownable (remaining); daemon unreachable falls back to the
+    local sweep estimate; queue carries both wanted and movies."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    api = _mk_api2(d)
+    with open(api.opts["ENV_FILE"], "w", encoding="utf-8") as fh:
+        fh.write("TARGET_LANGS=id" + chr(10))
+    open(os.path.join(d, "movie.mkv"), "w").close()
+    api._bazarr_wanted = lambda: {"total": 0, "data": []}
+    api._bazarr_movies = lambda: {
+        "total": 3,
+        "data": [
+            {"radarrId": 1, "title": "A", "monitored": True, "path": "/data/movie.mkv"},
+            {"radarrId": 2, "title": "B", "monitored": True, "path": "/data/missing.mkv"},
+            {"radarrId": 3, "title": "C", "monitored": False, "path": "/data/off.mkv"},
+        ],
+    }
+    code, out = api.handle("GET", "/api2/status")
+    assert code == 200, out
+    assert out["movies"] == {"total": 2, "remaining": 1}, out["movies"]
+    assert out["queue"] == {"wanted": 0, "movies": 1}, out["queue"]
+    assert out["queue"]["wanted"] == 0
+    # id sidecar on disk drains the id language -> remaining drops to 0
+    open(os.path.join(d, "movie.id.srt"), "w").close()
+    code2, out2 = api.handle("GET", "/api2/status")
+    assert code2 == 200, out2
+    assert out2["movies"]["remaining"] == 0, out2["movies"]
+    print("PASS status_movies_block")
+
+
+def test_activity_movie_label():
+    """/api2/activity: movie pipeline rows resolve their label from the
+    Bazarr movies list (series = movie title, episode = MOVIE) and carry
+    kind=movie so the dashboard can tag them."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    api = _mk_api2(d)
+    with open(api.opts["STATE_FILE"], "w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "sonarrEpisodeId": 501,
+                    "language": "id",
+                    "status": "done",
+                    "kind": "movie",
+                    "ts": "2026-01-01T00:00:00Z",
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "sonarrEpisodeId": 7,
+                    "language": "id",
+                    "status": "done",
+                    "ts": "2026-01-01T00:00:01Z",
+                }
+            )
+            + "\n"
+        )
+    api._bazarr_wanted = lambda: {"total": 0, "data": []}
+    api._bazarr_history = lambda: []
+    api._bazarr_movies = lambda: {
+        "total": 1,
+        "data": [{"radarrId": 501, "title": "Die Hard", "monitored": True, "path": "/data/x.mkv"}],
+    }
+    code, out = api.handle("GET", "/api2/activity")
+    assert code == 200, out
+    by_id = {it["episode_id"]: it for it in out["items"]}
+    mv = by_id.get(501)
+    assert mv is not None, out["items"]
+    assert mv["kind"] == "movie", mv
+    assert mv["series"] == "Die Hard" and mv["episode"] == "MOVIE", mv
+    assert mv["title"] == "Die Hard", mv
+    series = by_id.get(7)
+    assert series is not None and series["kind"] == "pipeline", out["items"]
+    print("PASS activity_movie_label")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

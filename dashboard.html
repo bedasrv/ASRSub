@@ -133,6 +133,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   padding: 6px 10px; border-radius: 4px;
 }
 .rm-item:hover { background: var(--surface-variant); }
+.rm-item:disabled { opacity: .45; pointer-events: none; }
 .rm-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .rm-item.rm-danger { color: var(--error); }
 .rm-item.rm-danger:hover { background: var(--error-container); }
@@ -152,8 +153,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.done { background: var(--secondary-container); color: var(--on-secondary-container); }
 .t-pill.error { background: var(--error-container); color: var(--on-error-container); }
 .t-pill.pending { background: var(--tertiary-container); color: var(--on-tertiary-container); }
-.t-pill.excluded, .t-pill.new { background: var(--surface-variant); color: var(--on-surface-variant); }
-.t-pill.ai { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.t-pill.excluded, .t-pill.new, .t-pill.neutral { background: var(--surface-variant); color: var(--on-surface-variant); }
+.t-pill.ai, .t-pill.movie { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
 .prov-external { background: var(--run); color: var(--inverse-on-surface); }
 .prov-unknown { background: var(--surface-variant); color: var(--on-surface-variant); }
@@ -236,6 +237,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   font-size: 12px; font-weight: 500; line-height: 16px; cursor: pointer; white-space: nowrap;
 }
 .fchip:hover { background: var(--surface-variant); }
+.fchip-count { margin-left: 5px; font-size: 11px; font-weight: 600; opacity: .7; }
 .fchip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
 .fchip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .sel-toggle { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 12px; }
@@ -393,12 +395,13 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         </div>
         <span class="search-count" id="lib-search-count"></span>
         <div class="filter-chips" id="lib-filter-chips" role="group" aria-label="Status filter">
-          <button type="button" class="fchip active" data-status="">All</button>
-          <button type="button" class="fchip" data-status="wanted">Wanted</button>
-          <button type="button" class="fchip" data-status="done">Done</button>
-          <button type="button" class="fchip" data-status="error">Error</button>
-          <button type="button" class="fchip" data-status="pending">Pending</button>
-          <button type="button" class="fchip" data-status="excluded">Excluded</button>
+          <button type="button" class="fchip active" data-status="">All<span class="fchip-count" id="chip-count-all"></span></button>
+          <button type="button" class="fchip" data-status="wanted">Wanted<span class="fchip-count" id="chip-count-wanted"></span></button>
+          <button type="button" class="fchip" data-status="done">Done<span class="fchip-count" id="chip-count-done"></span></button>
+          <button type="button" class="fchip" data-status="error">Error<span class="fchip-count" id="chip-count-error"></span></button>
+          <button type="button" class="fchip" data-status="pending">Pending<span class="fchip-count" id="chip-count-pending"></span></button>
+          <button type="button" class="fchip" data-status="excluded">Excluded<span class="fchip-count" id="chip-count-excluded"></span></button>
+          <button type="button" class="fchip" data-status="movie">Movies<span class="fchip-count" id="chip-count-movie"></span></button>
         </div>
         <button type="button" class="fchip sel-toggle" id="sel-toggle" aria-pressed="false">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
@@ -452,6 +455,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <div class="tile"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
         <div class="tile"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
         <div class="tile"><div class="lbl">Queue (wanted)</div><div class="val" id="st-queue">–</div></div>
+        <div class="tile"><div class="lbl">Movies</div><div class="val" id="st-movies">–</div></div>
         <div class="tile"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
         <div class="tile"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
         <div class="tile"><div class="lbl">Started at</div><div class="val" id="st-started">–</div></div>
@@ -657,14 +661,29 @@ function renderStatus(data) {
   const qd = document.getElementById("q-dot");
   const qt = document.getElementById("q-text");
   const queue = data.queue || {};
-  qd.className = queue.wanted ? "dot running" : "dot up";
-  qt.textContent = "queue: " + (queue.wanted != null ? queue.wanted + " wanted" : "?");
+  const mv = data.movies || {};
+  qd.className = (queue.wanted || (mv.remaining != null && mv.remaining > 0)) ? "dot running" : "dot up";
+  qt.textContent = "queue: " + (queue.wanted != null ? queue.wanted + " wanted" : "?") +
+    (mv.remaining != null ? " · " + mv.remaining + " movies" : "");
 
   const stDaemon = document.getElementById("st-daemon");
   stDaemon.textContent = reachable ? (daemon.paused ? "paused" : "running") : "stopped";
   stDaemon.className = "val " + (reachable ? (daemon.paused ? "run" : "ok") : "err");
   document.getElementById("st-uptime").textContent = daemon.uptime_s != null ? fmtDur(daemon.uptime_s) : "–";
   document.getElementById("st-queue").textContent = queue.wanted != null ? queue.wanted : "–";
+  const stMv = document.getElementById("st-movies");
+  if (stMv) {
+    if (mv.total != null && mv.remaining != null) {
+      const done = Math.max(0, mv.total - mv.remaining);
+      stMv.textContent = done + " done / " + mv.remaining + " remaining";
+      stMv.className = "val " + (mv.remaining > 0 ? "run" : "ok");
+    } else if (mv.remaining != null) {
+      stMv.textContent = mv.remaining + " pending";
+      stMv.className = "val " + (mv.remaining > 0 ? "run" : "ok");
+    } else {
+      stMv.textContent = "–";
+    }
+  }
   const lp = daemon.last_pass || {};
   const stLp = document.getElementById("st-lastpass");
   stLp.textContent = lp.processed != null
@@ -772,7 +791,7 @@ function renderProvenance(data) {
   if (langNames.length) {
     langHtml = '<div class="pills" style="margin-top:8px">' + langNames.map(function (lg) {
       const e = byLang[lg] || {};
-      return '<span class="chip prov-langchip">' + esc(lg) + ": " + esc(e.embedded ?? 0) + " embedded / " + esc(e.external ?? 0) + " external</span>";
+      return '<span class="chip prov-langchip">' + esc(lg) + ": " + esc(e.embedded ?? 0) + " embedded / " + esc(e.external ?? 0) + " external / " + esc(e.unknown ?? 0) + " unknown</span>";
     }).join("") + "</div>";
   }
   const recent = data.recent || [];
@@ -896,6 +915,8 @@ function libMatches(it, q) {
   if (libStatus) {
     if (libStatus === "wanted") {
       if (!it.wanted) return false;
+    } else if (libStatus === "movie") {
+      if (!(it.kind === "movie")) return false;
     } else if (!(it.languages || []).some(function (l) {
       return (l.status || "wanted") === libStatus;
     })) {
@@ -912,6 +933,29 @@ function libMatches(it, q) {
   return true;
 }
 
+function libCounts(items) {
+  const c = { all: items.length, wanted: 0, done: 0, error: 0, pending: 0, excluded: 0, movie: 0 };
+  for (const it of items) {
+    if (it.kind === "movie") c.movie++;
+    if (it.wanted) c.wanted++;
+    const sts = {};
+    for (const l of (it.languages || [])) sts[l.status || "wanted"] = true;
+    if (sts.done) c.done++;
+    if (sts.error) c.error++;
+    if (sts.pending) c.pending++;
+    if (sts.excluded) c.excluded++;
+  }
+  return c;
+}
+
+function renderChipCounts(items) {
+  const c = libCounts(items);
+  for (const st of ["all", "wanted", "done", "error", "pending", "excluded", "movie"]) {
+    const el = document.getElementById("chip-count-" + st);
+    if (el) el.textContent = c[st];
+  }
+}
+
 function renderLibrary(data) {
   lastLibrary = data;
   const list = document.getElementById("library-list");
@@ -919,6 +963,7 @@ function renderLibrary(data) {
   banner.classList.remove("visible");
   banner.hidden = true;
   const items = data.items || [];
+  renderChipCounts(items);
   libraryItems = {};
   for (const it of items) {
     if (it.sonarr_episode_id != null) libraryItems[String(it.sonarr_episode_id)] = it;
@@ -1000,17 +1045,24 @@ function actRowHTML(it) {
   const dur = fmtDur(it.elapsed_s);
   const stBadges = [];
   if (it.kind === "pipeline" && it.detail) stBadges.push('<span class="t-pill ' + statusClass(it.detail) + '">' + esc(it.detail) + "</span>");
+  else if (it.kind === "bazarr") {
+    const text = it.detail ? (String(it.detail).length > 26 ? String(it.detail).slice(0, 26) + "…" : String(it.detail)) : "history";
+    stBadges.push('<span class="t-pill neutral" title="' + esc(it.detail || "") + '">' + esc(text) + "</span>");
+  } else {
+    stBadges.push('<span class="t-pill neutral">history</span>');
+  }
   if (it.ai) stBadges.push('<span class="t-pill ai">AI</span>');
   const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "") + (rt ? " · " + rt : "");
   const titleAttr = esc((dur ? "elapsed " + dur + " · " : "") + (tsIso || it.ts || ""));
   return (
     '<div class="f-row">' +
     '<div class="f-left">' +
-    '<div class="f-title" title="' + titleAttr + '">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') + "</div>" +
+    '<div class="f-title" title="' + titleAttr + '">' + (it.series ? esc(it.series) : '<span class="muted">—</span>') +
+    (it.kind === "movie" ? '<span class="t-pill movie" style="margin-left:6px">MOVIE</span>' : "") + "</div>" +
     '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
     "</div>" +
     '<div class="f-right">' +
-    '<div class="fr-line1">' + (stBadges.join(" ") || '<span class="muted">—</span>') + "</div>" +
+    '<div class="fr-line1">' + stBadges.join(" ") + "</div>" +
     (it.language ? '<div class="fr-line2"><span class="lang-badge done">' + esc(it.language) + "</span></div>" : "") +
     "</div></div>"
   );
@@ -1141,6 +1193,10 @@ async function batchAction(act) {
 
 async function episodeAction(act, id, btn, langOverride) {
   const it = libraryItems[String(id)] || activityItems[String(id)];
+  if (it && it.kind === "movie" && (act === "retry" || act === "delete")) {
+    toast("not available for movies", "err");
+    return;
+  }
   let lang = langOverride;
   if (lang == null) lang = itemLangTarget(it);
   if (act === "delete") {
@@ -1179,6 +1235,12 @@ function closeRowMenu() {
 function openRowMenu(id, btn) {
   if (openMenuId === id) { closeRowMenu(); return; }
   rowMenu.dataset.id = id;
+  const it = libraryItems[String(id)];
+  const isMovie = !!(it && it.kind === "movie");
+  for (const act of ["retry", "delete"]) {
+    const b = rowMenu.querySelector("[data-act='" + act + "']");
+    if (b) b.disabled = isMovie;
+  }
   const exclBtn = rowMenu.querySelector("[data-act='exclude'], [data-act='unexclude']");
   if (exclBtn) {
     if (libraryExcluded[String(id)]) { exclBtn.dataset.act = "unexclude"; exclBtn.textContent = "Unexclude"; }

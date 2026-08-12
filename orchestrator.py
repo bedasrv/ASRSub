@@ -3516,6 +3516,19 @@ def halt_on_error(cfg, stage, ep_desc, exc, extra=None):
     )
 
 
+def _order_pass_candidates(wanted_items, movie_items, regen_items, max_eps):
+    """Pass priority ordering: series wanted first, then movie candidates,
+    then series regen items; the combined list is capped at max_eps. Movies
+    rank above regen so a heavy regen backlog cannot starve the movie track.
+    Returns (ordered_candidates, movies_remaining) where movies_remaining is
+    the FULL movie candidate count (pre-cap), used for the pass log."""
+    movies_remaining = len(movie_items)
+    return (
+        (list(wanted_items) + list(movie_items) + list(regen_items))[:max_eps],
+        movies_remaining,
+    )
+
+
 def run_pass():
     global _paused
     cfg = load_config()
@@ -3567,12 +3580,21 @@ def run_pass():
         log(f"excluded this pass: {len(before) - len(candidates)} of {before} episodes {sorted(excluded)}")
     candidates.sort(key=lambda x: x["sonarrEpisodeId"])
     wanted_now = {it["sonarrEpisodeId"] for it in candidates}
+
+    movie_cands = []
+    if cfg.get("MOVIE_LIBRARY"):
+        # Movie track: every Bazarr movie lacking AI-owned target subs is a
+        # candidate (self-draining via the registry, like REGEN_LIBRARY);
+        # movies rank between series wanted and series regen for the cap.
+        movie_cands, movies_total = _movie_sweep(cfg, target_langs)
+        log(f"movies total={movies_total}, movie candidates={len(movie_cands)}")
+
+    regen_items = []
     if cfg.get("REGEN_LIBRARY"):
         # Library regeneration: every state-done (episode, language) pair is
         # a candidate again; wanted candidates keep priority and share the
         # MAX_EPS_PER_RUN cap (regen fills leftover slots). The per-item
         # registry check in the loop makes the drain resumable across passes.
-        regen_items = []
         for (kind_, ep_id, lang), entry in last_entry.items():
             if kind_ != "series":
                 continue  # movies drain via the sweep, never regen candidates
@@ -3598,25 +3620,18 @@ def run_pass():
         regen_items.sort(
             key=lambda x: (x["sonarrEpisodeId"], x["missing_subtitles"][0]["code2"])
         )
-        candidates = (candidates + regen_items)[: cfg["MAX_EPS_PER_RUN"]]
-    else:
-        candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
 
-    n_movies = 0
-    if cfg.get("MOVIE_LIBRARY"):
-        # Movie track: every Bazarr movie lacking AI-owned target subs is a
-        # candidate (self-draining via the registry, like REGEN_LIBRARY);
-        # movies share the cap after series wanted + regen.
-        movie_cands, movies_total = _movie_sweep(cfg, target_langs)
-        candidates = (candidates + movie_cands)[: cfg["MAX_EPS_PER_RUN"]]
-        n_movies = len(movie_cands)
-        log(f"movies total={movies_total}, movie candidates={n_movies}")
+    candidates, movies_remaining = _order_pass_candidates(
+        candidates, movie_cands, regen_items, cfg["MAX_EPS_PER_RUN"]
+    )
 
     processed = done = skipped = failed = 0
     n_regen = sum(1 for it in candidates if it.get("regen"))
+    n_movies = len(movie_cands)
     log(
         f"wanted total={total}, candidates for pass={len(candidates)} "
-        f"(max={cfg['MAX_EPS_PER_RUN']}, regen candidates={n_regen}, movie candidates={n_movies})"
+        f"(max={cfg['MAX_EPS_PER_RUN']}, regen candidates={n_regen}, "
+        f"movie candidates={n_movies}, movies remaining={movies_remaining})"
     )
 
     prior_cache = {}
@@ -4102,6 +4117,15 @@ class ControlHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json(200, {"ok": True})
         elif path == "/status":
+            movies_remaining = 0
+            try:
+                status_cfg = load_config()
+                if status_cfg.get("MOVIE_LIBRARY"):
+                    movies_remaining = len(
+                        movie_candidates(status_cfg, set(status_cfg["TARGET_LANGS"]))
+                    )
+            except Exception:
+                movies_remaining = 0
             self._send_json(
                 200,
                 {
@@ -4111,6 +4135,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                     "paused": _paused,
                     "run_once_requested": _run_once_requested,
                     "last_pass": _last_pass_stats,
+                    "movies_remaining": movies_remaining,
                     "state_counts": self._state_counts(),
                     "consecutive_failures": _consecutive_failures,
                     "started_at": _started_at.isoformat(),

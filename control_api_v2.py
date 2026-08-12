@@ -402,12 +402,12 @@ class ControlAPIv2:
 
         return self._cached("registry", 10, _fn)
 
-    def _registry_summary(self, rows=None):
-        """Counts over registry rows by source_kind (embedded / external /
-        unknown) plus a per-language breakdown. `rows` may be passed in to
-        reuse a single read across endpoints."""
-        if rows is None:
-            rows = self._registry()
+    @staticmethod
+    def _prov_breakdown(rows):
+        """Pure breakdown of registry rows: totals by source_kind (embedded /
+        external / unknown_kind) plus per-language counters
+        {embedded, external, unknown, total} where unknown counts rows with
+        no source_kind. by_lang totals always sum to rows."""
         totals = {"rows": len(rows), "embedded": 0, "external": 0, "unknown_kind": 0}
         by_lang = {}
         for r in rows:
@@ -419,13 +419,25 @@ class ControlAPIv2:
             else:
                 totals["unknown_kind"] += 1
             lang = r.get("lang") or "unknown"
-            entry = by_lang.setdefault(lang, {"embedded": 0, "external": 0, "total": 0})
+            entry = by_lang.setdefault(
+                lang, {"embedded": 0, "external": 0, "unknown": 0, "total": 0}
+            )
             if kind == "embedded":
                 entry["embedded"] += 1
             elif kind == "external":
                 entry["external"] += 1
+            else:
+                entry["unknown"] += 1
             entry["total"] += 1
         return totals, by_lang
+
+    def _registry_summary(self, rows=None):
+        """Counts over registry rows by source_kind (embedded / external /
+        unknown) plus a per-language breakdown. `rows` may be passed in to
+        reuse a single read across endpoints."""
+        if rows is None:
+            rows = self._registry()
+        return self._prov_breakdown(rows)
 
     def _registry_stems(self, path):
         """Candidate registry stems for a media path: the path itself with
@@ -585,6 +597,22 @@ class ControlAPIv2:
             return data
 
         return self._cached("bazarr.wanted", 10, _fn)
+
+    def _bazarr_movies(self):
+        def _fn():
+            cfg = self._env()
+            url_base = cfg.get("BAZARR_URL", "").rstrip("/")
+            if not url_base:
+                return {"total": 0, "data": []}
+            url = url_base + "/movies?start=0&length=500"
+            code, data = _http(
+                "GET", url, headers={"X-API-KEY": cfg.get("BAZARR_API_KEY", "")}, timeout=10
+            )
+            if code != 200 or not isinstance(data, dict):
+                return {"total": 0, "data": []}
+            return data
+
+        return self._cached("bazarr.movies", 30, _fn)
 
     def _bazarr_history(self):
         def _fn():
@@ -754,7 +782,7 @@ class ControlAPIv2:
             ("subs", ep_id), 15, lambda: self.list_subtitle_files(det)
         )
 
-    def _resolve_label(self, ep_id, wanted_data):
+    def _resolve_label(self, ep_id, wanted_data, movies_data=None):
         for item in wanted_data:
             if item.get("sonarrEpisodeId") == ep_id:
                 return (
@@ -765,6 +793,10 @@ class ControlAPIv2:
         det = self._ep_detail(ep_id)
         series, episode, title = det.get("series"), det.get("episode"), det.get("title")
         if not series and not episode:
+            for mv in (movies_data or []):
+                if mv.get("radarrId") == ep_id:
+                    mtitle = mv.get("title") or f"movie {ep_id}"
+                    return mtitle, "MOVIE", mtitle
             return None, f"ep {ep_id}", title
         return series, episode, title
 
@@ -834,11 +866,92 @@ class ControlAPIv2:
         self._write_overrides(ov)
         return 200, {"ok": True, "applied": self._mask(applied)}
 
+    def _movies_remaining_local(self, movies=None):
+        """Best-effort movies_remaining when the daemon did not report one
+        (unreachable or pre-update daemon): monitored movies with a media
+        file on disk that still lack AI-owned target subs. Mirrors the
+        orchestrator sweep's per-movie gating: registry rows with source
+        asr/jpn/eng own the sidecar, and an {stem}.i(n)d(.hi).srt target
+        sidecar on disk blocks the id language."""
+        if movies is None:
+            movies = self._bazarr_movies()
+        try:
+            cfg = self._env()
+            tl = cfg.get("TARGET_LANGS") or "id,en"
+            if isinstance(tl, str) and tl.strip().startswith("["):
+                try:
+                    import ast
+
+                    tl = ast.literal_eval(tl)
+                except Exception:
+                    tl = "id,en"
+            if isinstance(tl, list):
+                tl = ",".join(x for x in tl if isinstance(x, str))
+            target_langs = {x.strip() for x in str(tl).split(",") if x.strip()}
+            root = self.opts.get("NAS_MEDIA_ROOT", "/mnt/nas/share/media").rstrip("/")
+            reg_rows = self._registry()
+            reg_by_stem = {}
+            for r in reg_rows:
+                stem, lang = r.get("stem"), r.get("lang")
+                if stem and lang:
+                    reg_by_stem.setdefault(stem, {})[lang] = r
+            remaining = 0
+            for m in (movies.get("data") or []):
+                if not isinstance(m.get("radarrId"), int):
+                    continue
+                if not m.get("monitored", True):
+                    continue
+                path = m.get("path") or ""
+                if not path:
+                    continue
+                mapped = (
+                    root + path[len("/data"):]
+                    if isinstance(path, str) and path.startswith("/data/")
+                    else path
+                )
+                if not os.path.isfile(mapped):
+                    continue
+                stems = [os.path.splitext(mapped)[0]]
+                for lang in target_langs:
+                    rec = None
+                    for stem in stems:
+                        rec = reg_by_stem.get(stem, {}).get(lang)
+                        if rec:
+                            break
+                    if rec and rec.get("source") in ("asr", "jpn", "eng"):
+                        continue
+                    if lang == "id" and self._id_sidecar_exists(mapped):
+                        continue
+                    remaining += 1
+                    break
+            return remaining
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _id_sidecar_exists(media_path):
+        """Target-language (id) sidecar glob next to the media file; matches
+        {stem}.id.srt / {stem}.id.hi.srt / {stem}.ind.srt / {stem}.ind.hi.srt."""
+        d = os.path.dirname(media_path)
+        basename_stem = os.path.splitext(os.path.basename(media_path))[0]
+        rx = re.compile(
+            r"^" + re.escape(basename_stem) + r"\.i(n)?d(\.hi)?\.srt$",
+            re.IGNORECASE,
+        )
+        try:
+            for name in os.listdir(d):
+                if rx.match(name):
+                    return True
+        except OSError:
+            pass
+        return False
+
     def _h_status(self, body, id=None):
         entries, latest, _lbl = self._state()
         refine = self._refine_latest()
         daemon = self._daemon_status()
         wanted = self._bazarr_wanted()
+        movies = self._bazarr_movies()
         gpu = self._gpu()
         llama = self._llama()
         episodes = {}
@@ -856,11 +969,20 @@ class ControlAPIv2:
         counts = self._state_counts(latest)
         if daemon.get("reachable") and isinstance(daemon.get("state_counts"), dict):
             counts = daemon["state_counts"]
+        movie_total = sum(
+            1
+            for m in (movies.get("data") or [])
+            if m.get("monitored", True) and (m.get("path") or "").strip()
+        )
+        movies_remaining = daemon.get("movies_remaining")
+        if not isinstance(movies_remaining, int):
+            movies_remaining = self._movies_remaining_local(movies)
         return 200, {
             "updated_at": _now_iso(),
             "daemon": daemon,
             "state_counts": counts,
-            "queue": {"wanted": wanted.get("total", 0)},
+            "queue": {"wanted": wanted.get("total", 0), "movies": movies_remaining},
+            "movies": {"total": movie_total, "remaining": movies_remaining},
             "gpu": gpu,
             "llama": llama,
             "registry": self._registry_block(),
@@ -882,14 +1004,17 @@ class ControlAPIv2:
     def _h_activity(self, body, id=None):
         entries, _latest, _lbl = self._state()
         wanted = self._bazarr_wanted()
+        movies = self._bazarr_movies()
         items = []
         for e in entries[-40:]:
             ep_id = e.get("sonarrEpisodeId")
-            series, episode, title = self._resolve_label(ep_id, wanted.get("data", []) or [])
+            series, episode, title = self._resolve_label(
+                ep_id, wanted.get("data", []) or [], movies.get("data") or []
+            )
             items.append(
                 {
                     "ts": e.get("ts"),
-                    "kind": "pipeline",
+                    "kind": "movie" if e.get("kind") == "movie" else "pipeline",
                     "episode_id": ep_id,
                     "series": series,
                     "episode": episode,
@@ -1000,9 +1125,38 @@ class ControlAPIv2:
             "updated_at": _now_iso(),
         }
 
+    def _lang_entries(self, langs_by_id, eid, stem_cands, reg_by_stem):
+        """Per-language status entries for one library item, with provenance
+        (source/source_kind) labels from registry rows matched by stem."""
+        lang_entries = []
+        for lang, st in sorted(langs_by_id.get(eid, {}).items()):
+            entry = {
+                "language": lang,
+                "status": st["status"],
+                "ts": st["ts"],
+                "elapsed_s": st["elapsed_s"],
+            }
+            src = st.get("source")
+            rec = None
+            for stem in stem_cands:
+                rec = reg_by_stem.get(stem, {}).get(lang)
+                if rec:
+                    break
+            if rec:
+                prov = rec.get("source_kind")
+                if prov:
+                    entry["prov"] = prov
+                if src is None:
+                    src = rec.get("source")
+            if src:
+                entry["source"] = src
+            lang_entries.append(entry)
+        return lang_entries
+
     def _h_library(self, body, id=None):
         """Merged library: one item per episode across Bazarr wanted + state
-        history + exclusions, with per-language status. Read-only."""
+        history + exclusions (series) plus one item per monitored Bazarr
+        movie (kind "movie"), with per-language status. Read-only."""
         wanted_json = self._bazarr_wanted()
         _entries, latest, latest_by_lang = self._state()
         wanted_data = wanted_json.get("data", []) or []
@@ -1078,29 +1232,6 @@ class ControlAPIv2:
                 continue  # ghost: episode deleted from Sonarr, not wanted
             det = details.get(eid) or {}
             stem_cands = self._registry_stems(det.get("path"))
-            lang_entries = []
-            for lang, st in sorted(langs.get(eid, {}).items()):
-                entry = {
-                    "language": lang,
-                    "status": st["status"],
-                    "ts": st["ts"],
-                    "elapsed_s": st["elapsed_s"],
-                }
-                src = st.get("source")
-                rec = None
-                for stem in stem_cands:
-                    rec = reg_by_stem.get(stem, {}).get(lang)
-                    if rec:
-                        break
-                if rec:
-                    prov = rec.get("source_kind")
-                    if prov:
-                        entry["prov"] = prov
-                    if src is None:
-                        src = rec.get("source")
-                if src:
-                    entry["source"] = src
-                lang_entries.append(entry)
             items.append(
                 {
                     "sonarr_episode_id": eid,
@@ -1110,17 +1241,54 @@ class ControlAPIv2:
                     "season": season,
                     "episode_number": epnum,
                     "wanted": eid in wanted_by_id,
-                    "languages": lang_entries,
+                    "languages": self._lang_entries(langs, eid, stem_cands, reg_by_stem),
+                }
+            )
+        movies_json = self._bazarr_movies()
+        movie_langs = {}
+        for (eid, lang), rec in latest_by_lang.items():
+            if rec.get("kind") == "movie" and isinstance(eid, int):
+                movie_langs.setdefault(eid, {})[lang] = {
+                    "status": rec.get("status"),
+                    "ts": rec.get("ts"),
+                    "elapsed_s": rec.get("elapsed_s"),
+                }
+        for m in (movies_json.get("data") or []):
+            rid = m.get("radarrId")
+            if not isinstance(rid, int):
+                continue
+            if not m.get("monitored", True):
+                continue
+            path = m.get("path") or ""
+            if not path:
+                continue
+            title = m.get("title") or "?"
+            items.append(
+                {
+                    "kind": "movie",
+                    "sonarr_episode_id": rid,
+                    "series": title,
+                    "episode": "MOVIE",
+                    "title": title,
+                    "season": None,
+                    "episode_number": None,
+                    "path": path,
+                    "wanted": False,
+                    "languages": self._lang_entries(
+                        movie_langs, rid, self._registry_stems(path), reg_by_stem
+                    ),
                 }
             )
         items.sort(
             key=lambda it: (
+                1 if it.get("kind") == "movie" else 0,
                 it["series"] or "",
                 it["season"] if isinstance(it["season"], int) else -1,
                 it["episode_number"] if isinstance(it["episode_number"], int) else -1,
             )
         )
-        out = {"items": items[:1000]}
+        movie_count = sum(1 for it in items if it.get("kind") == "movie")
+        out = {"items": items[:1000], "total": len(items), "movies": movie_count}
         if len(items) > 1000:
             out["truncated"] = True
         return 200, out
