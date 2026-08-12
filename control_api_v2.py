@@ -349,14 +349,16 @@ class ControlAPIv2:
             ep = e.get("sonarrEpisodeId")
             if ep is None:
                 continue
-            cur = latest.get(ep)
+            kind = e.get("kind") or "series"
+            key = (kind, ep)
+            cur = latest.get(key)
             cur_epoch = _parse_ts(cur.get("ts")) if cur else None
             new_epoch = _parse_ts(e.get("ts"))
             if cur is None or (new_epoch or -1) >= (cur_epoch or -1):
-                latest[ep] = e
+                latest[key] = e
             lang = e.get("language")
             if lang is not None:
-                key = (ep, lang)
+                key = (kind, ep, lang)
                 lcur = latest_by_lang.get(key)
                 lcur_epoch = _parse_ts(lcur.get("ts")) if lcur else None
                 if lcur is None or (new_epoch or -1) >= (lcur_epoch or -1):
@@ -955,9 +957,9 @@ class ControlAPIv2:
         gpu = self._gpu()
         llama = self._llama()
         episodes = {}
-        for ep_id, st in latest.items():
+        for (kind, ep_id), st in latest.items():
             rf = refine.get(ep_id)
-            episodes[str(ep_id)] = {
+            episodes[f"{kind}:{ep_id}"] = {
                 "status": st.get("status"),
                 "language": st.get("language"),
                 "elapsed_s": st.get("elapsed_s"),
@@ -1074,7 +1076,7 @@ class ControlAPIv2:
                     if isinstance(m, dict) and m.get("code2")
                 }
             )
-            st = latest.get(ep_id)
+            st = latest.get(("series", ep_id))
             state = {"status": "new", "elapsed_s": None, "ts": None}
             if st is not None:
                 status = st.get("status", "new")
@@ -1088,7 +1090,11 @@ class ControlAPIv2:
                     "ts": st.get("ts"),
                 }
             lang_states = {}
-            for lang, lst in ((l, r) for (e, l), r in latest_by_lang.items() if e == ep_id):
+            for lang, lst in (
+                (l, r)
+                for (k, e, l), r in latest_by_lang.items()
+                if k == "series" and e == ep_id
+            ):
                 lstatus = lst.get("status", "new")
                 if daemon.get("reachable") and lstatus not in ("done", "error"):
                     l_epoch = _parse_ts(lst.get("ts"))
@@ -1171,7 +1177,15 @@ class ControlAPIv2:
             for r in exclusions
             if isinstance(r.get("episode_id"), int)
         }
-        ep_ids = {eid for eid in (set(wanted_by_id) | set(latest) | excluded_ids) if isinstance(eid, int)}
+        ep_ids = {
+            eid
+            for eid in (
+                set(wanted_by_id)
+                | {eid for (kind, eid) in latest if kind == "series"}
+                | excluded_ids
+            )
+            if isinstance(eid, int)
+        }
         reg_rows = self._registry()
         detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id]
         if reg_rows:
@@ -1189,7 +1203,9 @@ class ControlAPIv2:
             if stem and lang:
                 reg_by_stem.setdefault(stem, {})[lang] = r
         langs = {}
-        for (eid, lang), rec in latest_by_lang.items():
+        for (kind, eid, lang), rec in latest_by_lang.items():
+            if kind != "series":
+                continue  # movie rows feed the movie items below, never series
             langs.setdefault(eid, {})[lang] = {
                 "status": rec.get("status"),
                 "ts": rec.get("ts"),
@@ -1246,8 +1262,8 @@ class ControlAPIv2:
             )
         movies_json = self._bazarr_movies()
         movie_langs = {}
-        for (eid, lang), rec in latest_by_lang.items():
-            if rec.get("kind") == "movie" and isinstance(eid, int):
+        for (kind, eid, lang), rec in latest_by_lang.items():
+            if kind == "movie" and isinstance(eid, int):
                 movie_langs.setdefault(eid, {})[lang] = {
                     "status": rec.get("status"),
                     "ts": rec.get("ts"),

@@ -3046,13 +3046,14 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
 
 def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
     """Manual movie subtitle upload via POST /api/movies/subtitles (radarr):
-    query movieid/language/forced/hi + multipart file. Identical semantics to
-    upload_srt (3 attempts, 5s*attempt backoff, 204 success, last_code
-    returned otherwise); Bazarr ignores the uploaded filename and writes
-    {video stem}.{lang alpha2}.srt."""
+    query radarrid/language/forced/hi + multipart file (Bazarr's swagger
+    requires the param literally named radarrid; movieid -> HTTP 400).
+    Identical semantics to upload_srt (3 attempts, 5s*attempt backoff, 204
+    success, last_code returned otherwise); Bazarr ignores the uploaded
+    filename and writes {video stem}.{lang alpha2}.srt."""
     url = cfg["BAZARR_URL"].rstrip("/") + "/movies/subtitles"
     params = {
-        "movieid": movie_id,
+        "radarrid": movie_id,
         "language": lang,
         "forced": "false",
         "hi": "false",
@@ -4094,12 +4095,15 @@ class ControlHandler(BaseHTTPRequestHandler):
         return True
 
     def _state_counts(self):
-        # Count the LATEST entry per (sonarrEpisodeId, language): state.jsonl
-        # is append-only, every failed attempt adds a row, so summing every row
-        # would report lifetime error counts instead of current state.
+        # Count the LATEST entry per (kind, sonarrEpisodeId, language):
+        # state.jsonl is append-only, every failed attempt adds a row, so
+        # summing every row would report lifetime error counts instead of
+        # current state. Kind keeps movie rows (sonarrEpisodeId == radarrId,
+        # small ids that collide with series episodes) from overwriting
+        # series rows of the same id.
         latest = {}
         for e in load_state():
-            key = (e.get("sonarrEpisodeId"), e.get("language"))
+            key = (e.get("kind") or "series", e.get("sonarrEpisodeId"), e.get("language"))
             cur = latest.get(key)
             if cur is None or (e.get("ts") or "") >= (cur.get("ts") or ""):
                 latest[key] = e

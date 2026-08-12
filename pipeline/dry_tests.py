@@ -3599,9 +3599,10 @@ def test_regen_skips_movie_rows():
 
 
 def test_upload_srt_movie_retry_204():
-    """upload_srt_movie posts to /movies/subtitles with movieid/language/
-    forced/hi params + multipart file; non-204 responses retry (3 attempts),
-    then 204 returns."""
+    """upload_srt_movie posts to /movies/subtitles with radarrid/language/
+    forced/hi params + multipart file (Bazarr swagger requires the query
+    param literally named radarrid; movieid -> HTTP 400); non-204 responses
+    retry (3 attempts), then 204 returns."""
     codes = [500, 500, 204]
     calls = []
 
@@ -3629,7 +3630,7 @@ def test_upload_srt_movie_retry_204():
         url, params, files = calls[0]
         assert url.endswith("/movies/subtitles"), url
         assert params == {
-            "movieid": 42,
+            "radarrid": 42,
             "language": "id",
             "forced": "false",
             "hi": "false",
@@ -4038,6 +4039,101 @@ def test_activity_movie_label():
     series = by_id.get(7)
     assert series is not None and series["kind"] == "pipeline", out["items"]
     print("PASS activity_movie_label")
+
+
+def test_state_kind_aware_keys():
+    """_state() keys latest/latest_by_lang by (kind, ep[, lang]): a series
+    row and a movie row sharing sonarrEpisodeId never overwrite each other
+    (movie rows carry sonarrEpisodeId == radarrId, small ids that collide
+    with series episodes like Frieren's 2-11)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    api = _mk_api2(d)
+    with open(api.opts["STATE_FILE"], "w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"sonarrEpisodeId": 2, "language": "id", "status": "done", "ts": "2026-01-01T00:00:00Z"}
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "sonarrEpisodeId": 2,
+                    "language": "id",
+                    "status": "error",
+                    "kind": "movie",
+                    "ts": "2026-01-01T00:00:01Z",
+                }
+            )
+            + "\n"
+        )
+    _entries, latest, latest_by_lang = api._state()
+    assert set(latest.keys()) == {("series", 2), ("movie", 2)}, latest.keys()
+    assert latest[("series", 2)]["status"] == "done", latest
+    assert latest[("movie", 2)]["status"] == "error", latest
+    assert set(latest_by_lang.keys()) == {("series", 2, "id"), ("movie", 2, "id")}, latest_by_lang.keys()
+    assert latest_by_lang[("series", 2, "id")]["status"] == "done", latest_by_lang
+    assert latest_by_lang[("movie", 2, "id")]["status"] == "error", latest_by_lang
+    print("PASS state_kind_aware_keys")
+
+
+def test_library_kind_no_cross_feed():
+    """/api2/library never cross-feeds: a movie state row whose radarrId
+    equals a series episode id (Frieren collision) feeds only the movie
+    item; the series item keeps its own status."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    api = _mk_api2(d)
+    with open(api.opts["STATE_FILE"], "w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"sonarrEpisodeId": 2, "language": "id", "status": "done", "ts": "2026-01-01T00:00:00Z"}
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "sonarrEpisodeId": 2,
+                    "language": "id",
+                    "status": "error",
+                    "kind": "movie",
+                    "ts": "2026-01-01T00:00:01Z",
+                }
+            )
+            + "\n"
+        )
+    api._bazarr_wanted = lambda: {
+        "total": 1,
+        "data": [
+            {
+                "sonarrEpisodeId": 2,
+                "seriesTitle": "Frieren",
+                "episode_number": "S01E02",
+                "seasonNumber": 1,
+                "episodeNumber": 2,
+            }
+        ],
+    }
+    api._bazarr_movies = lambda: {
+        "total": 1,
+        "data": [
+            {"radarrId": 2, "title": "Avatar", "monitored": True, "path": "/data/avatar.mkv"},
+        ],
+    }
+    code, out = api.handle("GET", "/api2/library")
+    assert code == 200, out
+    assert len(out["items"]) == 2, out["items"]
+    series_item = next(it for it in out["items"] if it.get("kind") != "movie")
+    movie_item = next(it for it in out["items"] if it.get("kind") == "movie")
+    assert series_item["series"] == "Frieren", series_item
+    assert series_item["languages"][0]["status"] == "done", series_item
+    assert movie_item["series"] == "Avatar", movie_item
+    assert movie_item["languages"][0]["status"] == "error", movie_item
+    print("PASS library_kind_no_cross_feed")
 
 
 if __name__ == "__main__":
