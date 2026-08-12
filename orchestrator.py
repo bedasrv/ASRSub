@@ -77,7 +77,7 @@ ASR_CACHE_DIR = os.environ.get(
 TRANSLATE_BASE = os.environ.get("TRANSLATE_BASE", "http://127.0.0.1:8011/v1")
 TRANSLATE_MODEL = os.environ.get("TRANSLATE_MODEL", "HY-MT1.5-7B-Q4_K_M.gguf")
 TRANSLATE_CHUNK = int(os.environ.get("TRANSLATE_CHUNK", "10"))
-LANG_NAMES = {"id": "Indonesian", "en": "English"}
+LANG_NAMES = {"id": "Indonesian", "en": "English", "ja": "Japanese"}
 KANA_RE = re.compile(r"[\u3040-\u30ff]")
 HANZI_RE = re.compile(r"[\u3400-\u9fff]")
 LATIN_RE = re.compile(r"[A-Za-z]")
@@ -2100,7 +2100,7 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         stem + ".jpn.hi.srt",
         stem + ".ja.hi.srt",
     ):
-        if os.path.isfile(cand):
+        if os.path.isfile(cand) and not srt_has_ai_marker(cand):
             hit = _external_hit(cand, "jpn")
             if hit:
                 return hit
@@ -3264,7 +3264,7 @@ def process_ladder(
         if not cues:
             raise RuntimeError("ladder source produced no cues")
         srt_path = os.path.splitext(media_path)[0] + f".{lang}.srt"
-        needs_translate = not (kind == "eng" and lang == "en")
+        needs_translate = not ((kind == "eng" and lang == "en") or (kind in ("jpn", "asr") and lang == "ja"))
         if needs_translate:
             if not key and not is_local_translate(cfg):
                 raise RuntimeError("translate needed but TRANSLATE_API_KEY empty")
