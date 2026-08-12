@@ -67,6 +67,11 @@ def api2_health():
     return _resp(*api2.handle("GET", "/api2/health"))
 
 
+@app.get("/api2/provenance")
+def api2_provenance():
+    return _resp(*api2.handle("GET", "/api2/provenance"))
+
+
 @app.post("/api2/episode/{ep_id}/retry")
 def api2_episode_retry(ep_id: str, body: dict = None):
     return _resp(
