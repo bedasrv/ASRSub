@@ -173,6 +173,9 @@ def load_config():
     cfg["ALIGN_ENABLED"] = str(
         cfg.get("ALIGN_ENABLED", ALIGN_ENABLED)
     ).lower() in ("1", "true", "yes")
+    cfg["REGEN_LIBRARY"] = str(
+        os.environ.get("REGEN_LIBRARY", cfg.get("REGEN_LIBRARY", "false"))
+    ).lower() in ("1", "true", "yes")
     try:
         cfg["ALIGN_MAX_OFFSET_S"] = float(
             cfg.get("ALIGN_MAX_OFFSET_S", ALIGN_MAX_OFFSET_S)
@@ -2883,13 +2886,42 @@ def run_pass():
         ]
         log(f"excluded this pass: {len(before) - len(candidates)} of {before} episodes {sorted(excluded)}")
     candidates.sort(key=lambda x: x["sonarrEpisodeId"])
-    candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
     wanted_now = {it["sonarrEpisodeId"] for it in candidates}
+    if cfg.get("REGEN_LIBRARY"):
+        # Library regeneration: every state-done (episode, language) pair is
+        # a candidate again; wanted candidates keep priority and share the
+        # MAX_EPS_PER_RUN cap (regen fills leftover slots). The per-item
+        # registry check in the loop makes the drain resumable across passes.
+        regen_items = []
+        for (ep_id, lang), entry in last_entry.items():
+            if not isinstance(ep_id, int):
+                continue
+            if lang not in target_langs:
+                continue
+            if entry.get("status") != "done":
+                continue
+            if ep_id in excluded or ep_id in seen:
+                continue  # wanted already covers this episode this pass
+            regen_items.append(
+                {
+                    "sonarrEpisodeId": ep_id,
+                    "seriesTitle": entry.get("seriesTitle") or "?",
+                    "missing_subtitles": [{"code2": lang}],
+                    "regen": True,
+                }
+            )
+        regen_items.sort(
+            key=lambda x: (x["sonarrEpisodeId"], x["missing_subtitles"][0]["code2"])
+        )
+        candidates = (candidates + regen_items)[: cfg["MAX_EPS_PER_RUN"]]
+    else:
+        candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
 
     processed = done = skipped = failed = 0
+    n_regen = sum(1 for it in candidates if it.get("regen"))
     log(
         f"wanted total={total}, candidates for pass={len(candidates)} "
-        f"(max={cfg['MAX_EPS_PER_RUN']})"
+        f"(max={cfg['MAX_EPS_PER_RUN']}, regen candidates={n_regen})"
     )
 
     prior_cache = {}
@@ -2903,8 +2935,13 @@ def run_pass():
             series = item.get("seriesTitle", "?")
             missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
             langs = sorted(missing & target_langs)
+            is_regen = bool(item.get("regen"))
             for lang in langs:
-                if (ep_id, lang) in done_keys and ep_id not in wanted_now:
+                if (
+                    not is_regen
+                    and (ep_id, lang) in done_keys
+                    and ep_id not in wanted_now
+                ):
                     log(f"skip: S?E? {series} [{lang}] already done (state)")
                     skipped += 1
                     continue
@@ -2947,7 +2984,23 @@ def run_pass():
                         )
                         skipped += 1
                         continue
-                    if lang == "id":
+                    if is_regen:
+                        registered = registry_get(
+                            os.path.splitext(media_path)[0], lang
+                        )
+                        if registered and registered.get("source") in (
+                            "asr",
+                            "jpn",
+                            "eng",
+                        ):
+                            log(
+                                f"regen: skip {tag} [{lang}] already registered "
+                                f"({registered.get('source')})"
+                            )
+                            skipped += 1
+                            continue
+                        log(f"regen: process {tag} {series} [{lang}]")
+                    if lang == "id" and not is_regen:
                         target_sidecar = target_sidecar_exists(media_path)
                         if target_sidecar:
                             log(
@@ -2987,7 +3040,7 @@ def run_pass():
                         continue
                     src = decision["src_lang"]
                     log(
-                        f"proc: {tag} {series} [{src}->{lang}] source_stream={decision['stream_index']} asr_lang={decision['asr_lang']} needs_translate={decision['needs_translate']}"
+                        f"{'regen: ' if is_regen else ''}proc: {tag} {series} [{src}->{lang}] source_stream={decision['stream_index']} asr_lang={decision['asr_lang']} needs_translate={decision['needs_translate']}"
                     )
 
                     os.makedirs(cfg["TMP_DIR"], exist_ok=True)
