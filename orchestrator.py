@@ -188,6 +188,9 @@ def load_config():
     cfg["REGEN_LIBRARY"] = str(
         os.environ.get("REGEN_LIBRARY", cfg.get("REGEN_LIBRARY", "false"))
     ).lower() in ("1", "true", "yes")
+    cfg["MOVIE_LIBRARY"] = str(
+        os.environ.get("MOVIE_LIBRARY", cfg.get("MOVIE_LIBRARY", "false"))
+    ).lower() in ("1", "true", "yes")
     try:
         cfg["ALIGN_MAX_OFFSET_S"] = float(
             cfg.get("ALIGN_MAX_OFFSET_S", ALIGN_MAX_OFFSET_S)
@@ -728,6 +731,97 @@ def get_wanted(cfg):
     )
     r.raise_for_status()
     return r.json()
+
+
+def get_movies(cfg):
+    """All Bazarr movies: GET /movies (same shape as /episodes/wanted:
+    {"total": N, "data": [...]}). Items carry radarrId, title, path
+    (container /data/jellyfin/radarr-movies/...), monitored, subtitles."""
+    r = requests.get(
+        cfg["BAZARR_URL"].rstrip("/") + "/movies",
+        params={"start": 0, "length": 500},
+        headers={"X-API-KEY": cfg["BAZARR_API_KEY"]},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def movie_candidates(cfg, target_langs):
+    """Bazarr movie sweep (public): every monitored movie file lacking AI-owned
+    subs for a target language, as candidate rows (kind "movie"). See
+    _movie_sweep for the full contract."""
+    cands, _ = _movie_sweep(cfg, target_langs)
+    return cands
+
+
+def _movie_sweep(cfg, target_langs):
+    """Core movie sweep: returns (candidates, total_movies). NEVER raises:
+    a fetch failure logs and yields ([], 0) — movies are optional per-pass
+    work (unlike the series wanted list, whose caller treats a fetch error
+    as a failed pass). Per movie: skip unmonitored, empty-path, or
+    missing-on-NFS entries; per (stem, lang): a registry row sourced
+    asr/jpn/eng already owns the sidecar (self-draining, like REGEN_LIBRARY),
+    and a target-language (id) sidecar on disk blocks ASR. Candidates are
+    deduped by radarrId and sorted by it; each row carries ALL missing langs:
+    {"radarrId", "sonarrEpisodeId" (== radarrId, the generic loop's ep_id),
+    "movieTitle", "path", "missing_subtitles", "movie": True}."""
+    try:
+        movies = get_movies(cfg)
+    except Exception as exc:
+        log(f"ERROR fetching movies list: {exc}")
+        return [], 0
+    data = movies.get("data") or []
+    total = movies.get("total", len(data))
+    target_langs = set(target_langs)
+    candidates = []
+    seen = set()
+    for m in data:
+        rid = m.get("radarrId")
+        if not isinstance(rid, int) or rid in seen:
+            continue
+        seen.add(rid)
+        if not m.get("monitored", True):
+            continue
+        path = m.get("path") or ""
+        if not path:
+            continue
+        media_path = map_path(path)
+        if not os.path.isfile(media_path):
+            continue
+        stem = os.path.splitext(media_path)[0]
+        title = m.get("title") or "?"
+        missing = []
+        for lang in target_langs:
+            registered = registry_get(stem, lang)
+            if registered and registered.get("source") in ("asr", "jpn", "eng"):
+                log(
+                    f"movies: skip {title} [{lang}] already registered "
+                    f"({registered.get('source')})"
+                )
+                continue
+            if lang == "id":
+                sidecar = target_sidecar_exists(media_path)
+                if sidecar:
+                    log(
+                        f"movies: skip {title} [id]: target-lang sidecar exists "
+                        f"({os.path.basename(sidecar)})"
+                    )
+                    continue
+            missing.append({"code2": lang})
+        if missing:
+            candidates.append(
+                {
+                    "radarrId": rid,
+                    "sonarrEpisodeId": rid,
+                    "movieTitle": title,
+                    "path": path,
+                    "missing_subtitles": missing,
+                    "movie": True,
+                }
+            )
+    candidates.sort(key=lambda x: x["radarrId"])
+    return candidates, total
 
 
 def get_episode(cfg, ep_id):
@@ -1466,6 +1560,7 @@ def retime_external_cues(
     asr_cues,
     sub_lang,
     video_duration_s,
+    asr_lang=None,
     text_threshold=None,
     max_ratio=None,
     min_anchor_frac=None,
@@ -1474,13 +1569,17 @@ def retime_external_cues(
 
     sub_cues: list of {"start": ms (float), "end": ms (float), "text": str}.
     asr_cues: list of {"start", "end", "text"} from the ASR cache (already ms).
-    sub_lang: "jpn"|"eng" — text anchoring only applies when sub_lang == "jpn"
-      (the sub's language equals the ja ASR reference); eng subs always use
-      the order-preserving mapping (their text cannot match ja ASR).
+    sub_lang: "jpn"|"eng" — text anchoring applies when the ASR reference
+      speaks the sub's language: sub_lang == "jpn" (ja ASR) or sub_lang ==
+      "eng" AND asr_lang == "en" (eng ASR, e.g. movies with eng audio).
+      Otherwise the order-preserving mapping is used (their text cannot
+      match the ASR reference).
+    asr_lang: the language code the anchor cues were transcribed with
+      ("ja"/"en", from the choose_source decision in _retime_anchor_asr).
     video_duration_s: container duration in seconds (or None) — the last cue's
       end is clamped to it.
 
-    Strategy 1 (text anchors, jpn): normalize both texts (strip speaker tags
+    Strategy 1 (text anchors, jpn/en): normalize both texts (strip speaker tags
     （…） and music notes, drop punctuation and the long-vowel mark, fold
     katakana<->hiragana), score by character-bigram Jaccard; the best ASR cue
     anchors when the score >= text_threshold (0.55). 1 sub cue -> best ASR
@@ -1550,7 +1649,7 @@ def retime_external_cues(
     seg_ratio = len(asr_cues) / float(total)
     anchors = (
         _retime_text_anchors(sub_cues, asr_cues, text_threshold)
-        if sub_lang == "jpn"
+        if sub_lang == "jpn" or (sub_lang == "eng" and asr_lang == "en")
         else []
     )
     if anchors and len(anchors) / float(total) < min_anchor_frac:
@@ -1753,20 +1852,26 @@ def _infer_sub_lang(cues):
 
 def _retime_anchor_asr(cfg, media_path, sub_lang):
     """ASR speech anchors for a media file: probe the audio, look up the ASR
-    cache (audio_id, lang "ja"); on a miss, extract the wav exactly like the
-    ASR rung (extract_wav on the choose_source stream) and transcribe with
-    asr_cues(cfg, wav, "ja"), caching the cues. NEVER raises: returns None on
-    any failure (the caller then uses the sidecar as-is, logged)."""
+    cache ((audio_id, asr_lang) — the choose_source decision derives ja for
+    jpn subs and en when sub_lang is "eng" and the audio is an eng stream,
+    e.g. movies); on a miss, extract the wav exactly like the ASR rung
+    (extract_wav on the choose_source stream) and transcribe with
+    asr_cues(cfg, wav, asr_lang), caching the cues. NEVER raises: returns
+    (None, None) on any failure (the caller then uses the sidecar as-is,
+    logged)."""
     try:
         streams = probe_audio(media_path)
         audio_id = audio_stream_signature(streams)
-        cached = asr_cache_get(audio_id, "ja", media_path)
-        if cached:
-            return cached
-        decision = choose_source(streams, "ja")
+        decision = choose_source(
+            streams, "en" if sub_lang == "eng" else "ja"
+        )
         if decision is None:
             log(f"ladder: retime: no audio streams in {media_path}")
-            return None
+            return None, None
+        asr_lang = decision["asr_lang"]
+        cached = asr_cache_get(audio_id, asr_lang, media_path)
+        if cached:
+            return cached, asr_lang
         tmp_dir = cfg.get("TMP_DIR") or os.environ.get("TMP_DIR") or "/tmp"
         try:
             os.makedirs(tmp_dir, exist_ok=True)
@@ -1775,14 +1880,14 @@ def _retime_anchor_asr(cfg, media_path, sub_lang):
         wav = os.path.join(tmp_dir, f"retime_anchor_{os.getpid()}_{sub_lang}.wav")
         try:
             extract_wav(media_path, decision["stream_index"], wav)
-            cues = asr_cues(cfg, wav, "ja") or []
+            cues = asr_cues(cfg, wav, asr_lang) or []
         finally:
             _silent_remove(wav)
-        asr_cache_put(audio_id, "ja", media_path, cues)
-        return cues
+        asr_cache_put(audio_id, asr_lang, media_path, cues)
+        return cues, asr_lang
     except Exception as exc:
         log(f"ladder: retime: ASR anchors unavailable for {media_path}: {exc}")
-        return None
+        return None, None
 
 
 def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=None):
@@ -1799,8 +1904,9 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
     computed (probe/ASR failure; the sub keeps its original timing, logged) —
     and (None, stats) on reject (empty ASR cues, or order-ratio out of bounds
     = release mismatch): same fall-through semantics as the old ffsubsync
-    gate. Never raises. sub_lang ("jpn"/"eng") enables text anchoring; when
-    None it is inferred from the cue text (CJK vs latin ratio)."""
+    gate. Never raises. sub_lang ("jpn"/"eng") enables text anchoring (eng
+    only when the anchor ASR speaks en — movies with eng audio); when None it
+    is inferred from the cue text (CJK vs latin ratio)."""
     tmp_dir = tmp_dir or os.environ.get("TMP_DIR") or "/tmp"
     try:
         os.makedirs(tmp_dir, exist_ok=True)
@@ -1872,7 +1978,7 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
     if sub_lang is None:
         sub_lang = _infer_sub_lang(sub_ms)
     lc = _ladder_cfg(cfg)
-    anchors = _retime_anchor_asr(cfg, media_path, sub_lang)
+    anchors, asr_lang = _retime_anchor_asr(cfg, media_path, sub_lang)
     if anchors is None:
         log(
             f"ladder: retime: no ASR anchors for {os.path.basename(media_path)}; "
@@ -1891,6 +1997,7 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
             anchors,
             sub_lang,
             duration,
+            asr_lang=asr_lang,
             text_threshold=lc["retime_text_threshold"],
             max_ratio=lc["retime_max_ratio"],
             min_anchor_frac=lc["retime_min_anchor_frac"],
@@ -2689,15 +2796,16 @@ def translate_texts(
 # ---------- upload ----------
 
 
-def jellyfin_refresh(cfg, media_path, title=None):
+def jellyfin_refresh(cfg, media_path, title=None, item_type="Episode"):
     """Fire-and-forget Jellyfin library refresh for a subtitle event.
 
-    Finds the episode item by SearchTerm (episode title; on a miss, falls
-    back to the title prefix before the first separator and then the filename
-    stem), matches Path against the media file (mapped NAS path), then POSTs
+    Finds the item by SearchTerm (title; on a miss, falls back to the title
+    prefix before the first separator and then the filename stem), matches
+    Path against the media file (mapped NAS path), then POSTs
     /Items/{id}/Refresh (204). Runs in a daemon thread, ~5s timeouts; failures
     are logged but never fail the episode. No-op without JELLYFIN_API_KEY.
-    """
+    item_type: Jellyfin item type to search — "Episode" (series) or "Movie"
+    (radarr track)."""
     key = cfg.get("JELLYFIN_API_KEY", "")
     if not key or not media_path:
         return
@@ -2733,7 +2841,7 @@ def jellyfin_refresh(cfg, media_path, title=None):
                     base + "/Items",
                     params={
                         "Recursive": "true",
-                        "IncludeItemTypes": "Episode",
+                        "IncludeItemTypes": item_type,
                         "SearchTerm": term,
                         "Fields": "Path,MediaStreams",
                     },
@@ -2749,7 +2857,7 @@ def jellyfin_refresh(cfg, media_path, title=None):
                 if item is not None:
                     break
             if item is None:
-                log(f"jellyfin: episode item not found for {filename}")
+                log(f"jellyfin: {item_type.lower()} item not found for {filename}")
                 return
             body = {
                 "MetadataRefreshMode": "FullRefresh",
@@ -2902,7 +3010,7 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     """Manual upload via POST /api/episodes/subtitles (verified against live
     Bazarr swagger.json 2026-08-07): query seriesid/episodeid/language/
     forced/hi + multipart file. Movies use POST /api/movies/subtitles
-    (radarrid) — not used (Sonarr-only pipeline). Bazarr ignores the uploaded
+    (radarrid) via upload_srt_movie. Bazarr ignores the uploaded
     filename (subliminal writes {video stem}.{lang alpha2}.srt), and the
     endpoint has no comment/history field, so AI provenance lives only in the
     first SRT cue."""
@@ -2910,6 +3018,41 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     params = {
         "seriesid": series_id,
         "episodeid": ep_id,
+        "language": lang,
+        "forced": "false",
+        "hi": "false",
+    }
+    headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
+    files = {"file": (filename, srt_bytes, "application/x-subrip")}
+    last_code = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url, params=params, headers=headers, files=files, timeout=120
+            )
+            last_code = r.status_code
+            if r.status_code == 204:
+                return 204
+            log(
+                f"    [upload] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]}"
+            )
+        except requests.RequestException as exc:
+            last_code = None
+            log(f"    [upload] network error (attempt {attempt + 1}): {exc}")
+        if attempt < 2:
+            time.sleep(5 * (attempt + 1))
+    return last_code
+
+
+def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
+    """Manual movie subtitle upload via POST /api/movies/subtitles (radarr):
+    query movieid/language/forced/hi + multipart file. Identical semantics to
+    upload_srt (3 attempts, 5s*attempt backoff, 204 success, last_code
+    returned otherwise); Bazarr ignores the uploaded filename and writes
+    {video stem}.{lang alpha2}.srt."""
+    url = cfg["BAZARR_URL"].rstrip("/") + "/movies/subtitles"
+    params = {
+        "movieid": movie_id,
         "language": lang,
         "forced": "false",
         "hi": "false",
@@ -2993,6 +3136,7 @@ def process_after_asr(
     wav_path,
     srt_path,
     prior_cache=None,
+    movie_id=None,
 ):
     global _paused
     try:
@@ -3028,43 +3172,55 @@ def process_after_asr(
         write_srt(cues_out, texts_out, srt_path, header=AI_MARKER)
         with open(srt_path, "rb") as fh:
             srt_bytes = fh.read()
-        code = upload_srt(
-            cfg,
-            info.get("seriesId") or info.get("sonarrSeriesId"),
-            ep_id,
-            lang,
-            srt_bytes,
-            filename=os.path.basename(srt_path),
-        )
+        if movie_id is not None:
+            code = upload_srt_movie(
+                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path)
+            )
+        else:
+            code = upload_srt(
+                cfg,
+                info.get("seriesId") or info.get("sonarrSeriesId"),
+                ep_id,
+                lang,
+                srt_bytes,
+                filename=os.path.basename(srt_path),
+            )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
         ef = info.get("episodeFile") or {}
         if ef.get("path"):
-            jellyfin_refresh(cfg, map_path(ef["path"]), info.get("title") or info.get("Name"))
+            jellyfin_refresh(
+                cfg,
+                map_path(ef["path"]),
+                info.get("title") or info.get("Name"),
+                item_type="Movie" if movie_id is not None else "Episode",
+            )
         elapsed = round(time.time() - t0, 1)
         stem = os.path.splitext(map_path((info.get("episodeFile") or {}).get("path", "")))[0] or None
         registry_upsert(stem, lang, "asr", ep_id=ep_id)
-        append_state(
-            {
-                "sonarrEpisodeId": ep_id,
-                "language": lang,
-                "status": "done",
-                "elapsed_s": elapsed,
-                "source": "asr",
-            }
-        )
+        st_entry = {
+            "sonarrEpisodeId": ep_id,
+            "language": lang,
+            "status": "done",
+            "elapsed_s": elapsed,
+            "source": "asr",
+        }
+        if movie_id is not None:
+            st_entry["kind"] = "movie"
+        append_state(st_entry)
         log(f"done: {tag} {series} [{src}->{lang}] in {elapsed}s (upload 204)")
         return "done"
     except Exception as exc:
-        append_state(
-            {
-                "sonarrEpisodeId": ep_id,
-                "language": lang,
-                "status": "error",
-                "elapsed_s": round(time.time() - t0, 1),
-                "source": "asr",
-            }
-        )
+        st_entry = {
+            "sonarrEpisodeId": ep_id,
+            "language": lang,
+            "status": "error",
+            "elapsed_s": round(time.time() - t0, 1),
+            "source": "asr",
+        }
+        if movie_id is not None:
+            st_entry["kind"] = "movie"
+        append_state(st_entry)
         log(f"fail: {series} [{lang}] {exc}")
         notify_hermes(cfg, ep_id, lang, series, tag, exc)
         halt_on_error(cfg, "process_episode", f"{series} [{lang}] {tag}", exc)
@@ -3087,13 +3243,16 @@ def process_ladder(
     source,
     info,
     prior_cache=None,
+    movie_id=None,
 ):
     """Ladder translation: translate from an existing jpn/eng subtitle source
     (SKIP ASR entirely), write {stem}.{lang}.srt next to the video with the AI
     marker cue, register the source in the registry and wake Jellyfin. An eng
     source satisfying the en target is adopted verbatim (no marker: it is not
     AI-generated text, but ownership is still registry-tracked). Returns
-    "done" or "failed"."""
+    "done" or "failed". movie_id (radarr track): uploads via the movies
+    endpoint, state rows carry kind "movie", and the Jellyfin refresh searches
+    Movie items; None keeps series behavior."""
     t0 = time.time()
     kind = source["kind"]
     try:
@@ -3140,14 +3299,19 @@ def process_ladder(
         os.replace(tmp, srt_path)
         with open(srt_path, "rb") as fh:
             srt_bytes = fh.read()
-        code = upload_srt(
-            cfg,
-            info.get("seriesId") or info.get("sonarrSeriesId"),
-            ep_id,
-            lang,
-            srt_bytes,
-            filename=os.path.basename(srt_path),
-        )
+        if movie_id is not None:
+            code = upload_srt_movie(
+                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path)
+            )
+        else:
+            code = upload_srt(
+                cfg,
+                info.get("seriesId") or info.get("sonarrSeriesId"),
+                ep_id,
+                lang,
+                srt_bytes,
+                filename=os.path.basename(srt_path),
+            )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
         stem = os.path.splitext(media_path)[0]
@@ -3183,28 +3347,35 @@ def process_ladder(
             matched_frac=source.get("align_stats", {}).get("matched_frac"),
         )
         elapsed = round(time.time() - t0, 1)
-        append_state(
-            {
-                "sonarrEpisodeId": ep_id,
-                "language": lang,
-                "status": "done",
-                "elapsed_s": elapsed,
-                "source": kind,
-            }
+        st_entry = {
+            "sonarrEpisodeId": ep_id,
+            "language": lang,
+            "status": "done",
+            "elapsed_s": elapsed,
+            "source": kind,
+        }
+        if movie_id is not None:
+            st_entry["kind"] = "movie"
+        append_state(st_entry)
+        jellyfin_refresh(
+            cfg,
+            media_path,
+            info.get("title") or info.get("Name"),
+            item_type="Movie" if movie_id is not None else "Episode",
         )
-        jellyfin_refresh(cfg, media_path, info.get("title") or info.get("Name"))
         log(f"done: {tag} {series} [{kind}->{lang}] in {elapsed}s (upload 204, ladder)")
         return "done"
     except Exception as exc:
-        append_state(
-            {
-                "sonarrEpisodeId": ep_id,
-                "language": lang,
-                "status": "error",
-                "elapsed_s": round(time.time() - t0, 1),
-                "source": kind,
-            }
-        )
+        st_entry = {
+            "sonarrEpisodeId": ep_id,
+            "language": lang,
+            "status": "error",
+            "elapsed_s": round(time.time() - t0, 1),
+            "source": kind,
+        }
+        if movie_id is not None:
+            st_entry["kind"] = "movie"
+        append_state(st_entry)
         log(f"fail: {series} [{lang}] {exc}")
         notify_hermes(cfg, ep_id, lang, series, tag, exc)
         halt_on_error(cfg, "process_ladder", f"{series} [{lang}] {tag}", exc)
@@ -3361,7 +3532,7 @@ def run_pass():
     consec_errors = {}
     last_entry = {}
     for e in entries:
-        k = (e.get("sonarrEpisodeId"), e.get("language"))
+        k = (e.get("kind") or "series", e.get("sonarrEpisodeId"), e.get("language"))
         last_entry[k] = e
         if e.get("status") == "error":
             consec_errors[k] = consec_errors.get(k, 0) + 1
@@ -3402,7 +3573,9 @@ def run_pass():
         # MAX_EPS_PER_RUN cap (regen fills leftover slots). The per-item
         # registry check in the loop makes the drain resumable across passes.
         regen_items = []
-        for (ep_id, lang), entry in last_entry.items():
+        for (kind_, ep_id, lang), entry in last_entry.items():
+            if kind_ != "series":
+                continue  # movies drain via the sweep, never regen candidates
             if not isinstance(ep_id, int):
                 continue
             if lang not in target_langs:
@@ -3429,11 +3602,21 @@ def run_pass():
     else:
         candidates = candidates[: cfg["MAX_EPS_PER_RUN"]]
 
+    n_movies = 0
+    if cfg.get("MOVIE_LIBRARY"):
+        # Movie track: every Bazarr movie lacking AI-owned target subs is a
+        # candidate (self-draining via the registry, like REGEN_LIBRARY);
+        # movies share the cap after series wanted + regen.
+        movie_cands, movies_total = _movie_sweep(cfg, target_langs)
+        candidates = (candidates + movie_cands)[: cfg["MAX_EPS_PER_RUN"]]
+        n_movies = len(movie_cands)
+        log(f"movies total={movies_total}, movie candidates={n_movies}")
+
     processed = done = skipped = failed = 0
     n_regen = sum(1 for it in candidates if it.get("regen"))
     log(
         f"wanted total={total}, candidates for pass={len(candidates)} "
-        f"(max={cfg['MAX_EPS_PER_RUN']}, regen candidates={n_regen})"
+        f"(max={cfg['MAX_EPS_PER_RUN']}, regen candidates={n_regen}, movie candidates={n_movies})"
     )
 
     prior_cache = {}
@@ -3448,17 +3631,18 @@ def run_pass():
             missing = {m.get("code2") for m in item.get("missing_subtitles", [])}
             langs = sorted(missing & target_langs)
             is_regen = bool(item.get("regen"))
+            kind = "movie" if item.get("movie") else "series"
             for lang in langs:
                 if (
                     not is_regen
-                    and (ep_id, lang) in done_keys
+                    and (kind, ep_id, lang) in done_keys
                     and ep_id not in wanted_now
                 ):
                     log(f"skip: S?E? {series} [{lang}] already done (state)")
                     skipped += 1
                     continue
-                if consec_errors.get((ep_id, lang), 0) >= 2:
-                    le = last_entry.get((ep_id, lang)) or {}
+                if consec_errors.get((kind, ep_id, lang), 0) >= 2:
+                    le = last_entry.get((kind, ep_id, lang)) or {}
                     last_ts = le.get("ts", "")
                     try:
                         last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
@@ -3475,6 +3659,159 @@ def run_pass():
                 t0 = time.time()
                 wav_path = srt_path = ""
                 try:
+                    if item.get("movie"):
+                        movie_id = item["radarrId"]
+                        title = item.get("movieTitle") or "?"
+                        tag = "MOVIE"
+                        container_path = item["path"]
+                        media_path = map_path(container_path)
+                        if not os.path.isfile(media_path):
+                            log(
+                                f"skip: MOVIE {title} [{lang}] file missing on NFS: {media_path}"
+                            )
+                            skipped += 1
+                            continue
+                        registered = registry_get(
+                            os.path.splitext(media_path)[0], lang
+                        )
+                        if registered and registered.get("source") in (
+                            "asr",
+                            "jpn",
+                            "eng",
+                        ):
+                            log(
+                                f"movies: skip {title} [{lang}] already registered "
+                                f"({registered.get('source')})"
+                            )
+                            skipped += 1
+                            continue
+                        if lang == "id":
+                            target_sidecar = target_sidecar_exists(media_path)
+                            if target_sidecar:
+                                log(
+                                    f"movies: skip {title} [id]: target-lang sidecar "
+                                    f"exists ({os.path.basename(target_sidecar)})"
+                                )
+                                skipped += 1
+                                continue
+                        streams = probe_audio(media_path)
+                        audio_id = audio_stream_signature(streams)
+                        decision = choose_source(streams, lang)
+                        if decision is None:
+                            log(f"fail: MOVIE {title} [{lang}] no audio streams")
+                            notify_hermes(
+                                cfg,
+                                movie_id,
+                                lang,
+                                title,
+                                tag,
+                                RuntimeError("no audio streams"),
+                            )
+                            halt_on_error(
+                                cfg,
+                                "no_audio_streams",
+                                f"{title} [{lang}] MOVIE",
+                                RuntimeError("no audio streams"),
+                            )
+                            failed += 1
+                            append_state(
+                                {
+                                    "sonarrEpisodeId": movie_id,
+                                    "language": lang,
+                                    "status": "error",
+                                    "elapsed_s": round(time.time() - t0, 1),
+                                    "kind": "movie",
+                                }
+                            )
+                            continue
+                        src = decision["src_lang"]
+                        log(f"movies: process {title} [{lang}]")
+                        info = {
+                            "episodeFile": {"path": container_path},
+                            "title": title,
+                            "seriesId": None,
+                            "sonarrSeriesId": None,
+                        }
+                        ladder = detect_ladder_source(
+                            cfg, media_path, lang, cfg["TMP_DIR"], movie_id, None
+                        )
+                        if ladder["kind"] != "asr":
+                            log(
+                                f"  MOVIE {title} [{ladder['kind']}->{lang}] ladder "
+                                f"source {ladder['source_path']}"
+                            )
+                            futures.append(
+                                pool.submit(
+                                    process_ladder,
+                                    cfg,
+                                    key,
+                                    movie_id,
+                                    lang,
+                                    title,
+                                    tag,
+                                    ladder,
+                                    info,
+                                    prior_cache=prior_cache,
+                                    movie_id=movie_id,
+                                )
+                            )
+                            continue
+                        wav_path = os.path.join(
+                            cfg["TMP_DIR"], f"movie_{movie_id}_{lang}.wav"
+                        )
+                        srt_path = os.path.join(
+                            cfg["TMP_DIR"], f"movie_{movie_id}_{lang}.srt"
+                        )
+                        cached_cues = asr_cache_get(
+                            audio_id, decision["asr_lang"], media_path
+                        )
+                        if cached_cues:
+                            cues = cached_cues
+                            log(
+                                f"  MOVIE [{src}->{lang}] ASR cache hit "
+                                "(skip extract+asr)"
+                            )
+                        else:
+                            extract_wav(
+                                media_path, decision["stream_index"], wav_path
+                            )
+                            t_asr = time.time()
+                            cues = asr_cues(
+                                cfg, wav_path, decision["asr_lang"]
+                            )
+                            asr_elapsed = time.time() - t_asr
+                            asr_cache_put(
+                                audio_id, decision["asr_lang"], media_path, cues
+                            )
+                        cues = [c for c in cues if c["text"].strip()]
+                        if not cues:
+                            raise RuntimeError("ASR returned no cues")
+                        if not cached_cues:
+                            log(
+                                f"  MOVIE [{src}->{lang}] ASR {asr_elapsed:.0f}s, "
+                                f"{len(cues)} cues"
+                            )
+                        futures.append(
+                            pool.submit(
+                                process_after_asr,
+                                cfg,
+                                key,
+                                movie_id,
+                                lang,
+                                title,
+                                tag,
+                                src,
+                                t0,
+                                cues,
+                                decision,
+                                info,
+                                wav_path,
+                                srt_path,
+                                prior_cache=prior_cache,
+                                movie_id=movie_id,
+                            )
+                        )
+                        continue
                     info = get_episode(cfg, ep_id)
                     season = info.get("seasonNumber", "?")
                     episode_num = info.get("episodeNumber", "?")
@@ -3639,6 +3976,7 @@ def run_pass():
                             "language": lang,
                             "status": "error",
                             "elapsed_s": round(time.time() - t0, 1),
+                            **({"kind": "movie"} if item.get("movie") else {}),
                         }
                     )
                     log(f"fail: {series} [{lang}] {exc}")
@@ -3665,14 +4003,22 @@ def run_pass():
 
     if processed == 0:
         wanted_after = wanted_before  # nothing changed; skip redundant API call
+        movies_remaining = None
     else:
         try:
             wanted_after = get_wanted(cfg).get("total", 0)
         except Exception:
             wanted_after = None
+        movies_remaining = None
+        if cfg.get("MOVIE_LIBRARY"):
+            try:
+                movies_remaining = len(movie_candidates(cfg, target_langs))
+            except Exception:
+                movies_remaining = None
     log(
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
-        f"wanted_before={wanted_before} wanted_after={wanted_after}"
+        f"wanted_before={wanted_before} wanted_after={wanted_after} "
+        f"movies_remaining={movies_remaining}"
     )
     return {
         "processed": processed,
@@ -3681,6 +4027,7 @@ def run_pass():
         "failed": failed,
         "wanted_before": wanted_before,
         "wanted_after": wanted_after,
+        "movies_remaining": movies_remaining,
     }
 
 
@@ -3923,9 +4270,13 @@ def main():
         remaining = stats.get("wanted_after")
         if remaining is None:
             remaining = stats.get("wanted_before", 0)
+        movies_remaining = stats.get("movies_remaining") or 0
         processed = stats.get("processed") or 0
         failed = stats.get("failed") or 0
-        busy = (processed > 0 and (remaining or 0) > 0) or failed > 0
+        busy = (
+            processed > 0
+            and ((remaining or 0) > 0 or (movies_remaining or 0) > 0)
+        ) or failed > 0
         # idle pass (nothing processed): sweep orphan GC for episode ids not
         # yet checked this daemon lifetime; Sonarr down => logged, retried next
         if processed == 0 and not _stop_requested:

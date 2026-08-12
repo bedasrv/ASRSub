@@ -1708,7 +1708,7 @@ def test_ladder_retime_reject_falls_through():
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")  # empty: unregistered
     o.extract_embedded_subtitle = lambda *a, **k: False
     o.bazarr_jpn_candidate = lambda *a, **k: None
-    o._retime_anchor_asr = lambda *a, **k: []
+    o._retime_anchor_asr = lambda *a, **k: ([], "ja")
     calls = []
 
     def spy(cmd, **kw):
@@ -2561,7 +2561,7 @@ def test_ladder_adopts_untrusted_webhook_extract():
              ("REGISTRY_FILE", "probe_audio", "extract_embedded_subtitle",
               "bazarr_jpn_candidate", "_ADOPT_TRIED", "_retime_anchor_asr")}
     saved_run = o.subprocess.run
-    o._retime_anchor_asr = lambda *a, **k: []
+    o._retime_anchor_asr = lambda *a, **k: ([], "ja")
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
     o.probe_audio = lambda path: fake_streams
     o.bazarr_jpn_candidate = lambda *a, **k: None
@@ -2881,18 +2881,18 @@ def test_retime_anchor_asr_cache():
     cfg = build_cfg()
     cfg["TMP_DIR"] = d
     try:
-        got = o._retime_anchor_asr(cfg, mkv, "jpn")
-        assert got == cues
+        got, asr_lang = o._retime_anchor_asr(cfg, mkv, "jpn")
+        assert got == cues and asr_lang == "ja", (got, asr_lang)
         assert calls == {"extract": 1, "asr": 1, "put": 1}, calls
         leftover = [f for f in os.listdir(d) if f.startswith("retime_anchor_")]
         assert not leftover, leftover
         calls["extract"] = calls["asr"] = calls["put"] = 0
         o.asr_cache_get = lambda *a: cues  # hit next time
-        got = o._retime_anchor_asr(cfg, mkv, "jpn")
-        assert got == cues
+        got, asr_lang = o._retime_anchor_asr(cfg, mkv, "jpn")
+        assert got == cues and asr_lang == "ja", (got, asr_lang)
         assert calls == {"extract": 0, "asr": 0, "put": 0},             "cache hit must skip extract/asr/put"
         o.probe_audio = lambda path: (_ for _ in ()).throw(RuntimeError("boom"))
-        assert o._retime_anchor_asr(cfg, mkv, "jpn") is None
+        assert o._retime_anchor_asr(cfg, mkv, "jpn") == (None, None)
     finally:
         for n, v in saved.items():
             setattr(o, n, v)
@@ -2969,7 +2969,7 @@ def test_retime_subtitle_glue_ass_and_reject():
             return _run_result(0)
         return _run_result(1)
     o.subprocess.run = fake_run
-    o._retime_anchor_asr = lambda *a, **k: anchors
+    o._retime_anchor_asr = lambda *a, **k: (anchors, "ja")
     o.media_duration_s = lambda path: 100.0
     out_path = None
     try:
@@ -2985,7 +2985,7 @@ def test_retime_subtitle_glue_ass_and_reject():
         assert abs(o.srt_ts_ms(cues[1]["start"]) - 15000.0) < 1.0, cues[1]
         assert stats["method"] == "text", stats
         # reject: anchors empty -> (None, stats), no output file
-        o._retime_anchor_asr = lambda *a, **k: []
+        o._retime_anchor_asr = lambda *a, **k: ([], "ja")
         out2, stats2 = o.retime_external_subtitle(ass, mkv, build_cfg(), d, sub_lang="jpn")
         assert out2 is None and stats2 is not None, (out2, stats2)
         assert stats2["method"] is None and stats2["total"] == 2, stats2
@@ -3218,6 +3218,514 @@ def test_retime_jaadugar_shape_dense():
     starts = [c["start"] for c in out]
     assert all(b >= a for a, b in zip(starts, starts[1:])), starts
     print("PASS retime_jaadugar_shape_dense")
+
+
+def test_retime_eng_en_text_anchors():
+    """eng sub + en ASR (movie audio is eng): texts match -> text anchors,
+    every retimed start lands on its ASR cue, method text."""
+    asr = [{"start": 5000.0 + i * 3000, "end": 5000.0 + i * 3000 + 2000,
+            "text": f"This is the english speech line {i}."} for i in range(30)]
+    sub = [{"start": i * 3000.0 - 8000, "end": i * 3000.0 - 8000 + 2500,
+            "text": f"This is the english speech line {i}."} for i in range(30)]
+    out, stats = o.retime_external_cues(sub, asr, "eng", 200.0, asr_lang="en")
+    assert out is not None and stats["method"] == "text", stats
+    assert stats["anchors"] == 30 and stats["matched_frac"] == 1.0, stats
+    for i in range(30):
+        assert abs(out[i]["start"] - asr[i]["start"]) < 1e-6, (i, out[i], asr[i])
+    print("PASS retime_eng_en_text_anchors")
+
+
+def test_retime_eng_ja_order():
+    """eng sub + ja ASR (asr_lang='ja'): texts cannot match the reference —
+    order-preserving mapping, never text-anchored (existing behavior)."""
+    asr = [{"start": 5000.0 + i * 3000, "end": 5000.0 + i * 3000 + 2000,
+            "text": f"日本語の音声です。{i}"} for i in range(30)]
+    sub = [{"start": i * 3000.0 - 8000, "end": i * 3000.0 - 8000 + 2500,
+            "text": f"This is the english subtitle line {i}."} for i in range(30)]
+    out, stats = o.retime_external_cues(sub, asr, "eng", 200.0, asr_lang="ja")
+    assert out is not None and stats["method"] == "order", stats
+    assert stats["anchors"] == 0, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    print("PASS retime_eng_ja_order")
+
+
+def test_retime_anchor_eng_movie():
+    """Movie audio is eng: _retime_anchor_asr with sub_lang='eng' picks the
+    eng stream via choose_source (target 'en') -> asr_lang 'en'; the ASR cache
+    is keyed and transcribed as en (not ja)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Die.Hard.1988.mp4")
+    open(mkv, "w").close()
+    eng_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "ac3", "tags": {"language": "eng"},
+          "channel_layout": "5.1", "duration": "7200.0"}]
+    )
+    eng_streams.format_duration = 7200.0
+    cues = [{"start": 1000.0, "end": 2000.0, "text": "Yippee ki yay"}]
+    saved = {}
+    for n in ("probe_audio", "asr_cache_get", "extract_wav", "asr_cues", "asr_cache_put"):
+        saved[n] = getattr(o, n)
+    cache_calls = []
+    o.probe_audio = lambda path: eng_streams
+    o.asr_cache_get = lambda *a: cache_calls.append(a) or None
+    o.extract_wav = lambda *a, **k: None
+    o.asr_cues = lambda *a, **k: cues
+    o.asr_cache_put = lambda *a, **k: cache_calls.append(a)
+    cfg = build_cfg()
+    cfg["TMP_DIR"] = d
+    try:
+        got, asr_lang = o._retime_anchor_asr(cfg, mkv, "eng")
+        assert got == cues and asr_lang == "en", (got, asr_lang)
+        sig = o.audio_stream_signature(eng_streams)
+        assert cache_calls[0][:2] == (sig, "en"), cache_calls
+        assert cache_calls[-1][:2] == (sig, "en"), cache_calls
+        leftovers = [f for f in os.listdir(d) if f.startswith("retime_anchor_")]
+        assert not leftovers, leftovers
+    finally:
+        for n, v in saved.items():
+            setattr(o, n, v)
+    print("PASS retime_anchor_eng_movie")
+
+
+# ---------- movie track (radarr) ----------
+
+
+def _run_pass_movie(
+    tmp_dir,
+    movies,
+    wanted=None,
+    state=None,
+    infos=None,
+    movie_library=True,
+    regen=False,
+    max_eps=8,
+    target_langs=None,
+    registry_rows=None,
+    sidecar=None,
+    ladder_kind="jpn",
+):
+    """Drive run_pass() with the movie sweep enabled (no HTTP, ffmpeg, or
+    ASR). movies: list of dicts fed to get_movies (path = real local file).
+    infos maps series ep_id -> get_episode() response. Returns (stats, mocks)."""
+    cfg = build_cfg()
+    cfg["TARGET_LANGS"] = target_langs or ["id"]
+    cfg["TRANSLATE_API_KEY"] = "test-key"
+    cfg["MAX_EPS_PER_RUN"] = max_eps
+    cfg["TMP_DIR"] = tmp_dir
+    cfg["MOVIE_LIBRARY"] = movie_library
+    cfg["REGEN_LIBRARY"] = regen
+    mocks = {
+        "get_wanted_calls": [],
+        "get_movies_calls": [],
+        "probe": [],
+        "submit": [],
+        "ladder_submit": [],
+        "sidecar_calls": [],
+        "state_writes": [],
+        "log": [],
+    }
+    saved = {}
+
+    def save(name):
+        saved[name] = getattr(o, name)
+
+    for name in (
+        "load_config",
+        "consume_actions",
+        "load_state",
+        "get_wanted",
+        "get_movies",
+        "parse_exclusions",
+        "get_episode",
+        "probe_audio",
+        "choose_source",
+        "detect_ladder_source",
+        "asr_cache_get",
+        "extract_wav",
+        "asr_cues",
+        "asr_cache_put",
+        "process_after_asr",
+        "process_ladder",
+        "run_upgrades",
+        "log",
+        "notify_hermes",
+        "halt_on_error",
+        "append_state",
+        "target_sidecar_exists",
+        "STATE_FILE",
+        "REGISTRY_FILE",
+    ):
+        save(name)
+    o.load_config = lambda: cfg
+    o.consume_actions = lambda cfg_: set()
+    o.load_state = lambda: list(state or [])
+    o.get_wanted = lambda cfg_: mocks["get_wanted_calls"].append(1) or {
+        "total": len(wanted or []),
+        "data": wanted or [],
+    }
+    o.get_movies = lambda cfg_: mocks["get_movies_calls"].append(1) or {
+        "total": len(movies or []),
+        "data": movies or [],
+    }
+    o.parse_exclusions = lambda: set()
+    o.get_episode = lambda cfg_, ep_id: (infos or {})[ep_id]
+    o.probe_audio = lambda path: mocks["probe"].append(path) or [
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "tags": {"language": "jpn"},
+            "channels": 2,
+            "duration": "100.0",
+        }
+    ]
+    o.choose_source = lambda streams, lang: {
+        "stream_index": 1,
+        "asr_lang": "ja",
+        "needs_translate": True,
+        "src_lang": "jpn",
+    }
+    o.detect_ladder_source = lambda *a, **k: {
+        "kind": ladder_kind,
+        "source_path": "x.srt",
+    }
+    o.asr_cache_get = lambda *a: None
+    o.extract_wav = lambda path, idx, out: open(out, "w").close()
+    o.asr_cues = lambda cfg_, wav, lang: [
+        {"start": 0, "end": 1000, "text": "Halo dunia."}
+    ]
+    o.asr_cache_put = lambda *a: None
+    o.process_after_asr = lambda *a, **k: mocks["submit"].append(a) or "done"
+    o.process_ladder = lambda *a, **k: mocks["ladder_submit"].append((a, k)) or "done"
+    o.run_upgrades = lambda *a, **k: {"upgraded": 0, "checked": 0}
+    o.log = lambda msg: mocks["log"].append(msg)
+    o.notify_hermes = lambda *a, **k: None
+    o.halt_on_error = lambda *a, **k: None
+    o.append_state = lambda entry: mocks["state_writes"].append(entry)
+    o.target_sidecar_exists = (
+        lambda path: mocks["sidecar_calls"].append(path) or sidecar
+    )
+    o.STATE_FILE = os.path.join(tmp_dir, "state.jsonl")
+    o.REGISTRY_FILE = os.path.join(tmp_dir, "subtitle_registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        for row in registry_rows or []:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    try:
+        stats = o.run_pass()
+    finally:
+        for name, val in saved.items():
+            setattr(o, name, val)
+    return stats, mocks
+
+
+def test_movie_candidates():
+    """movie_candidates: monitored+file movies become candidates; unmonitored,
+    registered (stem, lang) and target-sidecar movies are skipped; duplicate
+    radarrIds dedupe; result sorted by radarrId; fetch failure -> [] (never
+    raises)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    paths = {}
+    for name in ("Zeta.mkv", "Alpha.mkv", "Unmon.mkv", "Reg.mkv", "Side.mkv"):
+        p = os.path.join(d, name)
+        open(p, "w").close()
+        paths[name] = p
+    movies = [
+        {"radarrId": 7, "title": "Zeta", "monitored": True, "path": paths["Zeta.mkv"]},
+        {"radarrId": 3, "title": "Alpha", "monitored": True, "path": paths["Alpha.mkv"]},
+        {"radarrId": 5, "title": "Unmon", "monitored": False, "path": paths["Unmon.mkv"]},
+        {"radarrId": 9, "title": "Reg", "monitored": True, "path": paths["Reg.mkv"]},
+        {"radarrId": 9, "title": "RegDup", "monitored": True, "path": paths["Reg.mkv"]},
+        {"radarrId": 11, "title": "Side", "monitored": True, "path": paths["Side.mkv"]},
+    ]
+    reg_stem = os.path.splitext(paths["Reg.mkv"])[0]
+    side_stem = os.path.splitext(paths["Side.mkv"])[0]
+    open(side_stem + ".id.srt", "w").close()
+    saved_reg = o.REGISTRY_FILE
+    saved_log = o.log
+    saved_get = o.get_movies
+    logs = []
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"stem": reg_stem, "lang": "id", "source": "asr"}) + "\n")
+        fh.write(json.dumps({"stem": reg_stem, "lang": "en", "source": "jpn"}) + "\n")
+        fh.write(json.dumps({"stem": side_stem, "lang": "en", "source": "eng"}) + "\n")
+    o.log = lambda msg: logs.append(msg)
+    o.get_movies = lambda cfg_: {"total": len(movies), "data": movies}
+    try:
+        cands = o.movie_candidates(build_cfg(), ["id", "en"])
+        ids = [c["radarrId"] for c in cands]
+        assert ids == [3, 7], ids
+        by_id = {c["radarrId"]: c for c in cands}
+        assert {m["code2"] for m in by_id[3]["missing_subtitles"]} == {"id", "en"}
+        assert by_id[3]["movie"] is True and by_id[3]["movieTitle"] == "Alpha"
+        assert by_id[3]["path"] == paths["Alpha.mkv"]
+        assert by_id[3]["sonarrEpisodeId"] == 3
+        assert any("movies: skip Reg [id] already registered (asr)" in l for l in logs), logs
+        assert any("movies: skip Reg [en] already registered (jpn)" in l for l in logs), logs
+        assert any(
+            "movies: skip Side [id]: target-lang sidecar exists (Side.id.srt)" in l
+            for l in logs
+        ), logs
+        assert not any("Unmon" in l for l in logs), logs
+        # fetch failure: [] + log, never raises
+        o.get_movies = lambda cfg_: (_ for _ in ()).throw(RuntimeError("bazarr down"))
+        assert o.movie_candidates(build_cfg(), ["id"]) == []
+        assert any("ERROR fetching movies list" in l for l in logs), logs
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.log = saved_log
+        o.get_movies = saved_get
+    print("PASS movie_candidates")
+
+
+def test_movie_library_off_no_candidates():
+    """MOVIE_LIBRARY off: run_pass never touches the movies API and never
+    submits movie candidates."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Die.Hard.1988.mp4")
+    open(mkv, "w").close()
+    movies = [{"radarrId": 41, "title": "Die Hard", "monitored": True, "path": mkv}]
+    stats, mocks = _run_pass_movie(d, movies, movie_library=False)
+    assert mocks["get_movies_calls"] == [], mocks["get_movies_calls"]
+    assert mocks["ladder_submit"] == [] and mocks["submit"] == []
+    assert not any(l.startswith("movies ") for l in mocks["log"]), mocks["log"]
+    assert stats["processed"] == 0 and stats["done"] == 0, stats
+    print("PASS movie_library_off_no_candidates")
+
+
+def test_movie_pass_processes_candidate():
+    """MOVIE_LIBRARY on: the sweep feeds movie candidates into the pass; the
+    movie branch probes, ladders, and submits process_ladder with
+    movie_id=radarrId, ep_id=radarrId, series=title, tag=MOVIE, and an info
+    dict carrying the container path (no Sonarr ids); every missing lang is
+    processed."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Die.Hard.1988.mp4")
+    open(mkv, "w").close()
+    movies = [{"radarrId": 41, "title": "Die Hard", "monitored": True, "path": mkv}]
+    stats, mocks = _run_pass_movie(d, movies, target_langs=["id", "en"])
+    assert stats["done"] == 2 and stats["failed"] == 0 and stats["skipped"] == 0, stats
+    subs = mocks["ladder_submit"]
+    assert len(subs) == 2, subs
+    for args, kwargs in subs:
+        assert kwargs.get("movie_id") == 41, kwargs
+        assert args[2] == 41, "ep_id must be the movie id"
+        assert args[4] == "Die Hard" and args[5] == "MOVIE", (args[4], args[5])
+        info = args[7]
+        assert info["episodeFile"]["path"] == mkv, info
+        assert info["seriesId"] is None and info["sonarrSeriesId"] is None, info
+    assert sorted(a[3] for a, _ in subs) == ["en", "id"], subs
+    assert len(mocks["probe"]) == 2, mocks["probe"]
+    assert not mocks["submit"], "ASR path must not run when the ladder hits"
+    assert any("movies: process Die Hard [id]" in l for l in mocks["log"])
+    assert any("movies: process Die Hard [en]" in l for l in mocks["log"])
+    assert any("movies total=1, movie candidates=1" in l for l in mocks["log"])
+    assert stats["movies_remaining"] == 1, stats
+    print("PASS movie_pass_processes_candidate")
+
+
+def test_state_kind_no_collision():
+    """A series-kind done row for id 5 must NOT suppress the movie candidate
+    with radarrId 5: done_keys/consec_errors/last_entry are (kind, episode,
+    language) triples, so series and movie ids never collide."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv5 = os.path.join(d, "Movie5.mp4")
+    open(mkv5, "w").close()
+    ep6 = os.path.join(d, "Ep6.mkv")
+    open(ep6, "w").close()
+    infos = {
+        6: {
+            "hasFile": True,
+            "seasonNumber": 1,
+            "episodeNumber": 6,
+            "seriesId": 99,
+            "episodeFile": {"path": ep6},
+        }
+    }
+    wanted = [
+        {
+            "sonarrEpisodeId": 6,
+            "seriesTitle": "TestShow",
+            "missing_subtitles": [{"code2": "id"}],
+        }
+    ]
+    state = [{"sonarrEpisodeId": 5, "language": "id", "status": "done"}]
+    movies = [{"radarrId": 5, "title": "MovieFive", "monitored": True, "path": mkv5}]
+    stats, mocks = _run_pass_movie(d, movies, wanted=wanted, state=state, infos=infos)
+    assert stats["done"] == 2 and stats["skipped"] == 0, stats
+    series_sub = [k for a, k in mocks["ladder_submit"] if k.get("movie_id") is None]
+    movie_sub = [k for a, k in mocks["ladder_submit"] if k.get("movie_id") == 5]
+    assert len(series_sub) == 1 and len(movie_sub) == 1, mocks["ladder_submit"]
+    assert not any("already done (state)" in l for l in mocks["log"]), mocks["log"]
+    print("PASS state_kind_no_collision")
+
+
+def test_regen_skips_movie_rows():
+    """REGEN_LIBRARY regen loop skips kind='movie' state rows: only the series
+    done pair is regenerated, the movie pair never becomes a series regen
+    candidate."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {6: _mk_regen_info(d, "Ep6.mkv", 6)}
+    state = [
+        {"sonarrEpisodeId": 5, "language": "id", "status": "done", "kind": "movie"},
+        {"sonarrEpisodeId": 6, "language": "id", "status": "done", "seriesTitle": "TestShow"},
+    ]
+    stats, mocks = _run_pass_movie(
+        d,
+        [],
+        state=state,
+        infos=infos,
+        movie_library=False,
+        regen=True,
+        ladder_kind="asr",
+    )
+    assert stats["done"] == 1 and stats["failed"] == 0, stats
+    assert [a[2] for a in mocks["submit"]] == [6], mocks["submit"]
+    assert mocks["ladder_submit"] == [], mocks["ladder_submit"]
+    assert not any("regen: process S01E05" in l for l in mocks["log"]), mocks["log"]
+    print("PASS regen_skips_movie_rows")
+
+
+def test_upload_srt_movie_retry_204():
+    """upload_srt_movie posts to /movies/subtitles with movieid/language/
+    forced/hi params + multipart file; non-204 responses retry (3 attempts),
+    then 204 returns."""
+    codes = [500, 500, 204]
+    calls = []
+
+    class FakeResp:
+        status_code = 200
+        text = "err"
+
+    class FakeRequests:
+        def __init__(self, codes):
+            self.codes = codes
+
+        def post(self, url, params=None, headers=None, files=None, timeout=None):
+            calls.append((url, dict(params or {}), files))
+            r = FakeResp()
+            r.status_code = self.codes.pop(0)
+            return r
+
+    saved = o.requests
+    o.requests = FakeRequests(codes)
+    try:
+        cfg = {"BAZARR_URL": "http://x/api", "BAZARR_API_KEY": "k"}
+        code = o.upload_srt_movie(cfg, 42, "id", b"x", filename="m.id.srt")
+        assert code == 204, code
+        assert len(calls) == 3, calls
+        url, params, files = calls[0]
+        assert url.endswith("/movies/subtitles"), url
+        assert params == {
+            "movieid": 42,
+            "language": "id",
+            "forced": "false",
+            "hi": "false",
+        }, params
+        assert files["file"][0] == "m.id.srt", files
+    finally:
+        o.requests = saved
+    print("PASS upload_srt_movie_retry_204")
+
+
+def test_upload_srt_movie_all_fail_last_code():
+    """All 3 attempts non-204: last status code returned."""
+    codes = [500, 500, 500]
+    calls = []
+
+    class FakeResp:
+        status_code = 200
+        text = "err"
+
+    class FakeRequests:
+        def __init__(self, codes):
+            self.codes = codes
+
+        def post(self, url, params=None, headers=None, files=None, timeout=None):
+            calls.append(url)
+            r = FakeResp()
+            r.status_code = self.codes.pop(0)
+            return r
+
+    saved = o.requests
+    o.requests = FakeRequests(codes)
+    try:
+        cfg = {"BAZARR_URL": "http://x/api", "BAZARR_API_KEY": "k"}
+        code = o.upload_srt_movie(cfg, 42, "id", b"x")
+        assert code == 500, code
+        assert len(calls) == 3, calls
+    finally:
+        o.requests = saved
+    print("PASS upload_srt_movie_all_fail_last_code")
+
+
+def test_jellyfin_refresh_movie_item_type():
+    """Movies refresh searches IncludeItemTypes=Movie (series default stays
+    Episode); the path match still gates the refresh POST."""
+    class FakeResp:
+        def __init__(self, obj, status=200):
+            self._obj, self.status_code = obj, status
+
+        def json(self):
+            return self._obj
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"HTTP {self.status_code}")
+
+    calls = []
+
+    class FakeRequests:
+        @staticmethod
+        def get(url, params=None, headers=None, timeout=None):
+            calls.append(("GET", dict(params or {})))
+            return FakeResp(
+                {
+                    "Items": [
+                        {"Id": "m1",
+                         "Path": "/media/jellyfin/radarr-movies/Die.Hard.1988/Die.Hard.1988.mp4"}
+                    ]
+                }
+            )
+
+        @staticmethod
+        def post(url, json=None, headers=None, timeout=None):
+            calls.append(("POST", url))
+            return FakeResp(None, 204)
+
+    saved_requests = o.requests
+    o.requests = FakeRequests
+    try:
+        cfg = {"JELLYFIN_API_KEY": "k123", "JELLYFIN_URL": "http://jf:8096"}
+        o.jellyfin_refresh(
+            cfg,
+            "/mnt/nas/share/media/jellyfin/radarr-movies/Die.Hard.1988/Die.Hard.1988.mp4",
+            "Die Hard",
+            item_type="Movie",
+        )
+        deadline = time.time() + 5
+        while len(calls) < 2 and time.time() < deadline:
+            time.sleep(0.05)
+        assert len(calls) == 2, calls
+        m1 = calls[0]
+        assert m1[0] == "GET" and m1[1]["IncludeItemTypes"] == "Movie", m1
+        assert calls[-1][0] == "POST" and calls[-1][1].endswith("/Items/m1/Refresh")
+    finally:
+        o.requests = saved_requests
+    print("PASS jellyfin_refresh_movie_item_type")
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
