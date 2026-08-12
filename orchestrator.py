@@ -937,6 +937,41 @@ def _sidecar_unchanged(stem, lang, media_path, audio_id):
         return False
 
 
+def _ensure_sidecar_registered(stem, lang, cur_audio):
+    """Register an on-disk {stem}.{lang}.srt sidecar as source_kind
+    'embedded' with the CURRENT video's audio_id. Webhook dedup skips
+    registration for pre-ledger/pre-existing extracts (files created before
+    the provenance registry existed, or by older builds) — those rows never
+    appear and the ladder rejects the sidecar forever as 'no row'. Idempotent:
+    skips when the existing row is already the identical embedded row, so a
+    rescan storm never appends junk rows. Also covers the post-remux case
+    where the embedded stream is gone: the existing sidecar (extracted from
+    this video's earlier mux, audio unchanged) still gains its row."""
+    try:
+        if not os.path.isfile(f"{stem}.{lang}.srt"):
+            return
+        h = file_sha256(f"{stem}.{lang}.srt")
+    except OSError:
+        return
+    row = registry_get(stem, lang)
+    if (
+        row
+        and row.get("source_kind") == "embedded"
+        and row.get("source_hash") == h
+        and row.get("audio_id") == cur_audio
+    ):
+        return
+    registry_upsert(
+        stem,
+        lang,
+        "embedded",
+        source_path=f"{stem}.{lang}.srt",
+        source_hash=h,
+        source_kind="embedded",
+        audio_id=cur_audio,
+    )
+
+
 def extract_subtitle_sidecars(container_path, tdarr_id=""):
     """Background task for POST /tdarr-webhook: pull the single best ASS/SSA
     subtitle stream per language (jpn/eng, scored by mkvmerge NUMBER_OF_FRAMES
@@ -953,7 +988,17 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
     costs a cheap header-only audio probe, never an ffmpeg job. Concurrent
     extractions are capped by _TDARR_SEM so each demux keeps NFS bandwidth.
     Defensive: missing file, no matching streams, or ffmpeg failure -> log
-    and return; never raises. Wakes the main loop on success."""
+    and return; never raises. Wakes the main loop on success.
+
+    Bazarr cleanup (verified live 2026-08-12): subtitle files NOT in Bazarr's
+    managed list are deleted by Bazarr when an episode refresh is forced
+    (upload_srt does exactly that) — webhook-extracted {stem}.jpn.srt sidecars
+    are unmanaged and can vanish. The pipeline therefore never depends on a
+    sidecar surviving: the registry rows plus the embedded-extract rung
+    (fresh extraction from the video) are the durable source of truth; when
+    the video itself lost its subtitle streams (Tdarr remux), the Jimaku
+    .ja.hi.srt rung (a) is the fallback. Bazarr cleanup settings are not
+    managed from here."""
     tmp_paths = []
     try:
         media_path = map_path(container_path)
@@ -972,6 +1017,8 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
             _sidecar_unchanged(stem, lang, media_path, cur_audio)
             for lang in ("jpn", "eng")
         ):
+            for lang in ("jpn", "eng"):
+                _ensure_sidecar_registered(stem, lang, cur_audio)
             log(f"webhook: {os.path.basename(media_path)} jpn/eng unchanged, skip")
             return
         with _TDARR_SEM:
@@ -983,10 +1030,12 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
             extracted = []
             for lang in ("jpn", "eng"):
                 if _sidecar_unchanged(stem, lang, media_path, cur_audio):
+                    _ensure_sidecar_registered(stem, lang, cur_audio)
                     log(f"webhook: {os.path.basename(media_path)} {lang} unchanged, skip")
                     continue
                 best = _pick_best_subtitle(streams, lang)
                 if best is None:
+                    _ensure_sidecar_registered(stem, lang, cur_audio)
                     log(
                         f"tdarr-webhook: no ASS/SSA '{lang}' subtitle stream in {media_path}"
                     )
@@ -1189,6 +1238,7 @@ def extract_embedded_subtitle(media_path, lang, out_path):
 
 
 _BAZARR_JPN_TRIED = set()
+_BAZARR_JPN_CACHE = {}
 
 
 def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
@@ -1198,8 +1248,15 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
        (subliminal writes {stem}.jpn.srt next to the video). Returns the local
        SRT path or None. Defensive: failures are logged and fall through to
        the next ladder rung; each (episode, series) is only attempted once per
-       daemon lifetime so a broken request cannot poll on every pass."""
+       daemon lifetime so a broken request cannot poll on every pass.
+    A FOUND path is cached positively (_BAZARR_JPN_CACHE): every target
+    language of the episode reuses the same source on its own ladder pass
+    without re-querying Bazarr — a one-shot dedup let the first lang consume
+    the lookup and every later lang fall through to ASR."""
     key = (ep_id, series_id)
+    cached = _BAZARR_JPN_CACHE.get(key)
+    if cached:
+        return cached
     if key in _BAZARR_JPN_TRIED:
         return None
     _BAZARR_JPN_TRIED.add(key)
@@ -1223,6 +1280,7 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
                         continue
                     p = map_path(s.get("path") or "")
                     if os.path.isfile(p):
+                        _BAZARR_JPN_CACHE[key] = p
                         return p
         # search+download (JSON body, no multipart file)
         r2 = requests.post(
@@ -1244,6 +1302,7 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
         stem = os.path.splitext(media_path)[0]
         for cand in (stem + ".jpn.srt", stem + ".ja.srt"):
             if os.path.isfile(cand):
+                _BAZARR_JPN_CACHE[key] = cand
                 return cand
     except Exception as exc:
         log(f"ladder: bazarr jpn query failed for ep {ep_id}: {exc}")
@@ -1277,7 +1336,7 @@ def _warn_ffsubsync_unavailable():
 
 
 def _sidecar_trusted(stem, lang, media_path, sidecar_path):
-    """Trust verification for the on-disk sidecar {stem}.{lang}.srt: TRUSTED
+    """Trust verification for the on-disk sidecar sidecar_path: TRUSTED
     (aligned by construction — skip the ffsubsync gate, use as-is) iff the
     registry row exists with source_kind 'embedded' (the tdarr webhook
     extracted it from this video's own subtitle stream), the row's audio_id
@@ -1290,31 +1349,92 @@ def _sidecar_trusted(stem, lang, media_path, sidecar_path):
     Logs the reason at INFO/WARNING; never raises."""
     row = registry_get(stem, lang)
     if not row:
-        log(f"ladder: {stem}.{lang}.srt not trusted: no row")
+        log(f"ladder: {os.path.basename(sidecar_path)} not trusted: no row")
         return False
     if row.get("source_kind") != "embedded":
         log(
-            f"ladder: {stem}.{lang}.srt not trusted: "
+            f"ladder: {os.path.basename(sidecar_path)} not trusted: "
             f"source_kind={row.get('source_kind')!r}"
         )
         return False
     try:
         cur_audio = audio_stream_signature(probe_audio(media_path))
     except Exception as exc:
-        log(f"ladder: {stem}.{lang}.srt not trusted: audio probe failed: {exc}")
+        log(f"ladder: {os.path.basename(sidecar_path)} not trusted: audio probe failed: {exc}")
         return False
     if not row.get("audio_id") or row["audio_id"] != cur_audio:
-        log(f"ladder: {stem}.{lang}.srt not trusted: stale (audio mismatch)")
+        log(f"ladder: {os.path.basename(sidecar_path)} not trusted: stale (audio mismatch)")
         return False
     try:
         on_disk_hash = file_sha256(sidecar_path)
     except OSError as exc:
-        log(f"ladder: {stem}.{lang}.srt not trusted: unreadable: {exc}")
+        log(f"ladder: {os.path.basename(sidecar_path)} not trusted: unreadable: {exc}")
         return False
     if on_disk_hash != row.get("source_hash"):
-        log(f"ladder: {stem}.{lang}.srt not trusted: clobbered (hash mismatch)")
+        log(f"ladder: {os.path.basename(sidecar_path)} not trusted: clobbered (hash mismatch)")
         return False
     return True
+
+
+_ADOPT_TRIED = set()
+
+
+def _adopt_embedded(stem, kind, media_path, cand, tmp_dir=None):
+    """Adoption for untrusted webhook extracts: a sidecar whose basename is
+    exactly {stem}.{kind}.srt (webhook product; NEVER .ja* Jimaku files) with
+    NO registry row may still BE the current embedded stream — the row was
+    lost (pre-ledger extract) or the file survived Bazarr cleanup. Verify by
+    re-extracting the current embedded track and comparing content hashes; on
+    a match, register source_kind 'embedded' so the sidecar is trusted as
+    aligned-by-construction and the ffsubsync gate is skipped. One attempt
+    per (stem, kind) per daemon lifetime. Never raises; returns True only
+    when the sidecar is now registry-trusted."""
+    key = (stem, kind)
+    if key in _ADOPT_TRIED:
+        return False
+    _ADOPT_TRIED.add(key)
+    try:
+        base_name = os.path.splitext(os.path.basename(media_path))[0]
+        if os.path.basename(cand) != base_name + "." + kind + ".srt":
+            return False
+        if registry_get(stem, kind):
+            return False
+        if not os.path.isfile(cand):
+            return False
+        tmp = os.path.join(
+            tmp_dir or "/tmp", f"ladder_adopt_{os.getpid()}_{kind}.srt"
+        )
+        try:
+            if not extract_embedded_subtitle(media_path, kind, tmp):
+                return False
+            if (
+                not os.path.isfile(tmp)
+                or file_sha256(tmp) != file_sha256(cand)
+            ):
+                return False
+        finally:
+            _silent_remove(tmp)
+        try:
+            cur_audio = audio_stream_signature(probe_audio(media_path))
+        except Exception:
+            cur_audio = ""
+        registry_upsert(
+            stem,
+            kind,
+            "embedded",
+            source_path=cand,
+            source_hash=file_sha256(cand),
+            source_kind="embedded",
+            audio_id=cur_audio,
+        )
+        log(
+            f"ladder: adopted embedded {kind} sidecar "
+            f"{os.path.basename(cand)} (hash match with current stream)"
+        )
+        return _sidecar_trusted(stem, kind, media_path, cand)
+    except Exception as exc:
+        log(f"ladder: adoption failed for {cand}: {exc}")
+        return False
 
 
 def _first_cue_start_ms(path):
@@ -1450,7 +1570,8 @@ def align_external_subtitle(srt_path, video_path, tmp_dir=None):
 
 def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, series_id=None):
     """Pull-based source ladder for one wanted (episode, target_lang) row.
-    Order: jpn (external sidecar {stem}.jpn.srt / {stem}.ja.srt -> embedded
+    Order: jpn (external sidecar {stem}.jpn.srt / {stem}.ja.srt / their
+    .jpn.hi/.ja.hi HI variants -> embedded
     jpn stream -> Bazarr jpn) -> eng (external {stem}.eng.srt -> embedded eng
     stream) -> asr. Every jpn/eng candidate must pass the adequacy gates.
     External sidecars additionally pass the ffsubsync alignment gate unless
@@ -1489,7 +1610,10 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         if not verdict["ok"]:
             return None
         hit = _hit(kind, cand, verdict)
-        if not (lc["align_enabled"] and not _sidecar_trusted(stem, kind, media_path, cand)):
+        trusted = _sidecar_trusted(stem, kind, media_path, cand)
+        if not trusted:
+            trusted = _adopt_embedded(stem, kind, media_path, cand, tmp_dir)
+        if not (lc["align_enabled"] and not trusted):
             return hit
         if not _ffsubsync_available():
             _warn_ffsubsync_unavailable()
@@ -1519,8 +1643,14 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         hit["align_tmp"] = aligned
         return hit
 
-    # (a) jpn
-    for cand in (stem + ".jpn.srt", stem + ".ja.srt"):
+    # (a) jpn — Bazarr/Jimaku manage HI-only files (.ja.hi.srt etc.), so
+    # the HI variants are first-class rung (a) candidates
+    for cand in (
+        stem + ".jpn.srt",
+        stem + ".ja.srt",
+        stem + ".jpn.hi.srt",
+        stem + ".ja.hi.srt",
+    ):
         if os.path.isfile(cand):
             hit = _external_hit(cand, "jpn")
             if hit:
@@ -2220,8 +2350,9 @@ def translate_texts(
 def jellyfin_refresh(cfg, media_path, title=None):
     """Fire-and-forget Jellyfin library refresh for a subtitle event.
 
-    Finds the episode item by SearchTerm (=episode title, fallback filename),
-    matches Path against the media file (mapped NAS path), then POSTs
+    Finds the episode item by SearchTerm (episode title; on a miss, falls
+    back to the title prefix before the first separator and then the filename
+    stem), matches Path against the media file (mapped NAS path), then POSTs
     /Items/{id}/Refresh (204). Runs in a daemon thread, ~5s timeouts; failures
     are logged but never fail the episode. No-op without JELLYFIN_API_KEY.
     """
@@ -2240,23 +2371,40 @@ def jellyfin_refresh(cfg, media_path, title=None):
             )
             filename = os.path.basename(media_path)
             headers = {"X-Emby-Token": key}
-            r = requests.get(
-                base + "/Items",
-                params={
-                    "Recursive": "true",
-                    "IncludeItemTypes": "Episode",
-                    "SearchTerm": title or filename,
-                    "Fields": "Path,MediaStreams",
-                },
-                headers=headers,
-                timeout=5,
-            )
-            r.raise_for_status()
+            # Jellyfin SearchTerm matches the item Name, whose punctuation can
+            # differ from the Sonarr title (e.g. ':' vs '!'): a rigid single
+            # search misses episodes whose title/subtitle separator differs.
+            # Try the title first (happy path unchanged), then the title
+            # prefix before the first separator, then the filename stem.
+            # Path matching gates every attempt the same way.
+            terms = [title or filename]
+            if title:
+                prefix = re.split(r"[:;!?()]", title, maxsplit=1)[0].strip()
+                if prefix and prefix != title:
+                    terms.append(prefix)
+            stem_name = os.path.splitext(filename)[0]
+            if stem_name and stem_name != terms[0]:
+                terms.append(stem_name)
             item = None
-            for it in r.json().get("Items", []):
-                p = it.get("Path") or ""
-                if p == jelly_path or p.endswith("/" + filename):
-                    item = it
+            for term in terms:
+                r = requests.get(
+                    base + "/Items",
+                    params={
+                        "Recursive": "true",
+                        "IncludeItemTypes": "Episode",
+                        "SearchTerm": term,
+                        "Fields": "Path,MediaStreams",
+                    },
+                    headers=headers,
+                    timeout=5,
+                )
+                r.raise_for_status()
+                for it in r.json().get("Items", []):
+                    p = it.get("Path") or ""
+                    if p == jelly_path or p.endswith("/" + filename):
+                        item = it
+                        break
+                if item is not None:
                     break
             if item is None:
                 log(f"jellyfin: episode item not found for {filename}")

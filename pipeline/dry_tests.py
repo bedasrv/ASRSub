@@ -2525,6 +2525,299 @@ def test_registry_by_episode_returns_row():
 
 
 
+def test_ladder_rung_finds_ja_hi_sidecar():
+    """Rung (a) sees Jimaku/Bazarr HI variants: with only {stem}.ja.hi.srt
+    (or {stem}.jpn.hi.srt) on disk, it is found and used as the jpn source —
+    no bazarr query, no ASR."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    saved_bazarr = o.bazarr_jpn_candidate
+    calls = []
+    o.bazarr_jpn_candidate = lambda *a, **k: calls.append(a) or None
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["ALIGN_ENABLED"] = "false"
+        for name in ("Ep.ja.hi.srt", "Ep.jpn.hi.srt"):
+            cand = os.path.join(d, name)
+            _write_srt(cand, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+            v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+            assert v["kind"] == "jpn" and v["source_path"] == cand, (name, v)
+            os.remove(cand)
+        assert not calls, "bazarr must not be queried when the HI sidecar is on disk"
+    finally:
+        o.bazarr_jpn_candidate = saved_bazarr
+    print("PASS ladder_rung_finds_ja_hi_sidecar")
+
+
+def test_bazarr_jpn_positive_cache():
+    """bazarr_jpn_candidate caches a FOUND path positively: the 2nd call for
+    the same (ep_id, series_id) returns the same path with no re-query; a
+    miss stays one-shot per key."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえお") for i in range(3)])
+    saved_requests = o.requests
+    saved_tried = o._BAZARR_JPN_TRIED
+    saved_cache = o._BAZARR_JPN_CACHE
+    o._BAZARR_JPN_TRIED = set()
+    o._BAZARR_JPN_CACHE = {}
+    hits = []
+
+    class FakeResp:
+        def __init__(self, code, payload):
+            self.status_code, self._payload = code, payload
+
+        def json(self):
+            return self._payload
+
+    class FakeReq:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def get(self, url, params=None, headers=None, timeout=None):
+            hits.append(("get", url))
+            return FakeResp(200, self._payload)
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            hits.append(("post", url))
+            return FakeResp(204, None)
+
+    cfg = {"BAZARR_URL": "http://x/api", "BAZARR_API_KEY": "k"}
+    try:
+        o.requests = FakeReq({"data": [{"subtitles": [{"code2": "ja", "path": mkv}]}]})
+        p1 = o.bazarr_jpn_candidate(cfg, 1, 2, mkv, d)
+        p2 = o.bazarr_jpn_candidate(cfg, 1, 2, mkv, d)
+        assert p1 == mkv and p2 == mkv, (p1, p2)
+        assert len(hits) == 1, "2nd call must not re-query Bazarr"
+        # miss: query once, then tried forever
+        os.remove(jpn)  # the download poll must not find the hit-case file
+        o._BAZARR_JPN_TRIED = set()
+        o._BAZARR_JPN_CACHE = {}
+        hits.clear()
+        o.requests = FakeReq({"data": [{"subtitles": []}]})
+        assert o.bazarr_jpn_candidate(cfg, 3, 4, mkv, d) is None
+        assert o.bazarr_jpn_candidate(cfg, 3, 4, mkv, d) is None
+        assert len(hits) == 2, "miss is one-shot (get+post on first call only)"
+    finally:
+        o.requests = saved_requests
+        o._BAZARR_JPN_TRIED = saved_tried
+        o._BAZARR_JPN_CACHE = saved_cache
+    print("PASS bazarr_jpn_positive_cache")
+
+
+def test_webhook_dedup_registers_existing_sidecars():
+    """Pre-existing extract without a registry row: when the embedded stream
+    is gone (post-remux) the webhook can no longer re-extract, but the
+    on-disk sidecar still gains its embedded row (audio_id from the current
+    video); an identical embedded row is not re-appended (idempotent)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    stem = os.path.splitext(mkv)[0]
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえお") for i in range(3)])
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    saved = {name: getattr(o, name) for name in
+             ("REGISTRY_FILE", "probe_audio", "_subtitle_streams")}
+    saved_run = o.subprocess.run
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
+    o.probe_audio = lambda path: fake_streams
+    o._subtitle_streams = lambda path: []  # streams stripped by the remux
+    o.subprocess.run = lambda cmd, **kw: (_ for _ in ()).throw(
+        AssertionError(f"no subprocess expected, got {cmd[0]}")
+    )
+    try:
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t1")
+        row = o.registry_get(stem, "jpn")
+        assert row is not None and row["source_kind"] == "embedded", row
+        assert row["source_hash"] == o.file_sha256(jpn), row
+        assert row["audio_id"] == o.audio_stream_signature(fake_streams), row
+        assert o.registry_get(stem, "eng") is None, "no eng sidecar -> no row"
+        n_before = sum(1 for _ in open(o.REGISTRY_FILE))
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t2")
+        n_after = sum(1 for _ in open(o.REGISTRY_FILE))
+        assert n_after == n_before, (n_before, n_after)
+    finally:
+        o.subprocess.run = saved_run
+        for name, val in saved.items():
+            setattr(o, name, val)
+    print("PASS webhook_dedup_registers_existing_sidecars")
+
+
+def test_ladder_adopts_untrusted_webhook_extract():
+    """Adoption: an untrusted {stem}.jpn.srt (no registry row) whose content
+    hash matches a fresh embedded extract is registered source_kind
+    'embedded' and used WITHOUT the alignment gate; a hash mismatch leaves it
+    untrusted (alignment runs, falls through); .ja.srt Jimaku files are never
+    adopted."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    stem = os.path.splitext(mkv)[0]
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    saved = {name: getattr(o, name) for name in
+             ("REGISTRY_FILE", "probe_audio", "extract_embedded_subtitle",
+              "bazarr_jpn_candidate", "_ADOPT_TRIED", "_ffsubsync_available")}
+    saved_run = o.subprocess.run
+    o._ffsubsync_available = lambda: True
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    o.probe_audio = lambda path: fake_streams
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    calls = []
+    o.subprocess.run = lambda cmd, **kw: calls.append(cmd[0]) or _run_result(1)
+    extract_src = [jpn]
+
+    def fake_extract(path, lang, out):
+        data = open(extract_src[0], "rb").read()
+        with open(out, "wb") as fh:
+            fh.write(data)
+        return True
+    o.extract_embedded_subtitle = fake_extract
+    cfg = build_cfg()
+    cfg["TMP_DIR"] = d
+    cfg["ALIGN_ENABLED"] = "true"
+    try:
+        # scenario 1: hash matches -> adoption, no alignment, hit returned
+        open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
+        o._ADOPT_TRIED.clear()
+        calls.clear()
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "jpn" and v["source_path"] == jpn, v
+        assert v.get("align_tmp") is None, v
+        assert "ffs" not in calls and "ffmpeg" not in calls, calls
+        row = o.registry_get(stem, "jpn")
+        assert row and row["source_kind"] == "embedded", row
+        assert row["source_hash"] == o.file_sha256(jpn), row
+        # scenario 2: hash mismatch -> no adoption, alignment runs, falls to asr
+        open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
+        o._ADOPT_TRIED.clear()
+        calls.clear()
+        bad = os.path.join(d, "bad_extract.srt")
+        _write_srt(bad, [(i * 1000, i * 1000 + 800, "テスト") for i in range(3)])
+        extract_src[0] = bad
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "asr", v
+        assert "ffs" in calls, calls
+        assert o.registry_get(stem, "jpn") is None, "no row after a mismatch"
+        # scenario 3: .ja.srt (Jimaku) is never adopted
+        open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
+        o._ADOPT_TRIED.clear()
+        calls.clear()
+        ja = os.path.join(d, "Ep.ja.srt")
+        _write_srt(ja, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "asr", v
+        assert "ffs" in calls, calls
+        assert o.registry_get(stem, "jpn") is None, "Jimaku files are never adopted"
+    finally:
+        o.subprocess.run = saved_run
+        for name, val in saved.items():
+            setattr(o, name, val)
+    print("PASS ladder_adopts_untrusted_webhook_extract")
+
+
+def test_assess_source_file_cleans_ass_styling():
+    """A styling-heavy ASS-derived SRT ({\\an8} blocks, <font> tags, \\N
+    breaks) still passes the jpn gates: clean_ass_text runs per cue BEFORE
+    the cue/char/CJK counts (verified: the E05 embedded extract gate rejects
+    came from the stream being gone, not styling junk)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    srt = os.path.join(d, "styled.srt")
+    cues = []
+    for i in range(60):
+        cues.append((i * 1000, i * 1000 + 800,
+                     f'<font size="75">{{\\an8}}(フリーレン)\\N王都が見えてきたね テストの台詞です{i}。{"あいうえお" * 4}</font>'))
+    _write_srt(srt, cues)
+    v = o.assess_source_file(build_cfg(), srt, "jpn", 60.0)
+    assert v["ok"], v
+    assert len(v["cues"]) == 60, len(v["cues"])
+    assert "\\an8" not in v["cues"][0]["text"], v["cues"][0]["text"]
+    assert "font" not in v["cues"][0]["text"], v["cues"][0]["text"]
+    assert "王都が見えてきたね" in v["cues"][0]["text"], v["cues"][0]["text"]
+    print("PASS assess_source_file_cleans_ass_styling")
+
+
+def test_jellyfin_refresh_fallback_terms():
+    """When the title SearchTerm misses (Jellyfin Name punctuation differs
+    from the Sonarr title), the refresh falls back to the title prefix
+    before the separator and then the filename stem; the path match still
+    gates the refresh POST."""
+    class FakeResp:
+        def __init__(self, obj, status=200):
+            self._obj, self.status_code = obj, status
+
+        def json(self):
+            return self._obj
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"HTTP {self.status_code}")
+
+    calls = []
+
+    class FakeRequests:
+        @staticmethod
+        def get(url, params=None, headers=None, timeout=None):
+            calls.append(("GET", dict(params or {})))
+            if (params or {}).get("SearchTerm") == "Ep Title: Subtitle":
+                return FakeResp({"Items": []})
+            return FakeResp({"Items": [
+                {"Id": "abc123",
+                 "Path": "/media/jellyfin/sonarr-tv-shows/X/Ep.mkv"}
+            ]})
+
+        @staticmethod
+        def post(url, json=None, headers=None, timeout=None):
+            calls.append(("POST", url))
+            return FakeResp(None, 204)
+
+    saved_requests = o.requests
+    o.requests = FakeRequests
+    try:
+        cfg = {"JELLYFIN_API_KEY": "k123", "JELLYFIN_URL": "http://jf:8096"}
+        o.jellyfin_refresh(
+            cfg,
+            "/mnt/nas/share/media/jellyfin/sonarr-tv-shows/X/Ep.mkv",
+            "Ep Title: Subtitle",
+        )
+        deadline = time.time() + 5
+        while len(calls) < 3 and time.time() < deadline:
+            time.sleep(0.05)
+        assert len(calls) == 3, calls
+        terms = [c[1]["SearchTerm"] for c in calls if c[0] == "GET"]
+        assert terms == ["Ep Title: Subtitle", "Ep Title"], terms
+        assert calls[-1][0] == "POST" and calls[-1][1].endswith("/Items/abc123/Refresh")
+    finally:
+        o.requests = saved_requests
+    print("PASS jellyfin_refresh_fallback_terms")
+
+
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
