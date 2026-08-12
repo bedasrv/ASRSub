@@ -20,6 +20,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -115,6 +116,18 @@ LADDER_MIN_CUES = int(os.environ.get("LADDER_MIN_CUES", "40"))
 LADDER_MIN_CHARS = int(os.environ.get("LADDER_MIN_CHARS", "1500"))
 LADDER_MIN_CJK = float(os.environ.get("LADDER_MIN_CJK", "0.6"))
 LADDER_SPAN_TOLERANCE = float(os.environ.get("LADDER_SPAN_TOLERANCE", "0.15"))
+# ffsubsync alignment gate for Jimaku/Bazarr-sourced jpn/eng sidecars: those
+# subs come from a DIFFERENT release than the video file, so their timing is
+# offset/drifted; ffsubsync re-times them against the video audio. Sidecars
+# extracted from the video's own embedded streams (tdarr webhook) are aligned
+# by construction and skip the gate (registry source_kind "embedded").
+ALIGN_ENABLED = os.environ.get("ALIGN_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+ALIGN_MAX_OFFSET_S = float(os.environ.get("ALIGN_MAX_OFFSET_S", "1.5"))
+ALIGN_MAX_OFFSET_SECONDS = float(os.environ.get("ALIGN_MAX_OFFSET_SECONDS", "60"))
 
 _stop_requested = False
 _paused = False
@@ -154,6 +167,19 @@ def load_config():
     cfg["MAX_EPS_PER_RUN"] = int(
         os.environ.get("MAX_EPS_PER_RUN", cfg.get("MAX_EPS_PER_RUN", "8"))
     )
+    cfg["ALIGN_ENABLED"] = str(
+        cfg.get("ALIGN_ENABLED", ALIGN_ENABLED)
+    ).lower() in ("1", "true", "yes")
+    try:
+        cfg["ALIGN_MAX_OFFSET_S"] = float(
+            cfg.get("ALIGN_MAX_OFFSET_S", ALIGN_MAX_OFFSET_S)
+        )
+        cfg["ALIGN_MAX_OFFSET_SECONDS"] = float(
+            cfg.get("ALIGN_MAX_OFFSET_SECONDS", ALIGN_MAX_OFFSET_SECONDS)
+        )
+    except (TypeError, ValueError):
+        cfg["ALIGN_MAX_OFFSET_S"] = ALIGN_MAX_OFFSET_S
+        cfg["ALIGN_MAX_OFFSET_SECONDS"] = ALIGN_MAX_OFFSET_SECONDS
     tl = cfg.get("TARGET_LANGS", "id,en")
     if isinstance(tl, str) and tl.strip().startswith("["):
         try:
@@ -214,6 +240,11 @@ def _ladder_cfg(cfg):
         "min_chars": _gi("LADDER_MIN_CHARS", LADDER_MIN_CHARS),
         "min_cjk": _gf("LADDER_MIN_CJK", LADDER_MIN_CJK),
         "span_tol": _gf("LADDER_SPAN_TOLERANCE", LADDER_SPAN_TOLERANCE),
+        "align_enabled": _gb("ALIGN_ENABLED", ALIGN_ENABLED),
+        "align_max_offset_s": _gf("ALIGN_MAX_OFFSET_S", ALIGN_MAX_OFFSET_S),
+        "align_max_offset_seconds": _gf(
+            "ALIGN_MAX_OFFSET_SECONDS", ALIGN_MAX_OFFSET_SECONDS
+        ),
     }
 
 
@@ -501,10 +532,14 @@ def registry_get(ep_id, lang):
     return latest
 
 
-def registry_upsert(ep_id, lang, source, source_path=None, source_hash=None):
+def registry_upsert(ep_id, lang, source, source_path=None, source_hash=None, source_kind=None):
     """Append a registry row for (episode_id, lang). The registry is
     authoritative ownership of an AI-produced subtitle: source is one of
-    jpn|eng|asr. Keeps the original created_ts, refreshes updated_ts."""
+    jpn|eng|asr. source_kind records WHERE the source came from ('embedded' =
+    the video's own embedded stream, aligned by construction; 'external' =
+    Jimaku/Bazarr-sourced sidecar file) — used to decide whether the
+    ffsubsync alignment gate must run. Keeps the original created_ts,
+    refreshes updated_ts."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     prev = registry_get(ep_id, lang)
     entry = {
@@ -516,6 +551,8 @@ def registry_upsert(ep_id, lang, source, source_path=None, source_hash=None):
         "created_ts": (prev or {}).get("created_ts", now),
         "updated_ts": now,
     }
+    if source_kind is not None:
+        entry["source_kind"] = source_kind
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1065,16 +1102,187 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
     return None
 
 
+def _silent_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+_ALIGN_NO_FFS_WARNED = False
+
+
+def _ffsubsync_available():
+    """True when the ffsubsync CLI ('ffs') is on PATH. Runtime probe so an
+    old image without the package degrades gracefully (gate disabled)."""
+    return shutil.which("ffs") is not None
+
+
+def _warn_ffsubsync_unavailable():
+    global _ALIGN_NO_FFS_WARNED
+    if not _ALIGN_NO_FFS_WARNED:
+        _ALIGN_NO_FFS_WARNED = True
+        log(
+            "WARNING: ladder: ffsubsync (ffs) not available; "
+            "running WITHOUT the alignment gate"
+        )
+
+
+def _sidecar_is_embedded(ep_id, lang):
+    """Registry-authoritative skip rule for the alignment gate: a sidecar for
+    (episode_id, lang) is 'embedded' (aligned by construction, tdarr webhook
+    extracted it from the video's own subtitle stream) when the registry row
+    records source_kind 'embedded'. Rows without source_kind (pre-gate
+    registry entries) are NOT embedded, so the gate runs."""
+    rec = registry_get(ep_id, lang)
+    return bool(rec) and rec.get("source_kind") == "embedded"
+
+
+def _first_cue_start_ms(path):
+    """First cue's start time in ms for an SRT file, or None."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    for cue in parse_srt(text):
+        ms = srt_ts_ms(cue["start"])
+        if ms is not None:
+            return ms
+    return None
+
+
+def align_external_subtitle(srt_path, video_path, tmp_dir=None):
+    """ffsubsync alignment gate for external (Jimaku/Bazarr-sourced) jpn/eng
+    subtitle sidecars: re-time the subtitle against the video's audio and
+    return (aligned_srt_path, offset_sec) when the alignment is trustworthy.
+
+    Never modifies the input file: .ass/.ssa inputs are converted to a temp
+    SRT with ffmpeg, and ffsubsync writes the aligned output as another temp
+    file, both under tmp_dir (TMP_DIR env / '/tmp' fallback). The caller owns
+    cleanup of the aligned output; the conversion temp is removed here.
+
+    Returns (None, None) on any failure (fingerprint mismatch, subprocess
+    error, unparseable cues) and (None, offset_sec) when the measured offset
+    exceeds ALIGN_MAX_OFFSET_S (reject). Never raises."""
+    tmp_dir = tmp_dir or os.environ.get("TMP_DIR") or "/tmp"
+    try:
+        os.makedirs(tmp_dir, exist_ok=True)
+    except OSError as exc:
+        log(f"WARNING: ladder: align: cannot create {tmp_dir}: {exc}")
+        return None, None
+    token = f"{os.getpid()}_{int(time.time() * 1000)}"
+    work = srt_path
+    conv = None
+    if os.path.splitext(srt_path)[1].lower() in (".ass", ".ssa"):
+        conv = os.path.join(tmp_dir, f"align_{token}_in.srt")
+        try:
+            pp = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    srt_path,
+                    "-c:s",
+                    "srt",
+                    "-f",
+                    "srt",
+                    conv,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+            )
+            ok = (
+                pp.returncode == 0
+                and os.path.isfile(conv)
+                and os.path.getsize(conv) > 0
+            )
+        except Exception as exc:
+            ok = False
+            log(
+                f"WARNING: ladder: align: ffmpeg .ass/.ssa -> srt failed for {srt_path}: {exc}"
+            )
+        if not ok:
+            _silent_remove(conv)
+            log(
+                f"WARNING: ladder: align: ffmpeg .ass/.ssa -> srt failed for {srt_path}"
+            )
+            return None, None
+        work = conv
+    in_ms = _first_cue_start_ms(work)
+    out = os.path.join(tmp_dir, f"align_{token}_out.srt")
+    try:
+        pp = subprocess.run(
+            [
+                "ffs",
+                video_path,
+                "-i",
+                work,
+                "-o",
+                out,
+                "--max-offset-seconds",
+                str(ALIGN_MAX_OFFSET_SECONDS),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        ran = True
+    except Exception as exc:
+        ran = False
+        log(f"WARNING: ladder: align: ffsubsync failed for {srt_path}: {exc}")
+    finally:
+        if conv is not None:
+            _silent_remove(conv)
+    if (
+        not ran
+        or pp.returncode != 0
+        or not os.path.isfile(out)
+        or os.path.getsize(out) == 0
+    ):
+        _silent_remove(out)
+        log(
+            f"WARNING: ladder: align: ffsubsync rejected {srt_path} "
+            f"(exit={getattr(pp, 'returncode', '?')})"
+        )
+        return None, None
+    out_ms = _first_cue_start_ms(out)
+    if in_ms is None or out_ms is None:
+        _silent_remove(out)
+        log(
+            f"WARNING: ladder: align: no parseable first cue in {srt_path} "
+            "or aligned output"
+        )
+        return None, None
+    offset_sec = (out_ms - in_ms) / 1000.0
+    if abs(offset_sec) > ALIGN_MAX_OFFSET_S:
+        _silent_remove(out)
+        log(
+            f"WARNING: ladder: align: offset {offset_sec:+.1f}s exceeds "
+            f"{ALIGN_MAX_OFFSET_S}s for {srt_path}; rejecting"
+        )
+        return None, offset_sec
+    return out, offset_sec
+
+
 def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, series_id=None):
     """Pull-based source ladder for one wanted (episode, target_lang) row.
     Order: jpn (external sidecar {stem}.jpn.srt / {stem}.ja.srt -> embedded
     jpn stream -> Bazarr jpn) -> eng (external {stem}.eng.srt -> embedded eng
     stream) -> asr. Every jpn/eng candidate must pass the adequacy gates.
-    Never raises; returns {"kind": "jpn"|"eng"|"asr", "source_path",
-    "source_hash", "cues", "duration_s", "tmp"}. kind 'asr' = caller falls
-    back to the existing ASR path."""
+    External sidecars additionally pass the ffsubsync alignment gate unless
+    the registry marks them source_kind 'embedded' (aligned by construction):
+    a rejected alignment falls through to the next rung. Never raises;
+    returns {"kind": "jpn"|"eng"|"asr", "source_path", "source_hash", "cues",
+    "duration_s", "tmp", "align_tmp"}. kind 'asr' = caller falls back to the
+    existing ASR path."""
     stem = os.path.splitext(media_path)[0]
     duration = None
+    lc = _ladder_cfg(cfg)
 
     def _gate(cand, kind):
         nonlocal duration
@@ -1092,12 +1300,51 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
             "tmp": tmp,
         }
 
+    def _external_hit(cand, kind):
+        """External sidecar rung: adequacy gate, then the ffsubsync alignment
+        gate for Jimaku/Bazarr-sourced subs (skipped when the registry marks
+        the sidecar as an embedded-stream extract: aligned by construction).
+        Returns a _hit dict or None (fall through to the next rung)."""
+        verdict = _gate(cand, kind)
+        if not verdict["ok"]:
+            return None
+        hit = _hit(kind, cand, verdict)
+        if not (lc["align_enabled"] and not _sidecar_is_embedded(ep_id, target_lang)):
+            return hit
+        if not _ffsubsync_available():
+            _warn_ffsubsync_unavailable()
+            return hit
+        aligned, offset = align_external_subtitle(cand, media_path, tmp_dir)
+        if aligned is None:
+            if offset is not None:
+                log(
+                    f"WARNING: ladder: {kind} sidecar {os.path.basename(cand)} rejected: "
+                    f"aligned offset {offset:+.1f}s > {lc['align_max_offset_s']}s"
+                )
+            else:
+                log(
+                    f"WARNING: ladder: {kind} sidecar {os.path.basename(cand)} rejected: "
+                    "ffsubsync alignment failed"
+                )
+            return None
+        log(
+            f"ladder: aligned external {kind} sidecar {os.path.basename(cand)} "
+            f"offset={offset:+.1f}s"
+        )
+        verdict_a = _gate(aligned, kind)
+        if not verdict_a["ok"]:
+            _silent_remove(aligned)
+            return None
+        hit["cues"] = verdict_a["cues"]
+        hit["align_tmp"] = aligned
+        return hit
+
     # (a) jpn
     for cand in (stem + ".jpn.srt", stem + ".ja.srt"):
         if os.path.isfile(cand):
-            verdict = _gate(cand, "jpn")
-            if verdict["ok"]:
-                return _hit("jpn", cand, verdict)
+            hit = _external_hit(cand, "jpn")
+            if hit:
+                return hit
     if tmp_dir:
         tmp_path = os.path.join(tmp_dir, f"ladder_{ep_id or 'x'}_jpn.srt")
         hit = None
@@ -1114,16 +1361,16 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
             return hit
     cand = bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir)
     if cand:
-        verdict = _gate(cand, "jpn")
-        if verdict["ok"]:
-            return _hit("jpn", cand, verdict)
+        hit = _external_hit(cand, "jpn")
+        if hit:
+            return hit
 
     # (b) eng
     for cand in (stem + ".eng.srt",):
         if os.path.isfile(cand):
-            verdict = _gate(cand, "eng")
-            if verdict["ok"]:
-                return _hit("eng", cand, verdict)
+            hit = _external_hit(cand, "eng")
+            if hit:
+                return hit
     if tmp_dir:
         tmp_path = os.path.join(tmp_dir, f"ladder_{ep_id or 'x'}_eng.srt")
         hit = None
@@ -2238,6 +2485,7 @@ def process_ladder(
             kind,
             source_path=source["source_path"],
             source_hash=source["source_hash"],
+            source_kind="embedded" if source.get("tmp") else "external",
         )
         elapsed = round(time.time() - t0, 1)
         append_state(
@@ -2272,6 +2520,8 @@ def process_ladder(
                 os.remove(source["source_path"])
             except OSError:
                 pass
+        if source.get("align_tmp"):
+            _silent_remove(source["align_tmp"])
 
 
 def run_upgrades(cfg, key, prior_cache=None):

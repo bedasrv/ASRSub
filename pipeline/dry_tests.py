@@ -1250,6 +1250,230 @@ def test_ladder_upgrade_guards():
     print("PASS ladder_upgrade_guards")
 
 
+def _run_result(rc, stdout="", stderr=""):
+    class R:
+        pass
+    r = R()
+    r.returncode = rc
+    r.stdout = stdout
+    r.stderr = stderr
+    return r
+
+
+def _shift_srt(inp, out, shift_s):
+    """Rewrite inp's SRT cues shifted by shift_s seconds into out."""
+    with open(inp, encoding="utf-8") as fh:
+        text = fh.read()
+    lines = []
+    for i, c in enumerate(o.parse_srt(text), 1):
+        s = o.srt_ts_ms(c["start"]) + shift_s * 1000.0
+        e = o.srt_ts_ms(c["end"]) + shift_s * 1000.0
+        lines.append(f"{i}\n{o._fmt_ms(s)} --> {o._fmt_ms(e)}\n{c['text']}\n")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write("\n\n".join(lines) + "\n")
+
+
+def _fake_ffs_run(shift_s=0.0, calls=None):
+    """subprocess.run fake for the alignment gate: 'ffmpeg' writes a fixed
+    SRT (stands in for ass->srt conversion), 'ffs' writes the aligned output
+    shifted by shift_s seconds; anything else fails."""
+    def fake(cmd, **kw):
+        if calls is not None:
+            calls.append(cmd[0])
+        if cmd[0] == "ffmpeg":
+            _write_srt(cmd[-1], [(1000, 1800, "テストです。"), (2000, 2800, "はい、そうです。")])
+            return _run_result(0)
+        if cmd[0] == "ffs":
+            _shift_srt(cmd[cmd.index("-i") + 1], cmd[cmd.index("-o") + 1], shift_s)
+            return _run_result(0)
+        return _run_result(1)
+    return fake
+
+
+def test_ladder_align_skipped_for_embedded():
+    """detect_ladder_source skips the alignment gate when the registry row
+    for (episode, lang) is source_kind 'embedded' (tdarr-extracted sidecar,
+    aligned by construction): no ffs/ffmpeg subprocess is ever invoked."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_extract = o.extract_embedded_subtitle
+    saved_bazarr = o.bazarr_jpn_candidate
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "episode_id": 1, "lang": "id", "source": "jpn",
+            "source_path": jpn, "source_hash": "x", "source_kind": "embedded",
+            "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z",
+        }) + "\n")
+    o.extract_embedded_subtitle = lambda *a, **k: False
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    calls = []
+
+    def spy(cmd, **kw):
+        calls.append(cmd[0])
+        return _run_result(1)
+    o.subprocess.run = spy
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["ALIGN_ENABLED"] = "true"
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "jpn" and v["source_path"] == jpn, v
+        assert v.get("align_tmp") is None, v
+        assert "ffs" not in calls and "ffmpeg" not in calls, calls
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o.extract_embedded_subtitle = saved_extract
+        o.bazarr_jpn_candidate = saved_bazarr
+    print("PASS ladder_align_skipped_for_embedded")
+
+
+def test_ladder_align_reject_on_ffs_failure():
+    """An external sidecar whose ffsubsync run fails (nonzero exit) is
+    rejected and the ladder falls through to the next rung (asr here);
+    temp files are cleaned up."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_extract = o.extract_embedded_subtitle
+    saved_bazarr = o.bazarr_jpn_candidate
+    saved_avail = o._ffsubsync_available
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")  # empty: unregistered
+    o.extract_embedded_subtitle = lambda *a, **k: False
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    o._ffsubsync_available = lambda: True
+    calls = []
+
+    def failing_ffs(cmd, **kw):
+        calls.append(cmd[0])
+        if cmd[0] == "ffprobe":
+            return _run_result(1)
+        return _run_result(1)
+    o.subprocess.run = failing_ffs
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["ALIGN_ENABLED"] = "true"
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "asr" and v["source_path"] is None, v
+        assert "ffs" in calls, calls
+        leftovers = [f for f in os.listdir(d) if f.startswith("align_")]
+        assert not leftovers, leftovers
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o.extract_embedded_subtitle = saved_extract
+        o.bazarr_jpn_candidate = saved_bazarr
+        o._ffsubsync_available = saved_avail
+    print("PASS ladder_align_reject_on_ffs_failure")
+
+
+def test_ladder_align_reject_large_offset():
+    """align_external_subtitle returns (None, offset_sec) when the measured
+    shift exceeds ALIGN_MAX_OFFSET_S; the aligned temp file is removed."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_run = o.subprocess.run
+    o.subprocess.run = _fake_ffs_run(shift_s=10.0)
+    try:
+        aligned, offset = o.align_external_subtitle(jpn, mkv, d)
+        assert aligned is None and offset is not None, (aligned, offset)
+        assert abs(offset - 10.0) < 1e-6, offset
+        assert abs(offset) > o.ALIGN_MAX_OFFSET_S
+        leftovers = [f for f in os.listdir(d) if f.startswith("align_")]
+        assert not leftovers, leftovers
+    finally:
+        o.subprocess.run = saved_run
+    print("PASS ladder_align_reject_large_offset")
+
+
+def test_ladder_align_accept_small_offset():
+    """align_external_subtitle returns the aligned temp SRT path and the
+    measured offset when the shift is within ALIGN_MAX_OFFSET_S; the aligned
+    timings carry the shift."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_run = o.subprocess.run
+    o.subprocess.run = _fake_ffs_run(shift_s=1.2)
+    aligned = None
+    try:
+        aligned, offset = o.align_external_subtitle(jpn, mkv, d)
+        assert aligned and os.path.isfile(aligned), aligned
+        assert os.path.dirname(aligned) == d, aligned
+        assert abs(offset - 1.2) < 1e-6, offset
+        assert abs(offset) <= o.ALIGN_MAX_OFFSET_S
+        with open(aligned, encoding="utf-8") as fh:
+            cues = o.parse_srt(fh.read())
+        assert abs(o.srt_ts_ms(cues[0]["start"]) - 1200.0) < 1.0, cues[0]
+    finally:
+        if aligned:
+            os.remove(aligned)
+        o.subprocess.run = saved_run
+    print("PASS ladder_align_accept_small_offset")
+
+
+def test_ladder_align_ass_conversion():
+    """An .ass input triggers an ffmpeg conversion to a temp .srt under
+    TMP_DIR before ffsubsync runs; the original .ass is never modified."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    ass = os.path.join(d, "Ep.jpn.ass")
+    ass_text = (
+        "[Script Info]\nTitle: x\n\n"
+        "[Events]\n"
+        "Dialogue: 0,0:00:01.00,0:00:01.80,Default,,0,0,0,,テストです。\n"
+        "Dialogue: 0,0:00:02.00,0:00:02.80,Default,,0,0,0,,はい、そうです。\n"
+    )
+    with open(ass, "w", encoding="utf-8") as fh:
+        fh.write(ass_text)
+    saved_run = o.subprocess.run
+    calls = []
+    o.subprocess.run = _fake_ffs_run(shift_s=1.0, calls=calls)
+    aligned = None
+    try:
+        aligned, offset = o.align_external_subtitle(ass, mkv, d)
+        assert aligned and os.path.isfile(aligned), aligned
+        assert os.path.dirname(aligned) == d, aligned
+        assert abs(offset - 1.0) < 1e-6, offset
+        assert "ffmpeg" in calls and "ffs" in calls, calls
+        assert open(ass, encoding="utf-8").read() == ass_text, "input must be untouched"
+        with open(aligned, encoding="utf-8") as fh:
+            cues = o.parse_srt(fh.read())
+        assert abs(o.srt_ts_ms(cues[0]["start"]) - 2000.0) < 1.0, cues[0]
+    finally:
+        if aligned:
+            os.remove(aligned)
+        o.subprocess.run = saved_run
+    print("PASS ladder_align_ass_conversion")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
