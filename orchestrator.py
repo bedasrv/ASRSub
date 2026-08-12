@@ -231,6 +231,8 @@ def load_config():
     cfg["TARGET_LANGS"] = [
         x.strip() for x in str(tl).split(",") if x.strip()
     ]
+    cfg["BAZARR_URL_2"] = cfg.get("BAZARR_URL_2") or None
+    cfg["BAZARR_API_KEY_2"] = cfg.get("BAZARR_API_KEY_2") or ""
     cfg["STATE_FILE"] = STATE_FILE
     cfg["JELLYFIN_URL"] = cfg.get("JELLYFIN_URL") or JELLYFIN_URL
     cfg["JELLYFIN_MEDIA_ROOT"] = cfg.get("JELLYFIN_MEDIA_ROOT") or JELLYFIN_MEDIA_ROOT
@@ -730,7 +732,47 @@ def get_wanted(cfg):
         timeout=60,
     )
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    url2 = cfg.get("BAZARR_URL_2")
+    if not url2:
+        return data
+    try:
+        r2 = requests.get(
+            url2.rstrip("/") + "/episodes/wanted",
+            params={"start": 0, "length": 500},
+            headers={"X-API-KEY": cfg.get("BAZARR_API_KEY_2") or ""},
+            timeout=60,
+        )
+        r2.raise_for_status()
+        extra = r2.json()
+    except Exception as exc:
+        log(f"WARNING: secondary Bazarr wanted fetch failed ({exc}); using primary only")
+        return data
+    by_id = {}
+    for it in data.get("data") or []:
+        by_id[it.get("sonarrEpisodeId")] = it
+    for it in extra.get("data") or []:
+        eid = it.get("sonarrEpisodeId")
+        primary = by_id.get(eid)
+        if primary is None:
+            by_id[eid] = it
+            continue
+        have = {
+            m.get("code2")
+            for m in (primary.get("missing_subtitles") or [])
+            if isinstance(m, dict)
+        }
+        merged = list(primary.get("missing_subtitles") or [])
+        for m in it.get("missing_subtitles") or []:
+            if not isinstance(m, dict):
+                continue
+            c = m.get("code2")
+            if c not in have:
+                have.add(c)
+                merged.append(m)
+        primary["missing_subtitles"] = merged
+    items = list(by_id.values())
+    return {"total": len(items), "data": items}
 
 
 def get_movies(cfg):
@@ -3026,6 +3068,18 @@ def consume_actions(cfg):
     return skip_ids
 
 
+def _bazarr_endpoint(cfg, lang):
+    """Dual-Bazarr upload routing: ja -> primary BAZARR_URL (Japanese
+    profile); any other lang -> BAZARR_URL_2 (id/en profile) when
+    configured, else primary. Returns (base_url, api_key)."""
+    if lang == "ja":
+        return cfg["BAZARR_URL"].rstrip("/"), cfg["BAZARR_API_KEY"]
+    base2 = cfg.get("BAZARR_URL_2")
+    if base2:
+        return base2.rstrip("/"), cfg.get("BAZARR_API_KEY_2") or ""
+    return cfg["BAZARR_URL"].rstrip("/"), cfg["BAZARR_API_KEY"]
+
+
 def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     """Manual upload via POST /api/episodes/subtitles (verified against live
     Bazarr swagger.json 2026-08-07): query seriesid/episodeid/language/
@@ -3034,7 +3088,8 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     filename (subliminal writes {video stem}.{lang alpha2}.srt), and the
     endpoint has no comment/history field, so AI provenance lives only in the
     first SRT cue."""
-    url = cfg["BAZARR_URL"].rstrip("/") + "/episodes/subtitles"
+    base, key = _bazarr_endpoint(cfg, lang)
+    url = base + "/episodes/subtitles"
     params = {
         "seriesid": series_id,
         "episodeid": ep_id,
@@ -3042,7 +3097,7 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
         "forced": "false",
         "hi": "false",
     }
-    headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
+    headers = {"X-API-KEY": key}
     files = {"file": (filename, srt_bytes, "application/x-subrip")}
     last_code = None
     for attempt in range(3):
@@ -3071,14 +3126,15 @@ def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
     Identical semantics to upload_srt (3 attempts, 5s*attempt backoff, 204
     success, last_code returned otherwise); Bazarr ignores the uploaded
     filename and writes {video stem}.{lang alpha2}.srt."""
-    url = cfg["BAZARR_URL"].rstrip("/") + "/movies/subtitles"
+    base, key = _bazarr_endpoint(cfg, lang)
+    url = base + "/movies/subtitles"
     params = {
         "radarrid": movie_id,
         "language": lang,
         "forced": "false",
         "hi": "false",
     }
-    headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
+    headers = {"X-API-KEY": key}
     files = {"file": (filename, srt_bytes, "application/x-subrip")}
     last_code = None
     for attempt in range(3):
