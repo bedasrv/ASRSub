@@ -1006,26 +1006,43 @@ def _write_srt(path, cues, ratio_kind="jpn"):
 
 
 def test_ladder_registry():
-    """registry upsert/get/load: append-only, latest row wins, created_ts kept,
-    source/source_path/source_hash round-tripped."""
+    """registry upsert/get/load: rows keyed (stem, lang) — the on-disk sidecar
+    is the unit of provenance — latest row wins, created_ts kept,
+    source/source_path/source_hash/audio_id round-tripped, ep_id nullable
+    (webhook rows), legacy episode_id-only rows still load and resolve."""
     import tempfile
 
     d = tempfile.mkdtemp()
     saved = o.REGISTRY_FILE
     o.REGISTRY_FILE = os.path.join(d, "subtitle_registry.jsonl")
     try:
-        e1 = o.registry_upsert(5, "id", "asr")
+        e1 = o.registry_upsert("/tv/S1/Ep1", "id", "asr", ep_id=5)
         time.sleep(0.01)
-        e2 = o.registry_upsert(5, "id", "jpn", source_path="/x.jpn.srt", source_hash="abc")
-        e3 = o.registry_upsert(6, "en", "eng")
+        e2 = o.registry_upsert("/tv/S1/Ep1", "id", "jpn", source_path="/x.jpn.srt", source_hash="abc")
+        e3 = o.registry_upsert("/tv/S1/Ep2", "en", "eng")
+        e4 = o.registry_upsert("/tv/S1/Ep1", "jpn", "embedded",
+                               source_kind="embedded", audio_id="a1b2")
         assert e1["created_ts"] == e2["created_ts"], (e1, e2)
         assert e2["updated_ts"] >= e1["updated_ts"]
         assert e2["source"] == "jpn" and e2["source_hash"] == "abc"
+        assert e4["episode_id"] is None and e4["audio_id"] == "a1b2", e4
+        assert e4["source_kind"] == "embedded"
         reg = o.load_registry()
-        assert set(reg) == {(5, "id"), (6, "en")}, set(reg)
-        assert reg[(5, "id")]["source"] == "jpn", "latest row must win"
-        assert o.registry_get(5, "id")["source"] == "jpn"
-        assert o.registry_get(99, "id") is None
+        assert set(reg) == {("/tv/S1/Ep1", "id"), ("/tv/S1/Ep2", "en"),
+                            ("/tv/S1/Ep1", "jpn")}, set(reg)
+        assert reg[("/tv/S1/Ep1", "id")]["source"] == "jpn", "latest row must win"
+        assert o.registry_get("/tv/S1/Ep1", "id")["source"] == "jpn"
+        assert o.registry_get("/tv/S1/Ep1", "jpn")["source_kind"] == "embedded"
+        assert o.registry_get(None, "id", media_path="/tv/S1/Ep1.mkv")["source"] == "jpn"
+        assert o.registry_get("/x", "id") is None
+        # legacy row (episode_id only, no stem) still loads + resolves by ep_id
+        with open(o.REGISTRY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"episode_id": 99, "lang": "id", "source": "asr",
+                                 "source_path": "", "source_hash": "",
+                                 "created_ts": "2026-08-01T00:00:00Z",
+                                 "updated_ts": "2026-08-01T00:00:00Z"}) + "\n")
+        assert (99, "id") in o.load_registry(), "legacy rows must still load"
+        assert o.registry_get(None, "id", ep_id=99)["source"] == "asr"
     finally:
         o.REGISTRY_FILE = saved
     print("PASS ladder_registry")
@@ -1291,8 +1308,9 @@ def _fake_ffs_run(shift_s=0.0, calls=None):
 
 
 def test_ladder_align_skipped_for_embedded():
-    """detect_ladder_source skips the alignment gate when the registry row
-    for (episode, lang) is source_kind 'embedded' (tdarr-extracted sidecar,
+    """Trusted sidecar skips the gate: the registry row for (stem, jpn) is
+    source_kind 'embedded' with an audio_id matching the current video and a
+    source_hash matching the on-disk sidecar content (tdarr-extracted,
     aligned by construction): no ffs/ffmpeg subprocess is ever invoked."""
     import tempfile
 
@@ -1305,11 +1323,20 @@ def test_ladder_align_skipped_for_embedded():
     saved_run = o.subprocess.run
     saved_extract = o.extract_embedded_subtitle
     saved_bazarr = o.bazarr_jpn_candidate
+    saved_probe = o.probe_audio
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    o.probe_audio = lambda path: fake_streams
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
     with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({
-            "episode_id": 1, "lang": "id", "source": "jpn",
-            "source_path": jpn, "source_hash": "x", "source_kind": "embedded",
+            "stem": os.path.splitext(mkv)[0], "lang": "jpn", "episode_id": 1,
+            "source": "embedded", "source_kind": "embedded",
+            "source_path": jpn, "source_hash": o.file_sha256(jpn),
+            "audio_id": o.audio_stream_signature(fake_streams),
             "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z",
         }) + "\n")
     o.extract_embedded_subtitle = lambda *a, **k: False
@@ -1333,7 +1360,359 @@ def test_ladder_align_skipped_for_embedded():
         o.subprocess.run = saved_run
         o.extract_embedded_subtitle = saved_extract
         o.bazarr_jpn_candidate = saved_bazarr
+        o.probe_audio = saved_probe
     print("PASS ladder_align_skipped_for_embedded")
+
+
+def test_webhook_registers_extraction():
+    """extract_subtitle_sidecars registers a provenance row per written
+    sidecar: (stem, lang) with source_kind 'embedded', audio_id = signature
+    of the video it was extracted from, source_hash = content hash of the
+    just-written sidecar, and no episode id (the webhook only knows the file
+    path, never Sonarr ids)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_streams = o._subtitle_streams
+    saved_probe = o.probe_audio
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    o.probe_audio = lambda path: fake_streams
+    o._subtitle_streams = lambda path: [
+        {"index": 3, "codec_type": "subtitle", "codec_name": "ass",
+         "tags": {"language": "jpn", "NUMBER_OF_FRAMES": "500"}},
+        {"index": 4, "codec_type": "subtitle", "codec_name": "ass",
+         "tags": {"language": "eng", "NUMBER_OF_FRAMES": "400"}},
+    ]
+
+    def fake_ffmpeg(cmd, **kw):
+        if cmd[0] == "ffmpeg":
+            idx = cmd[cmd.index("-map") + 1].split(":")[1]
+            with open(cmd[-1], "w", encoding="utf-8") as fh:
+                fh.write(f"1\n00:00:00,000 --> 00:00:01,000\nsub {idx}\n")
+            return _run_result(0)
+        return _run_result(1)
+    o.subprocess.run = fake_ffmpeg
+    try:
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t1")
+        stem = os.path.splitext(mkv)[0]
+        row_jpn = o.registry_get(stem, "jpn")
+        row_eng = o.registry_get(stem, "eng")
+        assert row_jpn and row_eng, (row_jpn, row_eng)
+        assert row_jpn["episode_id"] is None and row_eng["episode_id"] is None
+        for row, lang in ((row_jpn, "jpn"), (row_eng, "eng")):
+            assert row["source_kind"] == "embedded", row
+            assert row["source"] == "embedded", row
+            assert row["audio_id"] == o.audio_stream_signature(fake_streams), row
+            sidecar = os.path.join(d, f"Ep.{lang}.srt")
+            assert os.path.isfile(sidecar), sidecar
+            assert row["source_hash"] == o.file_sha256(sidecar), row
+        reg = o.load_registry()
+        assert (stem, "jpn") in reg and (stem, "eng") in reg, set(reg)
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o._subtitle_streams = saved_streams
+        o.probe_audio = saved_probe
+    print("PASS webhook_registers_extraction")
+
+
+def test_webhook_dedup_skips_unchanged():
+    """Webhook dedup: when registry rows exist with matching audio_id and
+    matching on-disk content hashes, re-extraction is skipped entirely (no
+    subprocess at all — the rescan storm costs only the header-only audio
+    probe). A stale audio_id (Sonarr upgrade) or a missing row re-runs the
+    extraction and re-registers the row."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    stem = os.path.splitext(mkv)[0]
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_probe = o.probe_audio
+    saved_streams = o._subtitle_streams
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    o.probe_audio = lambda path: fake_streams
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    eng = os.path.join(d, "Ep.eng.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえお") for i in range(3)])
+    _write_srt(eng, [(i * 1000, i * 1000 + 800, "A test english line for the dedup gate.") for i in range(3)])
+
+    def row(lang, hash_, audio):
+        return {"stem": stem, "lang": lang, "episode_id": None, "source": "embedded",
+                "source_kind": "embedded", "source_path": f"{stem}.{lang}.srt",
+                "source_hash": hash_, "audio_id": audio,
+                "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z"}
+
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        for lang, p in (("jpn", jpn), ("eng", eng)):
+            fh.write(json.dumps(row(lang, o.file_sha256(p),
+                                    o.audio_stream_signature(fake_streams))) + "\n")
+    calls = []
+
+    def spy(cmd, **kw):
+        calls.append(cmd[0])
+        return _run_result(1)
+    o.subprocess.run = spy
+    try:
+        # everything unchanged -> full skip, zero subprocesses
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t1")
+        assert not calls, calls
+        # stale audio_id (video upgraded): the row no longer matches ->
+        # re-extract (ffmpeg runs) and the latest row is re-registered
+        with open(o.REGISTRY_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row("jpn", o.file_sha256(jpn), "old-audio-id")) + "\n")
+        ffmpeg_calls = []
+
+        def fake_ffmpeg(cmd, **kw):
+            if cmd[0] == "ffmpeg":
+                ffmpeg_calls.append(cmd)
+                with open(cmd[-1], "w", encoding="utf-8") as fh:
+                    fh.write("1\n00:00:00,000 --> 00:00:01,000\nテスト\n")
+                return _run_result(0)
+            return _run_result(1)
+        o.subprocess.run = fake_ffmpeg
+        o._subtitle_streams = lambda path: [
+            {"index": 3, "codec_type": "subtitle", "codec_name": "ass",
+             "tags": {"language": "jpn", "NUMBER_OF_FRAMES": "100"}},
+        ]
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t2")
+        assert len(ffmpeg_calls) == 1, ffmpeg_calls
+        assert o.registry_get(stem, "jpn")["audio_id"] == o.audio_stream_signature(fake_streams)
+        # no row at all -> extraction runs and registers
+        with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+            fh.write("")
+        ffmpeg_calls.clear()
+        o.extract_subtitle_sidecars(mkv, tdarr_id="t3")
+        assert len(ffmpeg_calls) == 1, ffmpeg_calls
+        r = o.registry_get(stem, "jpn")
+        assert r and r["audio_id"] == o.audio_stream_signature(fake_streams), r
+        assert r["source_hash"] == o.file_sha256(jpn), r
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o.probe_audio = saved_probe
+        o._subtitle_streams = saved_streams
+    print("PASS webhook_dedup_skips_unchanged")
+
+
+def test_ladder_clobbered_sidecar_gated():
+    """Clobbered sidecar: the row says embedded and the audio matches, but the
+    on-disk sidecar content hash differs from the row's source_hash (Bazarr
+    overwrote the webhook extraction) -> NOT trusted, the alignment gate runs
+    and the clobbered reason is logged."""
+    import contextlib
+    import io
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_extract = o.extract_embedded_subtitle
+    saved_bazarr = o.bazarr_jpn_candidate
+    saved_probe = o.probe_audio
+    saved_avail = o._ffsubsync_available
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    o.probe_audio = lambda path: fake_streams
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "stem": os.path.splitext(mkv)[0], "lang": "jpn", "episode_id": 1,
+            "source": "embedded", "source_kind": "embedded",
+            "source_path": jpn, "source_hash": "0" * 64,
+            "audio_id": o.audio_stream_signature(fake_streams),
+            "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z",
+        }) + "\n")
+    o.extract_embedded_subtitle = lambda *a, **k: False
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    o._ffsubsync_available = lambda: True
+    calls = []
+
+    def spy(cmd, **kw):
+        calls.append(cmd[0])
+        return _run_result(1)
+    o.subprocess.run = spy
+    buf = io.StringIO()
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["ALIGN_ENABLED"] = "true"
+        with contextlib.redirect_stdout(buf):
+            v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "asr", v
+        assert "ffs" in calls, calls
+        assert "clobbered" in buf.getvalue(), buf.getvalue()
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o.extract_embedded_subtitle = saved_extract
+        o.bazarr_jpn_candidate = saved_bazarr
+        o.probe_audio = saved_probe
+        o._ffsubsync_available = saved_avail
+    print("PASS ladder_clobbered_sidecar_gated")
+
+
+def test_ladder_stale_sidecar_gated():
+    """Stale sidecar: the row says embedded and the on-disk hash matches, but
+    the row's audio_id differs from the CURRENT video's audio signature
+    (sidecar left behind by a Sonarr upgrade) -> NOT trusted, the alignment
+    gate runs and the stale reason is logged."""
+    import contextlib
+    import io
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved_reg = o.REGISTRY_FILE
+    saved_run = o.subprocess.run
+    saved_extract = o.extract_embedded_subtitle
+    saved_bazarr = o.bazarr_jpn_candidate
+    saved_probe = o.probe_audio
+    saved_avail = o._ffsubsync_available
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    o.probe_audio = lambda path: fake_streams
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "stem": os.path.splitext(mkv)[0], "lang": "jpn", "episode_id": 1,
+            "source": "embedded", "source_kind": "embedded",
+            "source_path": jpn, "source_hash": o.file_sha256(jpn),
+            "audio_id": "stale-audio-id",
+            "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z",
+        }) + "\n")
+    o.extract_embedded_subtitle = lambda *a, **k: False
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    o._ffsubsync_available = lambda: True
+    calls = []
+
+    def spy(cmd, **kw):
+        calls.append(cmd[0])
+        return _run_result(1)
+    o.subprocess.run = spy
+    buf = io.StringIO()
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["ALIGN_ENABLED"] = "true"
+        with contextlib.redirect_stdout(buf):
+            v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "asr", v
+        assert "ffs" in calls, calls
+        assert "stale" in buf.getvalue(), buf.getvalue()
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.subprocess.run = saved_run
+        o.extract_embedded_subtitle = saved_extract
+        o.bazarr_jpn_candidate = saved_bazarr
+        o.probe_audio = saved_probe
+        o._ffsubsync_available = saved_avail
+    print("PASS ladder_stale_sidecar_gated")
+
+
+def test_ladder_process_preserves_source_kind():
+    """process_ladder upsert: using an on-disk sidecar whose registry row
+    still matches (source_kind 'embedded', hash match) PRESERVES the row's
+    source_kind instead of flipping it to 'external'; a clobbered sidecar
+    (hash mismatch) records 'external'; a tmp extraction records 'embedded'
+    without clobbering the on-disk sidecar's own row."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    eng = os.path.join(d, "Ep.eng.srt")
+    _write_srt(eng, [(i * 1000, i * 1000 + 800, "A perfectly good english subtitle line for the preserve gate.") for i in range(60)])
+    stem = os.path.splitext(mkv)[0]
+    cues = [{"start": i * 1000, "end": i * 1000 + 800,
+             "text": "A perfectly good english subtitle line for the preserve gate."}
+            for i in range(60)]
+    saved_reg = o.REGISTRY_FILE
+    saved_state = o.STATE_FILE
+    saved_upload = o.upload_srt
+    saved_refresh = o.jellyfin_refresh
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    o.STATE_FILE = os.path.join(d, "state.jsonl")
+    o.upload_srt = lambda *a, **k: 204
+    o.jellyfin_refresh = lambda *a, **k: None
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "stem": stem, "lang": "eng", "episode_id": None,
+            "source": "embedded", "source_kind": "embedded",
+            "source_path": eng, "source_hash": o.file_sha256(eng),
+            "audio_id": "a1b2c3",
+            "created_ts": "2026-08-01T00:00:00Z", "updated_ts": "2026-08-01T00:00:00Z",
+        }) + "\n")
+    info = {"episodeFile": {"path": mkv}, "seriesId": 1, "title": "Ep"}
+    cfg = build_cfg()
+    try:
+        # on-disk sidecar, registry hash matches -> source_kind preserved
+        source = {"kind": "eng", "source_path": eng,
+                  "source_hash": o.file_sha256(eng), "cues": cues,
+                  "duration_s": 60.0, "tmp": False}
+        status = o.process_ladder(cfg, "k", 5, "en", "Series", "S1E5", source, info)
+        assert status == "done", status
+        row = o.registry_get(stem, "en")
+        assert row["source_kind"] == "embedded", row
+        assert row["source"] == "eng" and row["episode_id"] == 5, row
+        assert o.registry_get(stem, "eng")["source_kind"] == "embedded", \
+            "the on-disk sidecar's own row must not be clobbered"
+        # clobbered sidecar (content changed since the row) -> external
+        _write_srt(eng, [(i * 1000, i * 1000 + 800, "A different english subtitle line that clobbers the extraction.") for i in range(60)])
+        source2 = {"kind": "eng", "source_path": eng,
+                   "source_hash": o.file_sha256(eng), "cues": cues,
+                   "duration_s": 60.0, "tmp": False}
+        status = o.process_ladder(cfg, "k", 5, "en", "Series", "S1E5", source2, info)
+        assert status == "done", status
+        row2 = o.registry_get(stem, "en")
+        assert row2["source_kind"] == "external", row2
+        # tmp extraction -> embedded, and the on-disk row stays untouched
+        tmp_src = os.path.join(d, "ladder_tmp.srt")
+        _write_srt(tmp_src, [(i * 1000, i * 1000 + 800, "A tmp extracted english line for the preserve gate.") for i in range(60)])
+        source3 = {"kind": "eng", "source_path": tmp_src,
+                   "source_hash": o.file_sha256(tmp_src), "cues": cues,
+                   "duration_s": 60.0, "tmp": True}
+        status = o.process_ladder(cfg, "k", 5, "en", "Series", "S1E5", source3, info)
+        assert status == "done", status
+        row3 = o.registry_get(stem, "en")
+        assert row3["source_kind"] == "embedded", row3
+        assert o.registry_get(stem, "eng")["source_kind"] == "embedded"
+    finally:
+        o.REGISTRY_FILE = saved_reg
+        o.STATE_FILE = saved_state
+        o.upload_srt = saved_upload
+        o.jellyfin_refresh = saved_refresh
+    print("PASS ladder_process_preserves_source_kind")
 
 
 def test_ladder_align_reject_on_ffs_failure():

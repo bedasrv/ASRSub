@@ -120,7 +120,10 @@ LADDER_SPAN_TOLERANCE = float(os.environ.get("LADDER_SPAN_TOLERANCE", "0.15"))
 # subs come from a DIFFERENT release than the video file, so their timing is
 # offset/drifted; ffsubsync re-times them against the video audio. Sidecars
 # extracted from the video's own embedded streams (tdarr webhook) are aligned
-# by construction and skip the gate (registry source_kind "embedded").
+# by construction and skip the gate — verified by _sidecar_trusted: registry
+# row source_kind "embedded" + audio_id matching the current video + on-disk
+# content hash matching the row's source_hash (untrusted rows, including
+# Bazarr-clobbered or stale-after-upgrade sidecars, run the gate).
 ALIGN_ENABLED = os.environ.get("ALIGN_ENABLED", "true").lower() in (
     "1",
     "true",
@@ -508,51 +511,103 @@ def parse_exclusions():
     return ids
 
 
-# ---------- subtitle ownership registry ----------
+# ---------- subtitle provenance registry ----------
+
+
+def _registry_key(rec):
+    """Row identity: (stem, lang) when the row carries a stem (the on-disk
+    sidecar file {stem}.{lang}.srt is the unit of provenance — both the tdarr
+    webhook, which only knows the file path, and the ladder, which knows the
+    Sonarr ids, address the same row); legacy rows written before stems
+    existed fall back to (episode_id, lang)."""
+    lang = rec.get("lang")
+    if not lang:
+        return None
+    stem = rec.get("stem")
+    if stem:
+        return (stem, lang)
+    eid = rec.get("episode_id")
+    if isinstance(eid, int):
+        return (eid, lang)
+    return None
 
 
 def load_registry():
-    """All registry rows, keyed (episode_id, lang); the LAST row per key wins
+    """All registry rows, keyed (stem, lang); the LAST row per key wins
     (registry is append-only, like state.jsonl)."""
     out = {}
     for rec in load_records_jsonl(REGISTRY_FILE):
-        eid = rec.get("episode_id")
-        lang = rec.get("lang")
-        if isinstance(eid, int) and lang:
-            out[(eid, lang)] = rec
+        key = _registry_key(rec)
+        if key is not None:
+            out[key] = rec
     return out
 
 
-def registry_get(ep_id, lang):
-    """Latest registry row for (episode_id, lang) or None."""
+def registry_get(stem, lang, ep_id=None, media_path=None):
+    """Latest registry row for (stem, lang) or None. The stem is the row
+    identity; it may be derived from media_path when not passed. When no
+    stem is available, legacy rows written before stems existed are found
+    by episode_id fallback."""
+    if stem is None and media_path:
+        stem = os.path.splitext(media_path)[0]
     latest = None
     for rec in load_records_jsonl(REGISTRY_FILE):
-        if rec.get("episode_id") == ep_id and rec.get("lang") == lang:
+        if rec.get("lang") != lang:
+            continue
+        if stem is not None:
+            if rec.get("stem") == stem:
+                latest = rec
+        elif isinstance(rec.get("episode_id"), int) and rec.get("episode_id") == ep_id:
             latest = rec
+    if latest is None and stem is not None and ep_id is not None:
+        for rec in load_records_jsonl(REGISTRY_FILE):
+            if (
+                rec.get("lang") == lang
+                and isinstance(rec.get("episode_id"), int)
+                and rec.get("episode_id") == ep_id
+            ):
+                latest = rec
     return latest
 
 
-def registry_upsert(ep_id, lang, source, source_path=None, source_hash=None, source_kind=None):
-    """Append a registry row for (episode_id, lang). The registry is
-    authoritative ownership of an AI-produced subtitle: source is one of
-    jpn|eng|asr. source_kind records WHERE the source came from ('embedded' =
-    the video's own embedded stream, aligned by construction; 'external' =
-    Jimaku/Bazarr-sourced sidecar file) — used to decide whether the
-    ffsubsync alignment gate must run. Keeps the original created_ts,
-    refreshes updated_ts."""
+def registry_upsert(
+    stem,
+    lang,
+    source,
+    source_path=None,
+    source_hash=None,
+    source_kind=None,
+    ep_id=None,
+    audio_id=None,
+):
+    """Append a registry row for (stem, lang): the on-disk sidecar file
+    {stem}.{lang}.srt is the unit of provenance. A row describes the CURRENT
+    on-disk sidecar: source is one of jpn|eng|asr for pipeline-produced
+    subtitles ('embedded' for rows the tdarr webhook writes describing an
+    embedded-stream extraction). source_kind records WHERE the content came
+    from ('embedded' = this video's own subtitle stream, aligned by
+    construction; 'external' = Jimaku/Bazarr-sourced sidecar file) — used to
+    decide whether the ffsubsync alignment gate must run. ep_id stays a
+    FIELD (nullable: the webhook only knows the file path, never Sonarr
+    ids); audio_id is the audio signature of the video an embedded sidecar
+    was extracted from. Keeps the original created_ts, refreshes updated_ts."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    prev = registry_get(ep_id, lang)
+    prev = registry_get(stem, lang, ep_id=ep_id)
     entry = {
-        "episode_id": ep_id,
+        "stem": stem,
         "lang": lang,
+        "episode_id": ep_id if isinstance(ep_id, int) else None,
         "source": source,
         "source_path": source_path or "",
         "source_hash": source_hash or "",
         "created_ts": (prev or {}).get("created_ts", now),
         "updated_ts": now,
+        "ts": now,
     }
     if source_kind is not None:
         entry["source_kind"] = source_kind
+    if audio_id is not None:
+        entry["audio_id"] = audio_id
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -574,13 +629,14 @@ def srt_has_ai_marker(path):
 
 def sub_is_ai_owned(registry, ep_id, lang, media_path):
     """True when the on-disk {stem}.{lang}.srt is AI-produced. Registry is
-    authoritative (source jpn/eng/asr are all pipeline-produced); when the
-    registry has no row, fall back to the first-cue AI marker. Foreign subs
-    are never touched by the upgrade flow."""
-    rec = registry.get((ep_id, lang))
+    authoritative (source jpn/eng/asr are all pipeline-produced; webhook
+    rows source 'embedded' describe raw extractions and are never owned);
+    when the registry has no row, fall back to the first-cue AI marker.
+    Foreign subs are never touched by the upgrade flow."""
+    stem = os.path.splitext(media_path)[0]
+    rec = registry.get((stem, lang)) or registry.get((ep_id, lang))
     if rec:
         return rec.get("source") in ("jpn", "eng", "asr")
-    stem = os.path.splitext(media_path)[0]
     return srt_has_ai_marker(f"{stem}.{lang}.srt")
 
 
@@ -818,6 +874,27 @@ def _pick_best_subtitle(streams, lang):
     )
 
 
+def _sidecar_unchanged(stem, lang, media_path, audio_id):
+    """Webhook dedup: True when re-extraction for (stem, lang) is pointless
+    because nothing changed since the last successful extraction — the
+    registry row exists, its audio_id matches the CURRENT video's audio
+    signature (same file, not a Sonarr upgrade), the on-disk sidecar still
+    exists, and its content hash still matches the row's source_hash (not
+    clobbered by Bazarr or another writer). Only re-extract when any check
+    fails (new file, upgraded video, clobbered sidecar) — which also
+    AUTO-HEALS a Bazarr-clobbered sidecar on the next Tdarr event."""
+    row = registry_get(stem, lang)
+    if not row or not row.get("audio_id") or not row.get("source_hash"):
+        return False
+    if row["audio_id"] != audio_id:
+        return False
+    sidecar = f"{stem}.{lang}.srt"
+    try:
+        return os.path.isfile(sidecar) and file_sha256(sidecar) == row["source_hash"]
+    except OSError:
+        return False
+
+
 def extract_subtitle_sidecars(container_path, tdarr_id=""):
     """Background task for POST /tdarr-webhook: pull the single best ASS/SSA
     subtitle stream per language (jpn/eng, scored by mkvmerge NUMBER_OF_FRAMES
@@ -826,10 +903,15 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
     video. Extracts with the exact stream index (-map 0:<index>, never a
     language matcher), writes to {stem}.{lang}.srt.tmp and os.replace()s on
     success so a failed run never leaves a 0-byte file or clobbers a good
-    sidecar. Concurrent extractions are capped by _TDARR_SEM so each demux
-    keeps NFS bandwidth. Defensive: missing file, no matching streams, or
-    ffmpeg failure -> log and return; never raises. Wakes the main loop on
-    success."""
+    sidecar. Every written sidecar is registered in the provenance registry
+    as (stem, lang) source_kind 'embedded' with the video's audio_id and the
+    sidecar's content hash. A Tdarr restart/library rescan re-fires this
+    webhook for every file, so each lang whose registry row is unchanged
+    (audio_id + content hash match) is skipped entirely — the rescan storm
+    costs a cheap header-only audio probe, never an ffmpeg job. Concurrent
+    extractions are capped by _TDARR_SEM so each demux keeps NFS bandwidth.
+    Defensive: missing file, no matching streams, or ffmpeg failure -> log
+    and return; never raises. Wakes the main loop on success."""
     tmp_paths = []
     try:
         media_path = map_path(container_path)
@@ -837,6 +919,18 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
             log(
                 f"tdarr-webhook: file missing on NFS: {media_path} (id={tdarr_id})"
             )
+            return
+        stem = os.path.splitext(media_path)[0]
+        try:
+            cur_audio = audio_stream_signature(probe_audio(media_path))
+        except Exception as exc:
+            log(f"tdarr-webhook: audio probe failed for {media_path}: {exc}")
+            cur_audio = ""
+        if all(
+            _sidecar_unchanged(stem, lang, media_path, cur_audio)
+            for lang in ("jpn", "eng")
+        ):
+            log(f"webhook: {os.path.basename(media_path)} jpn/eng unchanged, skip")
             return
         with _TDARR_SEM:
             try:
@@ -846,6 +940,9 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
                 return
             extracted = []
             for lang in ("jpn", "eng"):
+                if _sidecar_unchanged(stem, lang, media_path, cur_audio):
+                    log(f"webhook: {os.path.basename(media_path)} {lang} unchanged, skip")
+                    continue
                 best = _pick_best_subtitle(streams, lang)
                 if best is None:
                     log(
@@ -853,7 +950,7 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
                     )
                     continue
                 index = best["index"]
-                out_path = f"{os.path.splitext(media_path)[0]}.{lang}.srt"
+                out_path = f"{stem}.{lang}.srt"
                 tmp_path = out_path + ".tmp"
                 tmp_paths.append(tmp_path)
                 pp = subprocess.run(
@@ -884,6 +981,15 @@ def extract_subtitle_sidecars(container_path, tdarr_id=""):
                 ):
                     os.replace(tmp_path, out_path)
                     extracted.append(out_path)
+                    registry_upsert(
+                        stem,
+                        lang,
+                        "embedded",
+                        source_path=out_path,
+                        source_hash=file_sha256(out_path),
+                        source_kind="embedded",
+                        audio_id=cur_audio,
+                    )
                 else:
                     log(
                         f"tdarr-webhook: ffmpeg extract [{lang}] failed for {media_path}: {pp.stderr.strip()}"
@@ -1128,14 +1234,45 @@ def _warn_ffsubsync_unavailable():
         )
 
 
-def _sidecar_is_embedded(ep_id, lang):
-    """Registry-authoritative skip rule for the alignment gate: a sidecar for
-    (episode_id, lang) is 'embedded' (aligned by construction, tdarr webhook
-    extracted it from the video's own subtitle stream) when the registry row
-    records source_kind 'embedded'. Rows without source_kind (pre-gate
-    registry entries) are NOT embedded, so the gate runs."""
-    rec = registry_get(ep_id, lang)
-    return bool(rec) and rec.get("source_kind") == "embedded"
+def _sidecar_trusted(stem, lang, media_path, sidecar_path):
+    """Trust verification for the on-disk sidecar {stem}.{lang}.srt: TRUSTED
+    (aligned by construction — skip the ffsubsync gate, use as-is) iff the
+    registry row exists with source_kind 'embedded' (the tdarr webhook
+    extracted it from this video's own subtitle stream), the row's audio_id
+    matches the CURRENT video's audio signature (not a stale sidecar left
+    behind by a Sonarr file upgrade), and the on-disk content hash still
+    matches the row's source_hash (not clobbered by Bazarr or another
+    writer). Anything else is NOT trusted: the external rung's alignment
+    gate runs on the file as-is (Bazarr content = external; stale content =
+    gate rejects or aligns; either way never silently used misaligned).
+    Logs the reason at INFO/WARNING; never raises."""
+    row = registry_get(stem, lang)
+    if not row:
+        log(f"ladder: {stem}.{lang}.srt not trusted: no row")
+        return False
+    if row.get("source_kind") != "embedded":
+        log(
+            f"ladder: {stem}.{lang}.srt not trusted: "
+            f"source_kind={row.get('source_kind')!r}"
+        )
+        return False
+    try:
+        cur_audio = audio_stream_signature(probe_audio(media_path))
+    except Exception as exc:
+        log(f"ladder: {stem}.{lang}.srt not trusted: audio probe failed: {exc}")
+        return False
+    if not row.get("audio_id") or row["audio_id"] != cur_audio:
+        log(f"ladder: {stem}.{lang}.srt not trusted: stale (audio mismatch)")
+        return False
+    try:
+        on_disk_hash = file_sha256(sidecar_path)
+    except OSError as exc:
+        log(f"ladder: {stem}.{lang}.srt not trusted: unreadable: {exc}")
+        return False
+    if on_disk_hash != row.get("source_hash"):
+        log(f"ladder: {stem}.{lang}.srt not trusted: clobbered (hash mismatch)")
+        return False
+    return True
 
 
 def _first_cue_start_ms(path):
@@ -1302,14 +1439,15 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
 
     def _external_hit(cand, kind):
         """External sidecar rung: adequacy gate, then the ffsubsync alignment
-        gate for Jimaku/Bazarr-sourced subs (skipped when the registry marks
-        the sidecar as an embedded-stream extract: aligned by construction).
-        Returns a _hit dict or None (fall through to the next rung)."""
+        gate for Jimaku/Bazarr-sourced subs (skipped when _sidecar_trusted
+        verifies the sidecar as an embedded-stream extract for the CURRENT
+        video: aligned by construction). Returns a _hit dict or None (fall
+        through to the next rung)."""
         verdict = _gate(cand, kind)
         if not verdict["ok"]:
             return None
         hit = _hit(kind, cand, verdict)
-        if not (lc["align_enabled"] and not _sidecar_is_embedded(ep_id, target_lang)):
+        if not (lc["align_enabled"] and not _sidecar_trusted(stem, kind, media_path, cand)):
             return hit
         if not _ffsubsync_available():
             _warn_ffsubsync_unavailable()
@@ -2372,7 +2510,8 @@ def process_after_asr(
         if ef.get("path"):
             jellyfin_refresh(cfg, map_path(ef["path"]), info.get("title") or info.get("Name"))
         elapsed = round(time.time() - t0, 1)
-        registry_upsert(ep_id, lang, "asr")
+        stem = os.path.splitext(map_path((info.get("episodeFile") or {}).get("path", "")))[0] or None
+        registry_upsert(stem, lang, "asr", ep_id=ep_id)
         append_state(
             {
                 "sonarrEpisodeId": ep_id,
@@ -2479,13 +2618,35 @@ def process_ladder(
         )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
+        stem = os.path.splitext(media_path)[0]
+        # Registry the produced {stem}.{lang}.srt with the SOURCE's
+        # provenance: when the ladder used an on-disk sidecar that still
+        # matches its own registry row (webhook embedded extraction, hash
+        # untouched), PRESERVE the row's source_kind instead of flipping it
+        # to "external" — a webhook-extracted sidecar is aligned by
+        # construction even when consumed from disk. "external" only when
+        # the sidecar was clobbered (hash mismatch) or never registered.
+        # A tmp extraction is embedded by construction and never clobbers
+        # the on-disk sidecar's own row.
+        src_row = registry_get(stem, kind)
+        if source.get("tmp"):
+            source_kind = "embedded"
+        elif (
+            src_row
+            and src_row.get("source_hash")
+            and src_row["source_hash"] == source["source_hash"]
+        ):
+            source_kind = src_row.get("source_kind") or "external"
+        else:
+            source_kind = "external"
         registry_upsert(
-            ep_id,
+            stem,
             lang,
             kind,
             source_path=source["source_path"],
             source_hash=source["source_hash"],
-            source_kind="embedded" if source.get("tmp") else "external",
+            source_kind=source_kind,
+            ep_id=ep_id,
         )
         elapsed = round(time.time() - t0, 1)
         append_state(
