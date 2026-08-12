@@ -1011,7 +1011,7 @@ def _subtitle_streams(path):
 
 
 def _pick_best_subtitle(streams, lang):
-    """Best ASS/SSA stream for a language, skipping tracks whose title
+    """Best ASS/SSA/subrip (SRT) stream for a language, skipping tracks whose title
     contains 'commentary'/'description' (drpeppershaker convention). Primary
     score is the mkvmerge NUMBER_OF_FRAMES statistics tag (no whole-file
     read); if every candidate lacks it, fall back to disposition order:
@@ -1022,7 +1022,7 @@ def _pick_best_subtitle(streams, lang):
         tags = s.get("tags") or {}
         if s.get("codec_type") != "subtitle":
             continue
-        if s.get("codec_name") not in ("ass", "ssa"):
+        if s.get("codec_name") not in ("ass", "ssa", "subrip"):
             continue
         if tags.get("language") != lang:
             continue
@@ -1331,7 +1331,7 @@ def assess_source_file(cfg, path, kind, duration):
 
 
 def extract_embedded_subtitle(media_path, lang, out_path):
-    """Extract the best ASS/SSA subtitle stream for lang to out_path (SRT).
+    """Extract the best ASS/SSA/subrip (SRT) subtitle stream for lang to out_path (SRT).
     Same picker/recipe as the tdarr webhook (mkvmerge stats, skip commentary/
     description). Returns True on success; never raises."""
     try:
