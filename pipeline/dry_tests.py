@@ -2063,6 +2063,358 @@ def test_target_sidecar_exists_patterns():
     assert o.target_sidecar_exists(mkv) is None, "non-target files must not match"
     print("PASS target_sidecar_exists_patterns")
 
+def _run_pass_regen(
+    tmp_dir,
+    infos,
+    wanted=None,
+    state=None,
+    regen=False,
+    max_eps=8,
+    target_langs=None,
+    registry_rows=None,
+    sidecar=None,
+):
+    """Drive run_pass() with every I/O boundary monkeypatched (no HTTP,
+    ffmpeg, or ASR). infos maps ep_id -> get_episode() response; each info
+    must carry a real media file path. Returns (stats, mocks)."""
+    cfg = build_cfg()
+    cfg["TARGET_LANGS"] = target_langs or ["id"]
+    cfg["TRANSLATE_API_KEY"] = "test-key"
+    cfg["MAX_EPS_PER_RUN"] = max_eps
+    cfg["TMP_DIR"] = tmp_dir
+    cfg["REGEN_LIBRARY"] = regen
+    mocks = {
+        "get_wanted_calls": [],
+        "probe": [],
+        "submit": [],
+        "sidecar_calls": [],
+        "state_writes": [],
+        "log": [],
+    }
+    saved = {}
+
+    def save(name):
+        saved[name] = getattr(o, name)
+
+    for name in (
+        "load_config",
+        "consume_actions",
+        "load_state",
+        "get_wanted",
+        "parse_exclusions",
+        "get_episode",
+        "probe_audio",
+        "choose_source",
+        "detect_ladder_source",
+        "asr_cache_get",
+        "extract_wav",
+        "asr_cues",
+        "asr_cache_put",
+        "process_after_asr",
+        "run_upgrades",
+        "log",
+        "notify_hermes",
+        "halt_on_error",
+        "append_state",
+        "target_sidecar_exists",
+        "STATE_FILE",
+        "REGISTRY_FILE",
+    ):
+        save(name)
+    o.load_config = lambda: cfg
+    o.consume_actions = lambda cfg_: set()
+    o.load_state = lambda: list(state or [])
+    o.get_wanted = lambda cfg_: mocks["get_wanted_calls"].append(1) or {
+        "total": len(wanted or []),
+        "data": wanted or [],
+    }
+    o.parse_exclusions = lambda: set()
+    o.get_episode = lambda cfg_, ep_id: infos[ep_id]
+    o.probe_audio = lambda path: mocks["probe"].append(path) or [
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "tags": {"language": "jpn"},
+            "channels": 2,
+            "duration": "100.0",
+        }
+    ]
+    o.choose_source = lambda streams, lang: {
+        "stream_index": 1,
+        "asr_lang": "ja",
+        "needs_translate": True,
+        "src_lang": "jpn",
+    }
+    o.detect_ladder_source = lambda *a, **k: {"kind": "asr", "source_path": None}
+    o.asr_cache_get = lambda *a: None
+    o.extract_wav = lambda path, idx, out: open(out, "w").close()
+    o.asr_cues = lambda cfg_, wav, lang: [
+        {"start": 0, "end": 1000, "text": "Halo dunia."}
+    ]
+    o.asr_cache_put = lambda *a: None
+    o.process_after_asr = lambda *a, **k: mocks["submit"].append(a) or "done"
+    o.run_upgrades = lambda *a, **k: {"upgraded": 0, "checked": 0}
+    o.log = lambda msg: mocks["log"].append(msg)
+    o.notify_hermes = lambda *a, **k: None
+    o.halt_on_error = lambda *a, **k: None
+    o.append_state = lambda entry: mocks["state_writes"].append(entry)
+    o.target_sidecar_exists = (
+        lambda path: mocks["sidecar_calls"].append(path) or sidecar
+    )
+    o.STATE_FILE = os.path.join(tmp_dir, "state.jsonl")
+    o.REGISTRY_FILE = os.path.join(tmp_dir, "subtitle_registry.jsonl")
+    with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
+        for row in registry_rows or []:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    try:
+        stats = o.run_pass()
+    finally:
+        for name, val in saved.items():
+            setattr(o, name, val)
+    return stats, mocks
+
+
+def _mk_regen_info(d, name, ep_id):
+    p = os.path.join(d, name)
+    open(p, "w").close()
+    return {
+        "hasFile": True,
+        "seasonNumber": 1,
+        "episodeNumber": ep_id,
+        "seriesId": 99,
+        "seriesTitle": "TestShow",
+        "episodeFile": {"path": p},
+    }
+
+
+def test_regen_flag_parsing():
+    """REGEN_LIBRARY plumbing: 'true'/'1'/'yes' in pipeline.env or
+    config.overrides.json (or the process env) enable library regeneration;
+    absent/falsey values leave it off; process env beats overrides beats
+    env file."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    env_file = os.path.join(d, "pipeline.env")
+    ov_file = os.path.join(d, "config.overrides.json")
+    saved_env, saved_ov = o.ENV_FILE, o.OVERRIDE_FILE
+    saved_var = os.environ.get("REGEN_LIBRARY")
+    os.environ.pop("REGEN_LIBRARY", None)
+    o.ENV_FILE, o.OVERRIDE_FILE = env_file, ov_file
+    try:
+        with open(env_file, "w", encoding="utf-8") as fh:
+            fh.write("TARGET_LANGS=id\n")
+        with open(ov_file, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        assert o.load_config()["REGEN_LIBRARY"] is False, "absent -> off"
+        for truthy in ("true", "1", "yes", "True", "YES"):
+            with open(env_file, "w", encoding="utf-8") as fh:
+                fh.write(f"TARGET_LANGS=id\nREGEN_LIBRARY={truthy}\n")
+            assert o.load_config()["REGEN_LIBRARY"] is True, truthy
+        with open(env_file, "w", encoding="utf-8") as fh:
+            fh.write("TARGET_LANGS=id\nREGEN_LIBRARY=true\n")
+        with open(ov_file, "w", encoding="utf-8") as fh:
+            json.dump({"REGEN_LIBRARY": "0"}, fh)
+        assert o.load_config()["REGEN_LIBRARY"] is False, "overrides win"
+        os.environ["REGEN_LIBRARY"] = "yes"
+        assert o.load_config()["REGEN_LIBRARY"] is True, "env wins"
+        os.environ["REGEN_LIBRARY"] = "1"
+        assert o.load_config()["REGEN_LIBRARY"] is True
+        os.environ["REGEN_LIBRARY"] = "false"
+        assert o.load_config()["REGEN_LIBRARY"] is False
+    finally:
+        o.ENV_FILE, o.OVERRIDE_FILE = saved_env, saved_ov
+        if saved_var is None:
+            os.environ.pop("REGEN_LIBRARY", None)
+        else:
+            os.environ["REGEN_LIBRARY"] = saved_var
+    print("PASS regen_flag_parsing")
+
+
+def test_regen_off_no_candidates():
+    """REGEN_LIBRARY off: state-done pairs add nothing — only the wanted
+    episode is processed, and no regen logs appear."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {
+        101: _mk_regen_info(d, "Ep101.mkv", 1),
+        202: _mk_regen_info(d, "Ep202.mkv", 2),
+    }
+    wanted = [
+        {
+            "sonarrEpisodeId": 101,
+            "seriesTitle": "TestShow",
+            "missing_subtitles": [{"code2": "id"}],
+        }
+    ]
+    state = [{"sonarrEpisodeId": 202, "language": "id", "status": "done"}]
+    stats, mocks = _run_pass_regen(d, infos, wanted=wanted, state=state, regen=False)
+    assert [a[2] for a in mocks["submit"]] == [101], mocks["submit"]
+    assert stats["processed"] == 1 and stats["done"] == 1, stats
+    assert not any(line.startswith("regen: ") for line in mocks["log"]), mocks["log"]
+    print("PASS regen_off_no_candidates")
+
+
+def test_regen_candidates_from_state():
+    """REGEN_LIBRARY on: the latest state-done (ep, lang) pair per key becomes
+    a candidate (only TARGET_LANGS, only status=done, latest row wins);
+    wanted candidates are unaffected; the pass summary counts regen items."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {
+        101: _mk_regen_info(d, "Ep101.mkv", 1),
+        202: _mk_regen_info(d, "Ep202.mkv", 2),
+        303: _mk_regen_info(d, "Ep303.mkv", 3),
+        404: _mk_regen_info(d, "Ep404.mkv", 4),
+    }
+    wanted = [
+        {
+            "sonarrEpisodeId": 101,
+            "seriesTitle": "TestShow",
+            "missing_subtitles": [{"code2": "id"}],
+        }
+    ]
+    state = [
+        {"sonarrEpisodeId": 101, "language": "id", "status": "done"},
+        {"sonarrEpisodeId": 202, "language": "id", "status": "error", "seriesTitle": "TestShow"},  # superseded
+        {"sonarrEpisodeId": 202, "language": "id", "status": "done", "seriesTitle": "TestShow"},
+        {"sonarrEpisodeId": 202, "language": "en", "status": "done", "seriesTitle": "TestShow"},
+        {"sonarrEpisodeId": 303, "language": "id", "status": "error"},
+        {"sonarrEpisodeId": 404, "language": "fr", "status": "done"},
+    ]
+    stats, mocks = _run_pass_regen(
+        d, infos, wanted=wanted, state=state, regen=True, target_langs=["id", "en"]
+    )
+    assert stats["done"] == 3 and stats["failed"] == 0, stats
+    submits = sorted((a[2], a[3]) for a in mocks["submit"])
+    assert submits == [(101, "id"), (202, "en"), (202, "id")], submits
+    assert len(mocks["probe"]) == 3
+    assert any(
+        "regen candidates=2" in line for line in mocks["log"]
+    ), mocks["log"]
+    assert any(
+        "regen: process S01E02 TestShow [id]" in line for line in mocks["log"]
+    ), mocks["log"]
+    assert any(
+        "regen: process S01E02 TestShow [en]" in line for line in mocks["log"]
+    ), mocks["log"]
+    assert not any(
+        "regen: process S01E01" in line for line in mocks["log"]
+    ), "wanted item must not be logged as regen"
+    print("PASS regen_candidates_from_state")
+
+
+def test_regen_cap_wanted_priority():
+    """MAX_EPS_PER_RUN caps the combined list with wanted candidates first:
+    regen pairs only fill leftover slots."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {
+        ep: _mk_regen_info(d, f"Ep{ep}.mkv", ep) for ep in (101, 102, 103, 201, 202)
+    }
+    wanted = [
+        {
+            "sonarrEpisodeId": ep,
+            "seriesTitle": "TestShow",
+            "missing_subtitles": [{"code2": "id"}],
+        }
+        for ep in (101, 102, 103)
+    ]
+    state = [
+        {"sonarrEpisodeId": 201, "language": "id", "status": "done"},
+        {"sonarrEpisodeId": 202, "language": "id", "status": "done"},
+    ]
+    stats, mocks = _run_pass_regen(
+        d, infos, wanted=wanted, state=state, regen=True, max_eps=4
+    )
+    assert [a[2] for a in mocks["submit"]] == [101, 102, 103, 201], mocks["submit"]
+    assert stats["done"] == 4, stats
+    stats, mocks = _run_pass_regen(
+        d, infos, wanted=wanted, state=state, regen=True, max_eps=2
+    )
+    assert [a[2] for a in mocks["submit"]] == [101, 102], mocks["submit"]
+    assert stats["done"] == 2, stats
+    print("PASS regen_cap_wanted_priority")
+
+
+def test_regen_bypasses_done_and_id_skip():
+    """A regen item is processed despite a state-done row AND despite an
+    existing target-lang id sidecar (target_sidecar_exists monkeypatched to
+    return a path): the ID-skip must not even run for regen items."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {101: _mk_regen_info(d, "Ep101.mkv", 1)}
+    state = [
+        {
+            "sonarrEpisodeId": 101,
+            "language": "id",
+            "status": "done",
+            "seriesTitle": "TestShow",
+        }
+    ]
+    sidecar = os.path.join(d, "Ep101.id.srt")
+    open(sidecar, "w").close()
+    stats, mocks = _run_pass_regen(
+        d, infos, wanted=[], state=state, regen=True, sidecar=sidecar
+    )
+    assert stats["done"] == 1 and stats["skipped"] == 0, stats
+    assert len(mocks["probe"]) == 1 and len(mocks["submit"]) == 1
+    assert mocks["submit"][0][2] == 101 and mocks["submit"][0][3] == "id"
+    assert not mocks["sidecar_calls"], "ID-skip must not run for regen items"
+    assert not mocks["state_writes"], "no state write in dry run"
+    assert any(
+        "regen: process S01E01 TestShow [id]" in line for line in mocks["log"]
+    ), mocks["log"]
+    print("PASS regen_bypasses_done_and_id_skip")
+
+
+def test_regen_registry_idempotence():
+    """A regen item whose (stem, lang) already has a registry row sourced
+    asr/jpn/eng is skipped (resumable drain); embedded/external rows describe
+    other files and do NOT block."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    infos = {101: _mk_regen_info(d, "Ep101.mkv", 1)}
+    state = [{"sonarrEpisodeId": 101, "language": "id", "status": "done"}]
+    stem = os.path.splitext(infos[101]["episodeFile"]["path"])[0]
+    for src in ("asr", "jpn", "eng"):
+        stats, mocks = _run_pass_regen(
+            d,
+            infos,
+            wanted=[],
+            state=state,
+            regen=True,
+            registry_rows=[{"stem": stem, "lang": "id", "source": src}],
+        )
+        assert stats["done"] == 0 and stats["failed"] == 0, (src, stats)
+        assert stats["skipped"] == 1, (src, stats)
+        assert not mocks["probe"], (src, "must not probe a registered episode")
+        assert not mocks["submit"]
+        assert any(
+            f"already registered ({src})" in line for line in mocks["log"]
+        ), (src, mocks["log"])
+    for src in ("embedded", "external"):
+        stats, mocks = _run_pass_regen(
+            d,
+            infos,
+            wanted=[],
+            state=state,
+            regen=True,
+            registry_rows=[{"stem": stem, "lang": "id", "source": src}],
+        )
+        assert stats["done"] == 1 and stats["skipped"] == 0, (src, stats)
+        assert len(mocks["probe"]) == 1, (src, "must process despite the row")
+        assert len(mocks["submit"]) == 1
+        assert not any("already registered" in line for line in mocks["log"])
+    print("PASS regen_registry_idempotence")
+
+
+
 
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
