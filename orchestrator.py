@@ -2124,6 +2124,26 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         if hit:
             return hit
 
+    # audio-language guard: Japanese audio must never be eng->ja translated;
+    # fall through to ASR (SenseVoice transcribes Japanese natively)
+    try:
+        ja_audio = any(
+            (s.get("tags") or {}).get("language") in ("jpn", "ja", "jp")
+            for s in probe_audio(media_path)
+        )
+    except Exception as exc:
+        log(f"ladder: audio probe failed ({exc}); falling through to eng rungs")
+        ja_audio = False
+    if ja_audio:
+        return {
+            "kind": "asr",
+            "source_path": None,
+            "source_hash": None,
+            "cues": None,
+            "duration_s": duration,
+            "tmp": False,
+        }
+
     # (b) eng
     for cand in (stem + ".eng.srt",):
         if os.path.isfile(cand):
