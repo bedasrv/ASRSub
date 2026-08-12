@@ -9,7 +9,8 @@ Frozen public surface (cross-track contract with the rewrite track):
         .handle(method, path, body=None, token=None)   # in-process dispatch
 
 Endpoints (all JSON; errors as {"error": ...}):
-    GET  /api2/status     pipeline state + GPU + llama-server + queue depth + per-episode progress
+    GET  /api2/status     pipeline state + GPU + llama-server + queue depth + per-episode progress + registry summary
+    GET  /api2/provenance subtitle_registry.jsonl totals (embedded/external), per-language breakdown, recent rows
     GET  /api2/activity   state.jsonl tail + Bazarr history merged, newest first, episode titles
     GET  /api2/wanted     Bazarr wanted list with quality flags + missing langs + per-episode state
     GET  /api2/library    Bazarr wanted + state + exclusions merged, one item per episode
@@ -74,6 +75,7 @@ CFG_DIR = os.path.join(os.path.expanduser("~"), ".config", "asr-pipeline")
 ENV_FILE = os.path.join(CFG_DIR, "pipeline.env")
 OVERRIDE_FILE = os.path.join(CFG_DIR, "config.overrides.json")
 STATE_FILE = os.path.join(CFG_DIR, "state.jsonl")
+REGISTRY_FILE = os.path.join(CFG_DIR, "subtitle_registry.jsonl")
 REFINE_FILE = os.path.join(CFG_DIR, "refine_state.jsonl")
 ACTIONS_FILE = os.path.join(CFG_DIR, "actions.jsonl")
 EXCLUSIONS_FILE = os.path.join(CFG_DIR, "exclusions.jsonl")
@@ -183,6 +185,7 @@ class ControlAPIv2:
         "ENV_FILE": ENV_FILE,
         "OVERRIDE_FILE": OVERRIDE_FILE,
         "STATE_FILE": STATE_FILE,
+        "REGISTRY_FILE": REGISTRY_FILE,
         "REFINE_FILE": REFINE_FILE,
         "ACTIONS_FILE": ACTIONS_FILE,
         "EXCLUSIONS_FILE": EXCLUSIONS_FILE,
@@ -215,6 +218,7 @@ class ControlAPIv2:
         )
         self.endpoints = {
             "/api2/status": self._h_status,
+            "/api2/provenance": self._h_provenance,
             "/api2/activity": self._h_activity,
             "/api2/wanted": self._h_wanted,
             "/api2/library": self._h_library,
@@ -358,6 +362,83 @@ class ControlAPIv2:
                 if lcur is None or (new_epoch or -1) >= (lcur_epoch or -1):
                     latest_by_lang[key] = e
         return entries, latest, latest_by_lang
+
+    def _registry(self):
+        """subtitle_registry.jsonl rows, cached with a TTL like the state
+        reader. The ledger is append-only and a row describes the CURRENT
+        on-disk {stem}.{lang}.srt sidecar, so the last row per key wins;
+        legacy rows without a stem fall back to (episode_id, lang). Missing
+        or unreadable file yields [] and never raises."""
+
+        def _fn():
+            rows = []
+            try:
+                with open(self.opts["REGISTRY_FILE"], encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except Exception:
+                            continue
+                        if isinstance(e, dict):
+                            rows.append(e)
+            except OSError:
+                pass
+            by_key = {}
+            for r in rows:
+                lang = r.get("lang")
+                if not lang:
+                    continue
+                stem = r.get("stem")
+                if stem:
+                    by_key[(stem, lang)] = r
+                    continue
+                eid = r.get("episode_id")
+                if isinstance(eid, int):
+                    by_key[("ep", eid, lang)] = r
+            return list(by_key.values())
+
+        return self._cached("registry", 10, _fn)
+
+    def _registry_summary(self, rows=None):
+        """Counts over registry rows by source_kind (embedded / external /
+        unknown) plus a per-language breakdown. `rows` may be passed in to
+        reuse a single read across endpoints."""
+        if rows is None:
+            rows = self._registry()
+        totals = {"rows": len(rows), "embedded": 0, "external": 0, "unknown_kind": 0}
+        by_lang = {}
+        for r in rows:
+            kind = r.get("source_kind")
+            if kind == "embedded":
+                totals["embedded"] += 1
+            elif kind == "external":
+                totals["external"] += 1
+            else:
+                totals["unknown_kind"] += 1
+            lang = r.get("lang") or "unknown"
+            entry = by_lang.setdefault(lang, {"embedded": 0, "external": 0, "total": 0})
+            if kind == "embedded":
+                entry["embedded"] += 1
+            elif kind == "external":
+                entry["external"] += 1
+            entry["total"] += 1
+        return totals, by_lang
+
+    def _registry_stems(self, path):
+        """Candidate registry stems for a media path: the path itself with
+        the extension stripped, plus the /data/... container path mapped onto
+        NAS_MEDIA_ROOT (the tdarr webhook records NAS paths, Sonarr reports
+        container paths)."""
+        if not isinstance(path, str) or not path:
+            return []
+        stems = [os.path.splitext(path)[0]]
+        root = self.opts.get("NAS_MEDIA_ROOT", "/mnt/nas/share/media").rstrip("/")
+        if path.startswith("/data/"):
+            stems.append(os.path.splitext(root + path[len("/data"):])[0])
+        return stems
 
     def _refine_latest(self):
         latest = {}
@@ -692,6 +773,33 @@ class ControlAPIv2:
     def _h_health(self, body, id=None):
         return 200, {"ok": True}
 
+    def _h_provenance(self, body, id=None):
+        rows = self._registry()
+        totals, by_lang = self._registry_summary(rows)
+        recent = sorted(
+            rows, key=lambda r: (_parse_ts(r.get("ts")) or 0), reverse=True
+        )[:20]
+        recent_out = []
+        for r in recent:
+            stem = r.get("stem") or ""
+            recent_out.append(
+                {
+                    "basename": os.path.basename(stem) or stem,
+                    "lang": r.get("lang"),
+                    "source_kind": r.get("source_kind"),
+                    "source": r.get("source"),
+                    "ts": r.get("ts"),
+                    "audio_short": (r.get("audio_id") or "")[:8],
+                }
+            )
+        return 200, {
+            "totals": totals,
+            "by_lang": by_lang,
+            "recent": recent_out,
+            "registry_path": self.opts["REGISTRY_FILE"],
+            "updated_at": _now_iso(),
+        }
+
     def _h_config(self, body, id=None):
         return 200, self._mask(self._env())
 
@@ -755,7 +863,20 @@ class ControlAPIv2:
             "queue": {"wanted": wanted.get("total", 0)},
             "gpu": gpu,
             "llama": llama,
+            "registry": self._registry_block(),
             "episodes": episodes,
+        }
+
+    def _registry_block(self):
+        """Registry summary block for /api2/status ({rows, embedded,
+        external, by_lang}); reuses the same reader as /api2/provenance."""
+        totals, by_lang = self._registry_summary()
+        return {
+            "rows": totals["rows"],
+            "embedded": totals["embedded"],
+            "external": totals["external"],
+            "unknown_kind": totals["unknown_kind"],
+            "by_lang": by_lang,
         }
 
     def _h_activity(self, body, id=None):
@@ -897,12 +1018,22 @@ class ControlAPIv2:
             if isinstance(r.get("episode_id"), int)
         }
         ep_ids = {eid for eid in (set(wanted_by_id) | set(latest) | excluded_ids) if isinstance(eid, int)}
+        reg_rows = self._registry()
         detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id]
+        if reg_rows:
+            # registry has rows: also resolve media paths for wanted items so
+            # prov labels can match by stem (ep_detail is cached 300s)
+            detail_ids = [eid for eid in ep_ids]
         details = {}
         if detail_ids:
             with ThreadPoolExecutor(max_workers=8) as ex:
                 for eid, det in zip(detail_ids, ex.map(self._ep_detail, detail_ids)):
                     details[eid] = det
+        reg_by_stem = {}
+        for r in reg_rows:
+            stem, lang = r.get("stem"), r.get("lang")
+            if stem and lang:
+                reg_by_stem.setdefault(stem, {})[lang] = r
         langs = {}
         for (eid, lang), rec in latest_by_lang.items():
             langs.setdefault(eid, {})[lang] = {
@@ -945,6 +1076,31 @@ class ControlAPIv2:
                 epnum = det.get("episode_number")
             if w is None and not series:
                 continue  # ghost: episode deleted from Sonarr, not wanted
+            det = details.get(eid) or {}
+            stem_cands = self._registry_stems(det.get("path"))
+            lang_entries = []
+            for lang, st in sorted(langs.get(eid, {}).items()):
+                entry = {
+                    "language": lang,
+                    "status": st["status"],
+                    "ts": st["ts"],
+                    "elapsed_s": st["elapsed_s"],
+                }
+                src = st.get("source")
+                rec = None
+                for stem in stem_cands:
+                    rec = reg_by_stem.get(stem, {}).get(lang)
+                    if rec:
+                        break
+                if rec:
+                    prov = rec.get("source_kind")
+                    if prov:
+                        entry["prov"] = prov
+                    if src is None:
+                        src = rec.get("source")
+                if src:
+                    entry["source"] = src
+                lang_entries.append(entry)
             items.append(
                 {
                     "sonarr_episode_id": eid,
@@ -954,15 +1110,7 @@ class ControlAPIv2:
                     "season": season,
                     "episode_number": epnum,
                     "wanted": eid in wanted_by_id,
-                    "languages": [
-                        {
-                            "language": lang,
-                            "status": st["status"],
-                            "ts": st["ts"],
-                            "elapsed_s": st["elapsed_s"],
-                        }
-                        for lang, st in sorted(langs.get(eid, {}).items())
-                    ],
+                    "languages": lang_entries,
                 }
             )
         items.sort(

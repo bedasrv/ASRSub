@@ -5,20 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ASRSub</title>
 <style>
-/* ============ Material 3 design tokens ============ */
+/* ============ Catppuccin design tokens (Latte light / Mocha dark) ============ */
 :root {
   color-scheme: light;
-  --primary: #4355b9; --on-primary: #ffffff; --primary-container: #dfe0ff; --on-primary-container: #00105c;
-  --secondary: #5b5d72; --on-secondary: #ffffff; --secondary-container: #dfe0f9; --on-secondary-container: #171a2c;
-  --tertiary: #76556b; --on-tertiary: #ffffff; --tertiary-container: #ffd8e4; --on-tertiary-container: #2c1223;
-  --error: #ba1a1a; --on-error: #ffffff; --error-container: #ffdad6; --on-error-container: #410002;
-  --surface: #fef7ff; --on-surface: #1c1b1f;
-  --surface-variant: #e3e0ec; --on-surface-variant: #49454f;
-  --surface-container-low: #f7f2fa; --surface-container: #f3edf7; --surface-container-high: #ece6f0;
-  --outline: #79747e; --outline-variant: #cac4d0;
+  --primary: #1e66f5; --on-primary: #ffffff; --primary-container: #bbcef5; --on-primary-container: #1e66f5;
+  --secondary: #179299; --on-secondary: #ffffff; --secondary-container: #b9d9de; --on-secondary-container: #0c6a70;
+  --tertiary: #ea76cb; --on-tertiary: #4c4f69; --tertiary-container: #eed2eb; --on-tertiary-container: #8839ef;
+  --error: #d20f39; --on-error: #ffffff; --error-container: #e8b9c6; --on-error-container: #5f0d20;
+  --surface: #eff1f5; --on-surface: #4c4f69;
+  --surface-variant: #bcc0cc; --on-surface-variant: #8c8fa1;
+  --surface-container-low: #e6e9ef; --surface-container: #ccd0da; --surface-container-high: #bcc0cc;
+  --outline: #9ca0b0; --outline-variant: #bcc0cc;
   --divider: var(--outline-variant);
-  --inverse-surface: #313033; --inverse-on-surface: #f4eff4;
-  --ok: #2e7d32; --run: #b26a00;
+  --inverse-surface: #4c4f69; --inverse-on-surface: #eff1f5;
+  --ok: #40a02b; --run: #df8e1d;
   --r-s: 8px; --r-m: 12px; --r-l: 16px; --r-xl: 28px; --r-full: 999px;
   --sh1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
   --sh2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
@@ -31,30 +31,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --primary: #bec2ff; --on-primary: #16255c; --primary-container: #2b3a94; --on-primary-container: #dfe0ff;
-    --secondary: #c3c5de; --on-secondary: #2c2f42; --secondary-container: #424559; --on-secondary-container: #dfe0f9;
-    --tertiary: #e6bad0; --on-tertiary: #44273a; --tertiary-container: #5d3d53; --on-tertiary-container: #ffd8e4;
-    --error: #ffb4ab; --on-error: #690005; --error-container: #93000a; --on-error-container: #ffdad6;
-    --surface: #141218; --on-surface: #e6e0e9;
-    --surface-variant: #49454f; --on-surface-variant: #cac4d0;
-    --surface-container-low: #1d1b21; --surface-container: #211f26; --surface-container-high: #2b2930;
-    --outline: #938f99; --outline-variant: #49454f;
-    --inverse-surface: #e6e0e9; --inverse-on-surface: #322f35;
-    --ok: #81c995; --run: #ffb86b;
+    --primary: #cba6f7; --on-primary: #1e1e2e; --primary-container: #494060; --on-primary-container: #cdd6f4;
+    --secondary: #94e2d5; --on-secondary: #1e1e2e; --secondary-container: #45475a; --on-secondary-container: #cdd6f4;
+    --tertiary: #f5c2e7; --on-tertiary: #1e1e2e; --tertiary-container: #54475c; --on-tertiary-container: #f5c2e7;
+    --error: #f38ba8; --on-error: #3b0a16; --error-container: #53394d; --on-error-container: #f5e0dc;
+    --surface: #1e1e2e; --on-surface: #cdd6f4;
+    --surface-variant: #45475a; --on-surface-variant: #7f849c;
+    --surface-container-low: #181825; --surface-container: #313244; --surface-container-high: #45475a;
+    --outline: #6c7086; --outline-variant: #45475a;
+    --inverse-surface: #cdd6f4; --inverse-on-surface: #1e1e2e;
+    --ok: #a6e3a1; --run: #f9e2af;
   }
 }
 html[data-theme="dark"] {
   color-scheme: dark;
-  --primary: #bec2ff; --on-primary: #16255c; --primary-container: #2b3a94; --on-primary-container: #dfe0ff;
-  --secondary: #c3c5de; --on-secondary: #2c2f42; --secondary-container: #424559; --on-secondary-container: #dfe0f9;
-  --tertiary: #e6bad0; --on-tertiary: #44273a; --tertiary-container: #5d3d53; --on-tertiary-container: #ffd8e4;
-  --error: #ffb4ab; --on-error: #690005; --error-container: #93000a; --on-error-container: #ffdad6;
-  --surface: #141218; --on-surface: #e6e0e9;
-  --surface-variant: #49454f; --on-surface-variant: #cac4d0;
-  --surface-container-low: #1d1b21; --surface-container: #211f26; --surface-container-high: #2b2930;
-  --outline: #938f99; --outline-variant: #49454f;
-  --inverse-surface: #e6e0e9; --inverse-on-surface: #322f35;
-  --ok: #81c995; --run: #ffb86b;
+  --primary: #cba6f7; --on-primary: #1e1e2e; --primary-container: #494060; --on-primary-container: #cdd6f4;
+  --secondary: #94e2d5; --on-secondary: #1e1e2e; --secondary-container: #45475a; --on-secondary-container: #cdd6f4;
+  --tertiary: #f5c2e7; --on-tertiary: #1e1e2e; --tertiary-container: #54475c; --on-tertiary-container: #f5c2e7;
+  --error: #f38ba8; --on-error: #3b0a16; --error-container: #53394d; --on-error-container: #f5e0dc;
+  --surface: #1e1e2e; --on-surface: #cdd6f4;
+  --surface-variant: #45475a; --on-surface-variant: #7f849c;
+  --surface-container-low: #181825; --surface-container: #313244; --surface-container-high: #45475a;
+  --outline: #6c7086; --outline-variant: #45475a;
+  --inverse-surface: #cdd6f4; --inverse-on-surface: #1e1e2e;
+  --ok: #a6e3a1; --run: #f9e2af;
 }
 
 * { box-sizing: border-box; }
@@ -154,6 +154,10 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.pending { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .t-pill.excluded, .t-pill.new { background: var(--surface-variant); color: var(--on-surface-variant); }
 .t-pill.ai { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
+.prov-external { background: var(--run); color: var(--inverse-on-surface); }
+.prov-unknown { background: var(--surface-variant); color: var(--on-surface-variant); }
+.prov-langchip { background: var(--secondary-container); color: var(--on-secondary-container); }
 
 /* ============ Status page ============ */
 .gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px; }
@@ -457,6 +461,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
       <div id="gpu-body"><div class="muted">loading…</div></div>
       <div class="sec-title">Model</div>
       <div id="model-body"><div class="muted">loading…</div></div>
+      <div class="sec-title">Subtitle Provenance</div>
+      <div id="prov-body"><div class="muted">loading…</div></div>
     </section>
 
     <!-- ============ Settings ============ -->
@@ -736,6 +742,71 @@ async function pollStatus() {
   }
 }
 
+/* ============ Subtitle provenance (status page) ============ */
+function midEllipsis(s, max) {
+  s = s == null ? "" : String(s);
+  if (s.length <= max) return esc(s);
+  const keep = Math.floor((max - 1) / 2);
+  return esc(s.slice(0, keep)) + "…" + esc(s.slice(s.length - keep));
+}
+
+function provKindChip(r) {
+  const kind = r.source_kind || r.source || "unknown";
+  const cls = r.source_kind === "embedded" ? "prov-embedded" : r.source_kind === "external" ? "prov-external" : "prov-unknown";
+  return '<span class="t-pill ' + cls + '">' + esc(kind) + "</span>";
+}
+
+function renderProvenance(data) {
+  const el = document.getElementById("prov-body");
+  if (!el) return;
+  const tot = data.totals || {};
+  const chips = [];
+  if (tot.rows) {
+    chips.push('<span class="pill">' + esc(tot.rows) + " registry rows</span>");
+    chips.push('<span class="pill"><span class="dot up"></span>' + esc(tot.embedded ?? 0) + " embedded</span>");
+    chips.push('<span class="pill"><span class="dot running"></span>' + esc(tot.external ?? 0) + " external</span>");
+  }
+  let langHtml = "";
+  const byLang = data.by_lang || {};
+  const langNames = Object.keys(byLang).sort();
+  if (langNames.length) {
+    langHtml = '<div class="pills" style="margin-top:8px">' + langNames.map(function (lg) {
+      const e = byLang[lg] || {};
+      return '<span class="chip prov-langchip">' + esc(lg) + ": " + esc(e.embedded ?? 0) + " embedded / " + esc(e.external ?? 0) + " external</span>";
+    }).join("") + "</div>";
+  }
+  const recent = data.recent || [];
+  let feed = "";
+  if (!recent.length) {
+    feed = '<div class="empty">no extractions yet</div>';
+  } else {
+    feed = recent.map(function (r) {
+      const rt = relTime(r.ts);
+      return '<div class="f-row">' +
+        '<div class="f-left">' +
+        '<div class="f-title" style="font-size:12px" title="' + esc(r.basename || "") + '">' + midEllipsis(r.basename, 64) + "</div>" +
+        "</div>" +
+        '<div class="f-right"><div class="fr-line1">' +
+        (r.lang ? '<span class="t-pill prov-langchip">' + esc(r.lang) + "</span>" : "") +
+        provKindChip(r) +
+        (rt ? '<span class="muted" style="font:var(--t-bs)">' + rt + "</span>" : "") +
+        "</div></div></div>";
+    }).join("");
+  }
+  el.innerHTML =
+    (chips.length ? '<div class="pills">' + chips.join("") + "</div>" : "") +
+    langHtml +
+    '<div class="sec-title">Recent extractions</div>' + feed;
+}
+
+async function pollProvenance() {
+  try {
+    const { status, data } = await api("/api2/provenance");
+    if (status !== 200) return;
+    renderProvenance(data);
+  } catch (e) {}
+}
+
 /* ============ Library page ============ */
 let libraryItems = {};
 let libraryExcluded = {};
@@ -773,7 +844,9 @@ function selectAll(on) {
 function langChip(l) {
   const st = l.status || "wanted";
   const cls = st === "done" ? "done" : st === "error" ? "error" : st === "excluded" ? "excluded" : "wanted";
-  return '<span class="lang-badge ' + cls + '">' + esc(l.language) + (st === "done" ? " ✓" : "") + "</span>";
+  const src = l.prov || l.source || "";
+  const label = l.language + (src ? " · " + String(src).toUpperCase() : "");
+  return '<span class="lang-badge ' + cls + '">' + esc(label) + (st === "done" ? " ✓" : "") + "</span>";
 }
 
 let libQuery = "";
@@ -832,7 +905,7 @@ function libMatches(it, q) {
   if (q) {
     const hay = [
       it.series, it.episode, it.title, it.sonarr_episode_id,
-      (it.languages || []).map(function (l) { return l.language; }).join(" "),
+      (it.languages || []).map(function (l) { return l.language + " " + (l.prov || l.source || ""); }).join(" "),
     ].join(" ").toLowerCase();
     if (hay.indexOf(q) < 0) return false;
   }
@@ -1243,7 +1316,7 @@ async function loadControlConfig() {
     const keys = DEFAULT_KEYS.concat(Object.keys(data).sort()).filter(function (k, i, a) {
       return a.indexOf(k) === i;
     });
-    let html = '<table><tr><th>Key</th><th>Value</th><th></th></tr>';
+    let html = '<table>';
     for (const k of keys) html += ctlRow(k, data[k] != null ? data[k] : "");
     html += '<tr><td><input type="text" id="ctl-new-key" placeholder="KEY" style="max-width:140px"></td>' +
       '<td><input type="text" id="ctl-new-val" placeholder="VALUE"></td>' +
@@ -1304,8 +1377,10 @@ async function unsetConfigKey(key) {
 
 showPage("library");
 pollStatus();
+pollProvenance();
 pollLists();
 setInterval(pollStatus, 5000);
+setInterval(pollProvenance, 5000);
 setInterval(pollLists, 20000);
 </script>
 </body>
