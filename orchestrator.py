@@ -573,6 +573,23 @@ def registry_get(stem, lang, ep_id=None, media_path=None):
     return latest
 
 
+def registry_by_episode(ep_id, lang):
+    """Latest registry row for (episode_id, lang) or None. By-episode lookup
+    (no Sonarr calls needed): the regen flow writes episode_id on both the
+    ASR and ladder paths, so regen candidates can be filtered BEFORE the
+    MAX_EPS_PER_RUN cap and the drain advances to the next unregistered
+    pairs each pass."""
+    latest = None
+    for rec in load_records_jsonl(REGISTRY_FILE):
+        if (
+            rec.get("lang") == lang
+            and isinstance(rec.get("episode_id"), int)
+            and rec.get("episode_id") == ep_id
+        ):
+            latest = rec
+    return latest
+
+
 def registry_upsert(
     stem,
     lang,
@@ -2902,6 +2919,9 @@ def run_pass():
                 continue
             if ep_id in excluded or ep_id in seen:
                 continue  # wanted already covers this episode this pass
+            registered = registry_by_episode(ep_id, lang)
+            if registered and registered.get("source") in ("asr", "jpn", "eng"):
+                continue  # already registered: leave the slot for unregistered pairs
             regen_items.append(
                 {
                     "sonarrEpisodeId": ep_id,
