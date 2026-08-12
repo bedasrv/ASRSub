@@ -1277,36 +1277,6 @@ def _run_result(rc, stdout="", stderr=""):
     return r
 
 
-def _shift_srt(inp, out, shift_s):
-    """Rewrite inp's SRT cues shifted by shift_s seconds into out."""
-    with open(inp, encoding="utf-8") as fh:
-        text = fh.read()
-    lines = []
-    for i, c in enumerate(o.parse_srt(text), 1):
-        s = o.srt_ts_ms(c["start"]) + shift_s * 1000.0
-        e = o.srt_ts_ms(c["end"]) + shift_s * 1000.0
-        lines.append(f"{i}\n{o._fmt_ms(s)} --> {o._fmt_ms(e)}\n{c['text']}\n")
-    with open(out, "w", encoding="utf-8") as fh:
-        fh.write("\n\n".join(lines) + "\n")
-
-
-def _fake_ffs_run(shift_s=0.0, calls=None):
-    """subprocess.run fake for the alignment gate: 'ffmpeg' writes a fixed
-    SRT (stands in for ass->srt conversion), 'ffs' writes the aligned output
-    shifted by shift_s seconds; anything else fails."""
-    def fake(cmd, **kw):
-        if calls is not None:
-            calls.append(cmd[0])
-        if cmd[0] == "ffmpeg":
-            _write_srt(cmd[-1], [(1000, 1800, "テストです。"), (2000, 2800, "はい、そうです。")])
-            return _run_result(0)
-        if cmd[0] == "ffs":
-            _shift_srt(cmd[cmd.index("-i") + 1], cmd[cmd.index("-o") + 1], shift_s)
-            return _run_result(0)
-        return _run_result(1)
-    return fake
-
-
 def test_ladder_align_skipped_for_embedded():
     """Trusted sidecar skips the gate: the registry row for (stem, jpn) is
     source_kind 'embedded' with an audio_id matching the current video and a
@@ -1512,11 +1482,12 @@ def test_webhook_dedup_skips_unchanged():
     print("PASS webhook_dedup_skips_unchanged")
 
 
-def test_ladder_clobbered_sidecar_gated():
+def test_ladder_clobbered_sidecar_retimed():
     """Clobbered sidecar: the row says embedded and the audio matches, but the
     on-disk sidecar content hash differs from the row's source_hash (Bazarr
-    overwrote the webhook extraction) -> NOT trusted, the alignment gate runs
-    and the clobbered reason is logged."""
+    overwrote the webhook extraction) -> NOT trusted, the re-timing gate runs;
+    when the ASR anchor probe fails the sidecar is used as-is (never a
+    mis-timed reject) and the clobbered reason is logged."""
     import contextlib
     import io
     import tempfile
@@ -1531,7 +1502,7 @@ def test_ladder_clobbered_sidecar_gated():
     saved_extract = o.extract_embedded_subtitle
     saved_bazarr = o.bazarr_jpn_candidate
     saved_probe = o.probe_audio
-    saved_avail = o._ffsubsync_available
+    saved_cache_get = o.asr_cache_get
     fake_streams = o._AudioStreams(
         [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
           "channel_layout": "stereo", "duration": "60.0"}]
@@ -1549,7 +1520,7 @@ def test_ladder_clobbered_sidecar_gated():
         }) + "\n")
     o.extract_embedded_subtitle = lambda *a, **k: False
     o.bazarr_jpn_candidate = lambda *a, **k: None
-    o._ffsubsync_available = lambda: True
+    o.asr_cache_get = lambda *a, **k: None
     calls = []
 
     def spy(cmd, **kw):
@@ -1563,24 +1534,26 @@ def test_ladder_clobbered_sidecar_gated():
         cfg["ALIGN_ENABLED"] = "true"
         with contextlib.redirect_stdout(buf):
             v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
-        assert v["kind"] == "asr", v
-        assert "ffs" in calls, calls
+        assert v["kind"] == "jpn", v
+        assert "ffs" not in calls, calls
         assert "clobbered" in buf.getvalue(), buf.getvalue()
+        assert v.get("align_stats", {}).get("method") is None, v
     finally:
         o.REGISTRY_FILE = saved_reg
         o.subprocess.run = saved_run
         o.extract_embedded_subtitle = saved_extract
         o.bazarr_jpn_candidate = saved_bazarr
         o.probe_audio = saved_probe
-        o._ffsubsync_available = saved_avail
-    print("PASS ladder_clobbered_sidecar_gated")
+        o.asr_cache_get = saved_cache_get
+    print("PASS ladder_clobbered_sidecar_retimed")
 
 
-def test_ladder_stale_sidecar_gated():
+def test_ladder_stale_sidecar_retimed():
     """Stale sidecar: the row says embedded and the on-disk hash matches, but
     the row's audio_id differs from the CURRENT video's audio signature
-    (sidecar left behind by a Sonarr upgrade) -> NOT trusted, the alignment
-    gate runs and the stale reason is logged."""
+    (sidecar left behind by a Sonarr upgrade) -> NOT trusted, the re-timing
+    gate runs; an anchor-probe failure uses the sidecar as-is and the stale
+    reason is logged."""
     import contextlib
     import io
     import tempfile
@@ -1595,7 +1568,7 @@ def test_ladder_stale_sidecar_gated():
     saved_extract = o.extract_embedded_subtitle
     saved_bazarr = o.bazarr_jpn_candidate
     saved_probe = o.probe_audio
-    saved_avail = o._ffsubsync_available
+    saved_cache_get = o.asr_cache_get
     fake_streams = o._AudioStreams(
         [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
           "channel_layout": "stereo", "duration": "60.0"}]
@@ -1613,7 +1586,7 @@ def test_ladder_stale_sidecar_gated():
         }) + "\n")
     o.extract_embedded_subtitle = lambda *a, **k: False
     o.bazarr_jpn_candidate = lambda *a, **k: None
-    o._ffsubsync_available = lambda: True
+    o.asr_cache_get = lambda *a, **k: None
     calls = []
 
     def spy(cmd, **kw):
@@ -1627,17 +1600,18 @@ def test_ladder_stale_sidecar_gated():
         cfg["ALIGN_ENABLED"] = "true"
         with contextlib.redirect_stdout(buf):
             v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
-        assert v["kind"] == "asr", v
-        assert "ffs" in calls, calls
+        assert v["kind"] == "jpn", v
+        assert "ffs" not in calls, calls
         assert "stale" in buf.getvalue(), buf.getvalue()
+        assert v.get("align_stats", {}).get("method") is None, v
     finally:
         o.REGISTRY_FILE = saved_reg
         o.subprocess.run = saved_run
         o.extract_embedded_subtitle = saved_extract
         o.bazarr_jpn_candidate = saved_bazarr
         o.probe_audio = saved_probe
-        o._ffsubsync_available = saved_avail
-    print("PASS ladder_stale_sidecar_gated")
+        o.asr_cache_get = saved_cache_get
+    print("PASS ladder_stale_sidecar_retimed")
 
 
 def test_ladder_process_preserves_source_kind():
@@ -1715,10 +1689,10 @@ def test_ladder_process_preserves_source_kind():
     print("PASS ladder_process_preserves_source_kind")
 
 
-def test_ladder_align_reject_on_ffs_failure():
-    """An external sidecar whose ffsubsync run fails (nonzero exit) is
-    rejected and the ladder falls through to the next rung (asr here);
-    temp files are cleaned up."""
+def test_ladder_retime_reject_falls_through():
+    """An untrusted external sidecar whose ASR anchors come back EMPTY is
+    rejected by the retime gate and the ladder falls through to the next rung
+    (asr here); no temp files are left behind."""
     import tempfile
 
     d = tempfile.mkdtemp()
@@ -1730,127 +1704,32 @@ def test_ladder_align_reject_on_ffs_failure():
     saved_run = o.subprocess.run
     saved_extract = o.extract_embedded_subtitle
     saved_bazarr = o.bazarr_jpn_candidate
-    saved_avail = o._ffsubsync_available
+    saved_anchor = o._retime_anchor_asr
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")  # empty: unregistered
     o.extract_embedded_subtitle = lambda *a, **k: False
     o.bazarr_jpn_candidate = lambda *a, **k: None
-    o._ffsubsync_available = lambda: True
+    o._retime_anchor_asr = lambda *a, **k: []
     calls = []
 
-    def failing_ffs(cmd, **kw):
+    def spy(cmd, **kw):
         calls.append(cmd[0])
-        if cmd[0] == "ffprobe":
-            return _run_result(1)
         return _run_result(1)
-    o.subprocess.run = failing_ffs
+    o.subprocess.run = spy
     try:
         cfg = build_cfg()
         cfg["TMP_DIR"] = d
-        cfg["ALIGN_ENABLED"] = "true"
         v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
         assert v["kind"] == "asr" and v["source_path"] is None, v
-        assert "ffs" in calls, calls
-        leftovers = [f for f in os.listdir(d) if f.startswith("align_")]
+        assert "ffs" not in calls, calls
+        leftovers = [f for f in os.listdir(d) if f.startswith(("align_", "retime_"))]
         assert not leftovers, leftovers
     finally:
         o.REGISTRY_FILE = saved_reg
         o.subprocess.run = saved_run
         o.extract_embedded_subtitle = saved_extract
         o.bazarr_jpn_candidate = saved_bazarr
-        o._ffsubsync_available = saved_avail
-    print("PASS ladder_align_reject_on_ffs_failure")
-
-
-def test_ladder_align_reject_large_offset():
-    """align_external_subtitle returns (None, offset_sec) when the measured
-    shift exceeds ALIGN_MAX_OFFSET_S; the aligned temp file is removed."""
-    import tempfile
-
-    d = tempfile.mkdtemp()
-    mkv = os.path.join(d, "Ep.mkv")
-    open(mkv, "w").close()
-    jpn = os.path.join(d, "Ep.jpn.srt")
-    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
-    saved_run = o.subprocess.run
-    o.subprocess.run = _fake_ffs_run(shift_s=10.0)
-    try:
-        aligned, offset = o.align_external_subtitle(jpn, mkv, d)
-        assert aligned is None and offset is not None, (aligned, offset)
-        assert abs(offset - 10.0) < 1e-6, offset
-        assert abs(offset) > o.ALIGN_MAX_OFFSET_S
-        leftovers = [f for f in os.listdir(d) if f.startswith("align_")]
-        assert not leftovers, leftovers
-    finally:
-        o.subprocess.run = saved_run
-    print("PASS ladder_align_reject_large_offset")
-
-
-def test_ladder_align_accept_small_offset():
-    """align_external_subtitle returns the aligned temp SRT path and the
-    measured offset when the shift is within ALIGN_MAX_OFFSET_S; the aligned
-    timings carry the shift."""
-    import tempfile
-
-    d = tempfile.mkdtemp()
-    mkv = os.path.join(d, "Ep.mkv")
-    open(mkv, "w").close()
-    jpn = os.path.join(d, "Ep.jpn.srt")
-    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
-    saved_run = o.subprocess.run
-    o.subprocess.run = _fake_ffs_run(shift_s=1.2)
-    aligned = None
-    try:
-        aligned, offset = o.align_external_subtitle(jpn, mkv, d)
-        assert aligned and os.path.isfile(aligned), aligned
-        assert os.path.dirname(aligned) == d, aligned
-        assert abs(offset - 1.2) < 1e-6, offset
-        assert abs(offset) <= o.ALIGN_MAX_OFFSET_S
-        with open(aligned, encoding="utf-8") as fh:
-            cues = o.parse_srt(fh.read())
-        assert abs(o.srt_ts_ms(cues[0]["start"]) - 1200.0) < 1.0, cues[0]
-    finally:
-        if aligned:
-            os.remove(aligned)
-        o.subprocess.run = saved_run
-    print("PASS ladder_align_accept_small_offset")
-
-
-def test_ladder_align_ass_conversion():
-    """An .ass input triggers an ffmpeg conversion to a temp .srt under
-    TMP_DIR before ffsubsync runs; the original .ass is never modified."""
-    import tempfile
-
-    d = tempfile.mkdtemp()
-    mkv = os.path.join(d, "Ep.mkv")
-    open(mkv, "w").close()
-    ass = os.path.join(d, "Ep.jpn.ass")
-    ass_text = (
-        "[Script Info]\nTitle: x\n\n"
-        "[Events]\n"
-        "Dialogue: 0,0:00:01.00,0:00:01.80,Default,,0,0,0,,テストです。\n"
-        "Dialogue: 0,0:00:02.00,0:00:02.80,Default,,0,0,0,,はい、そうです。\n"
-    )
-    with open(ass, "w", encoding="utf-8") as fh:
-        fh.write(ass_text)
-    saved_run = o.subprocess.run
-    calls = []
-    o.subprocess.run = _fake_ffs_run(shift_s=1.0, calls=calls)
-    aligned = None
-    try:
-        aligned, offset = o.align_external_subtitle(ass, mkv, d)
-        assert aligned and os.path.isfile(aligned), aligned
-        assert os.path.dirname(aligned) == d, aligned
-        assert abs(offset - 1.0) < 1e-6, offset
-        assert "ffmpeg" in calls and "ffs" in calls, calls
-        assert open(ass, encoding="utf-8").read() == ass_text, "input must be untouched"
-        with open(aligned, encoding="utf-8") as fh:
-            cues = o.parse_srt(fh.read())
-        assert abs(o.srt_ts_ms(cues[0]["start"]) - 2000.0) < 1.0, cues[0]
-    finally:
-        if aligned:
-            os.remove(aligned)
-        o.subprocess.run = saved_run
-    print("PASS ladder_align_ass_conversion")
+        o._retime_anchor_asr = saved_anchor
+    print("PASS ladder_retime_reject_falls_through")
 
 
 def _run_pass_single_episode(tmp_dir, media_path):
@@ -2662,9 +2541,9 @@ def test_webhook_dedup_registers_existing_sidecars():
 def test_ladder_adopts_untrusted_webhook_extract():
     """Adoption: an untrusted {stem}.jpn.srt (no registry row) whose content
     hash matches a fresh embedded extract is registered source_kind
-    'embedded' and used WITHOUT the alignment gate; a hash mismatch leaves it
-    untrusted (alignment runs, falls through); .ja.srt Jimaku files are never
-    adopted."""
+    'embedded' and used WITHOUT the re-timing gate; a hash mismatch leaves it
+    untrusted (the retime gate rejects: no anchors, falls through); .ja.srt
+    Jimaku files are never adopted."""
     import tempfile
 
     d = tempfile.mkdtemp()
@@ -2680,9 +2559,9 @@ def test_ladder_adopts_untrusted_webhook_extract():
     fake_streams.format_duration = 60.0
     saved = {name: getattr(o, name) for name in
              ("REGISTRY_FILE", "probe_audio", "extract_embedded_subtitle",
-              "bazarr_jpn_candidate", "_ADOPT_TRIED", "_ffsubsync_available")}
+              "bazarr_jpn_candidate", "_ADOPT_TRIED", "_retime_anchor_asr")}
     saved_run = o.subprocess.run
-    o._ffsubsync_available = lambda: True
+    o._retime_anchor_asr = lambda *a, **k: []
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
     o.probe_audio = lambda path: fake_streams
     o.bazarr_jpn_candidate = lambda *a, **k: None
@@ -2720,7 +2599,7 @@ def test_ladder_adopts_untrusted_webhook_extract():
         extract_src[0] = bad
         v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
         assert v["kind"] == "asr", v
-        assert "ffs" in calls, calls
+        assert "ffs" not in calls, calls
         assert o.registry_get(stem, "jpn") is None, "no row after a mismatch"
         # scenario 3: .ja.srt (Jimaku) is never adopted
         open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
@@ -2730,7 +2609,7 @@ def test_ladder_adopts_untrusted_webhook_extract():
         _write_srt(ja, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
         v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
         assert v["kind"] == "asr", v
-        assert "ffs" in calls, calls
+        assert "ffs" not in calls, calls
         assert o.registry_get(stem, "jpn") is None, "Jimaku files are never adopted"
     finally:
         o.subprocess.run = saved_run
@@ -2817,6 +2696,302 @@ def test_jellyfin_refresh_fallback_terms():
     print("PASS jellyfin_refresh_fallback_terms")
 
 
+
+
+# ---------- ASR-anchored re-timing (retime gate) ----------
+
+
+def test_retime_global_offset_text_anchors():
+    """Global +8s offset with matching text: every cue text-anchors to its
+    ASR cue; the first retimed cue start equals the ASR first start."""
+    asr = [{"start": 9000.0 + i * 4000, "end": 11500.0 + i * 4000,
+            "text": f"テストの台詞です。{i} はい。"} for i in range(40)]
+    sub = [{"start": c["start"] + 8000, "end": c["end"] + 8000, "text": c["text"]}
+           for c in asr]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 600.0)
+    assert out is not None
+    assert stats["method"] == "text" and stats["anchors"] == 40, stats
+    assert stats["matched_frac"] == 1.0, stats
+    assert out[0]["start"] == asr[0]["start"], (out[0], asr[0])
+    for i in range(40):
+        assert abs(out[i]["start"] - asr[i]["start"]) < 1e-6, (i, out[i])
+    print("PASS retime_global_offset_text_anchors")
+
+
+def test_retime_jaadugar_pattern():
+    """Jaadugar S01E04 pattern: cue 0 off by -8s (1.126s vs speech at 9.07s),
+    one SDH music cue, cues 2+ aligned ±0.2s — cue 0 lands on ASR cue 0,
+    later cues keep their timing, the SDH cue survives."""
+    asr = [{"start": 9070.0 + i * 4000, "end": 9070.0 + i * 4000 + 2500,
+            "text": f"セリフの内容です。{i}"} for i in range(60)]
+    sub = [{"start": 1126.0, "end": 3626.0, "text": asr[0]["text"]}]
+    sub.append({"start": 8133.0, "end": 9033.0, "text": "♬ 音楽 ♬"})
+    for i in range(2, 60):
+        s = asr[i]["start"] + (-200 if i % 3 == 0 else 120)
+        sub.append({"start": s, "end": s + 2500, "text": asr[i]["text"]})
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 1435.42)
+    assert out is not None
+    assert len(out) == 60, "SDH cue must not be dropped"
+    assert out[0]["start"] == asr[0]["start"], (out[0], asr[0])
+    assert "♬" in out[1]["text"]
+    for i in range(2, 60):
+        assert abs(out[i]["start"] - asr[i]["start"]) < 0.2 * 1000, (i, out[i], asr[i])
+    assert stats["method"] == "mixed", stats
+    print("PASS retime_jaadugar_pattern")
+
+
+def test_retime_order_fallback_garbage_asr():
+    """Ghost Stories E15 pattern: ASR text is English garbage, timestamps
+    accurate — no text anchors, order-preserving mode: monotonic starts,
+    first cue within 2s of the ASR first start."""
+    asr = [{"start": 5000.0 + i * 3000, "end": 5000.0 + i * 3000 + 2000,
+            "text": f"Queen Latifah dance break {i}"} for i in range(50)]
+    sub = [{"start": i * 3000.0, "end": i * 3000.0 + 2400,
+            "text": f"日本語の台詞です。{i}"} for i in range(50)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 300.0)
+    assert out is not None and stats["method"] == "order", stats
+    assert stats["anchors"] == 0, stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert abs(out[0]["start"] - asr[0]["start"]) < 2000.0, (out[0], asr[0])
+    print("PASS retime_order_fallback_garbage_asr")
+
+
+def test_retime_count_mismatch_284_346():
+    """Count mismatch (284 sub cues vs 346 ASR segments): order-preserving
+    mapping, every cue mapped, monotonic, no overlaps, last end within the
+    video duration."""
+    asr = [{"start": 1000.0 + i * 4000, "end": 1000.0 + i * 4000 + 3000,
+            "text": f"スピーチ {i}"} for i in range(346)]
+    sub = [{"start": 2000.0 + i * 5000, "end": 2000.0 + i * 5000 + 4000,
+            "text": f"字幕の台詞です。{i} です。"} for i in range(284)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 1400.0)
+    assert out is not None and len(out) == 284, stats
+    assert stats["method"] == "order", stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), "monotonic"
+    for i in range(283):
+        assert out[i]["end"] <= out[i + 1]["start"] + 1e-9, (i, out[i], out[i + 1])
+    assert out[-1]["end"] <= 1400.0 * 1000, out[-1]
+    print("PASS retime_count_mismatch_284_346")
+
+
+def test_retime_ratio_reject():
+    """100 sub cues vs 5 ASR segments: order ratio 0.05 < 1/3 -> REJECT
+    (None) — release mismatch, same fall-through semantics as the old gate."""
+    asr = [{"start": 1000.0 + i * 20000, "end": 5000.0 + i * 20000,
+            "text": f"スピーチ {i}"} for i in range(5)]
+    sub = [{"start": i * 1000.0, "end": i * 1000.0 + 700,
+            "text": f"字幕の台詞です。{i}"} for i in range(100)]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is None, out
+    assert stats["method"] == "order", stats
+    print("PASS retime_ratio_reject")
+
+
+def test_retime_sdh_never_dropped():
+    """SDH/music cues (♬, （音）, speaker-only) in the sub: interpolated like
+    unanchored cues, never negative, never dropped."""
+    asr = [{"start": 5000.0 + i * 4000, "end": 5000.0 + i * 4000 + 2500,
+            "text": f"セリフの内容です。{i}"} for i in range(20)]
+    sub = []
+    for i in range(20):
+        if i % 4 == 1:
+            sub.append({"start": i * 4000.0, "end": i * 4000.0 + 3000, "text": "♬ ♬"})
+        elif i % 4 == 2:
+            sub.append({"start": i * 4000.0, "end": i * 4000.0 + 3000, "text": "（音）"})
+        elif i % 4 == 3:
+            sub.append({"start": i * 4000.0, "end": i * 4000.0 + 3000, "text": "（誰か）"})
+        else:
+            sub.append({"start": i * 4000.0 - 3000, "end": i * 4000.0 + 1000,
+                        "text": asr[i]["text"]})
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 200.0)
+    assert out is not None and len(out) == 20, "SDH cues must never be dropped"
+    assert all(c["start"] >= 0.0 for c in out), out
+    assert "♬" in out[1]["text"] and "（音）" in out[2]["text"] and "（誰か）" in out[3]["text"]
+    assert stats["method"] == "mixed", stats
+    print("PASS retime_sdh_never_dropped")
+
+
+def test_retime_end_clamp():
+    """Ends clamped to next cue start - 0.05s; the last cue end clamped to
+    the video duration; starts never negative."""
+    asr = [{"start": 10000.0 + i * 20000, "end": 10000.0 + i * 20000 + 5000,
+            "text": f"セリフの内容です。{i}"} for i in range(3)]
+    sub = [
+        {"start": 0.0, "end": 30000.0, "text": asr[0]["text"]},
+        {"start": 5000.0, "end": 25000.0, "text": "はやい"},
+        {"start": 20000.0, "end": 60000.0, "text": asr[2]["text"]},
+    ]
+    out, stats = o.retime_external_cues(sub, asr, "jpn", 50.0)
+    assert out is not None and stats["method"] == "mixed", stats
+    for i in range(2):
+        assert out[i]["end"] <= out[i + 1]["start"] - 49.999, (i, out[i], out[i + 1])
+    assert out[-1]["end"] <= 50.0 * 1000, out[-1]
+    assert all(c["start"] >= 0.0 for c in out), out
+    assert out[0]["end"] - out[0]["start"] <= 20000.0 - 50.0 + 1e-6, out[0]
+    print("PASS retime_end_clamp")
+
+
+def test_retime_eng_sub_order():
+    """eng sub vs ja ASR: text cannot match (no kana overlap) — the sub never
+    text-anchors; order-preserving mapping, monotonic."""
+    asr = [{"start": 5000.0 + i * 3000, "end": 5000.0 + i * 3000 + 2000,
+            "text": f"日本語の音声です。{i}"} for i in range(30)]
+    sub = [{"start": i * 3000.0, "end": i * 3000.0 + 2500,
+            "text": f"This is english subtitle line {i}."} for i in range(30)]
+    out, stats = o.retime_external_cues(sub, asr, "eng", 200.0)
+    assert out is not None and stats["method"] == "order", stats
+    starts = [c["start"] for c in out]
+    assert all(b >= a for a, b in zip(starts, starts[1:])), starts
+    assert out[0]["start"] == asr[0]["start"], out[0]
+    print("PASS retime_eng_sub_order")
+
+
+def test_retime_anchor_asr_cache():
+    """_retime_anchor_asr: cache HIT skips wav extraction and ASR and does
+    not re-put; a MISS extracts, transcribes and puts to the cache; a probe
+    failure returns None (never raises)."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    fake_streams = o._AudioStreams(
+        [{"index": 1, "codec_name": "aac", "tags": {"language": "jpn"},
+          "channel_layout": "stereo", "duration": "60.0"}]
+    )
+    fake_streams.format_duration = 60.0
+    cues = [{"start": 1000.0, "end": 2000.0, "text": "はい"}]
+    saved = {}
+    for n in ("probe_audio", "asr_cache_get", "extract_wav", "asr_cues", "asr_cache_put"):
+        saved[n] = getattr(o, n)
+    calls = {"extract": 0, "asr": 0, "put": 0}
+    o.probe_audio = lambda path: fake_streams
+    o.asr_cache_get = lambda *a: None
+    o.extract_wav = lambda *a, **k: calls.__setitem__("extract", calls["extract"] + 1)
+    o.asr_cues = lambda *a, **k: calls.__setitem__("asr", calls["asr"] + 1) or cues
+    o.asr_cache_put = lambda *a, **k: calls.__setitem__("put", calls["put"] + 1)
+    cfg = build_cfg()
+    cfg["TMP_DIR"] = d
+    try:
+        got = o._retime_anchor_asr(cfg, mkv, "jpn")
+        assert got == cues
+        assert calls == {"extract": 1, "asr": 1, "put": 1}, calls
+        leftover = [f for f in os.listdir(d) if f.startswith("retime_anchor_")]
+        assert not leftover, leftover
+        calls["extract"] = calls["asr"] = calls["put"] = 0
+        o.asr_cache_get = lambda *a: cues  # hit next time
+        got = o._retime_anchor_asr(cfg, mkv, "jpn")
+        assert got == cues
+        assert calls == {"extract": 0, "asr": 0, "put": 0},             "cache hit must skip extract/asr/put"
+        o.probe_audio = lambda path: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert o._retime_anchor_asr(cfg, mkv, "jpn") is None
+    finally:
+        for n, v in saved.items():
+            setattr(o, n, v)
+    print("PASS retime_anchor_asr_cache")
+
+
+def test_retime_disabled_external_hit_unchanged():
+    """lc retime_enabled false: the external sidecar is returned unchanged —
+    no retime gate, no ASR anchor lookups, no align_tmp."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    jpn = os.path.join(d, "Ep.jpn.srt")
+    _write_srt(jpn, [(i * 1000, i * 1000 + 800, "テストの台詞です。あいうえおかきくけこさしすせそ。") for i in range(60)])
+    saved = {}
+    for n in ("REGISTRY_FILE", "extract_embedded_subtitle", "bazarr_jpn_candidate",
+              "_retime_anchor_asr", "_ADOPT_TRIED"):
+        saved[n] = getattr(o, n)
+    o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
+    open(o.REGISTRY_FILE, "w", encoding="utf-8").close()
+    o.extract_embedded_subtitle = lambda *a, **k: False
+    o.bazarr_jpn_candidate = lambda *a, **k: None
+    o._ADOPT_TRIED = set()
+    o._retime_anchor_asr = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("retime must not run when disabled")
+    )
+    try:
+        cfg = build_cfg()
+        cfg["TMP_DIR"] = d
+        cfg["RETIME_ENABLED"] = "false"
+        v = o.detect_ladder_source(cfg, mkv, "id", d, ep_id=1, series_id=2)
+        assert v["kind"] == "jpn" and v["source_path"] == jpn, v
+        assert v.get("align_tmp") is None and "align_stats" not in v, v
+    finally:
+        for n, val in saved.items():
+            setattr(o, n, val)
+    print("PASS retime_disabled_external_hit_unchanged")
+
+
+def test_retime_subtitle_glue_ass_and_reject():
+    """retime_external_subtitle end-to-end: .ass input converts to a temp
+    SRT (input untouched) and the retimed SRT lands under tmp_dir; a retime
+    REJECT (anchors empty) returns (None, stats) with no output file."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    mkv = os.path.join(d, "Ep.mkv")
+    open(mkv, "w").close()
+    ass = os.path.join(d, "Ep.jpn.ass")
+    ass_text = (
+        "[Script Info]\nTitle: x\n\n"
+        "[Events]\n"
+        "Dialogue: 0,0:00:01.00,0:00:01.80,Default,,0,0,0,,テストです。\n"
+        "Dialogue: 0,0:00:02.00,0:00:02.80,Default,,0,0,0,,はい、そうです。\n"
+    )
+    with open(ass, "w", encoding="utf-8") as fh:
+        fh.write(ass_text)
+    anchors = [
+        {"start": 9000.0, "end": 10000.0, "text": "テストです。"},
+        {"start": 15000.0, "end": 16000.0, "text": "はい、そうです。"},
+    ]
+    saved = {}
+    saved_run = o.subprocess.run
+    for n in ("_retime_anchor_asr", "media_duration_s"):
+        saved[n] = getattr(o, n)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[0])
+        if cmd[0] == "ffmpeg":
+            _write_srt(cmd[-1], [(1000, 1800, "テストです。"), (2000, 2800, "はい、そうです。")])
+            return _run_result(0)
+        return _run_result(1)
+    o.subprocess.run = fake_run
+    o._retime_anchor_asr = lambda *a, **k: anchors
+    o.media_duration_s = lambda path: 100.0
+    out_path = None
+    try:
+        out_path, stats = o.retime_external_subtitle(ass, mkv, build_cfg(), d, sub_lang="jpn")
+        assert out_path and os.path.isfile(out_path), out_path
+        assert os.path.dirname(out_path) == d, out_path
+        assert "ffmpeg" in calls and "ffs" not in calls, calls
+        assert open(ass, encoding="utf-8").read() == ass_text, "input must be untouched"
+        with open(out_path, encoding="utf-8") as fh:
+            cues = o.parse_srt(fh.read())
+        assert len(cues) == 2
+        assert abs(o.srt_ts_ms(cues[0]["start"]) - 9000.0) < 1.0, cues[0]
+        assert abs(o.srt_ts_ms(cues[1]["start"]) - 15000.0) < 1.0, cues[1]
+        assert stats["method"] == "text", stats
+        # reject: anchors empty -> (None, stats), no output file
+        o._retime_anchor_asr = lambda *a, **k: []
+        out2, stats2 = o.retime_external_subtitle(ass, mkv, build_cfg(), d, sub_lang="jpn")
+        assert out2 is None and stats2 is not None, (out2, stats2)
+        assert stats2["method"] is None and stats2["total"] == 2, stats2
+        leftovers = [f for f in os.listdir(d) if f.startswith(("align_", "retime_"))]
+        assert leftovers == [os.path.basename(out_path)], leftovers
+    finally:
+        if out_path:
+            os.remove(out_path)
+        o.subprocess.run = saved_run
+        for n, val in saved.items():
+            setattr(o, n, val)
+    print("PASS retime_subtitle_glue_ass_and_reject")
 
 
 if __name__ == "__main__":

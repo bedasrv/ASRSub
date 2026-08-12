@@ -116,14 +116,18 @@ LADDER_MIN_CUES = int(os.environ.get("LADDER_MIN_CUES", "40"))
 LADDER_MIN_CHARS = int(os.environ.get("LADDER_MIN_CHARS", "1500"))
 LADDER_MIN_CJK = float(os.environ.get("LADDER_MIN_CJK", "0.6"))
 LADDER_SPAN_TOLERANCE = float(os.environ.get("LADDER_SPAN_TOLERANCE", "0.15"))
-# ffsubsync alignment gate for Jimaku/Bazarr-sourced jpn/eng sidecars: those
-# subs come from a DIFFERENT release than the video file, so their timing is
-# offset/drifted; ffsubsync re-times them against the video audio. Sidecars
-# extracted from the video's own embedded streams (tdarr webhook) are aligned
-# by construction and skip the gate — verified by _sidecar_trusted: registry
-# row source_kind "embedded" + audio_id matching the current video + on-disk
-# content hash matching the row's source_hash (untrusted rows, including
-# Bazarr-clobbered or stale-after-upgrade sidecars, run the gate).
+# ASR-anchored re-timing gate for Jimaku/Bazarr-sourced jpn/eng sidecars:
+# those subs come from a DIFFERENT release than the video file, so their timing
+# is offset/drifted; retime_external_cues re-times them against the episode's
+# own ASR speech anchors (ASR cue TIMESTAMPS are accurate even when ASR text
+# hallucinates; the external sub's TEXT is kept). Sidecars extracted from the
+# video's own embedded streams (tdarr webhook) are aligned by construction and
+# skip the gate — verified by _sidecar_trusted: registry row source_kind
+# "embedded" + audio_id matching the current video + on-disk content hash
+# matching the row's source_hash (untrusted rows, including Bazarr-clobbered
+# or stale-after-upgrade sidecars, run the gate).
+# ALIGN_* keys stay parsed for config-file compatibility (overrides files may
+# reference them); the ladder now consults only the RETIME_* keys below.
 ALIGN_ENABLED = os.environ.get("ALIGN_ENABLED", "true").lower() in (
     "1",
     "true",
@@ -131,6 +135,13 @@ ALIGN_ENABLED = os.environ.get("ALIGN_ENABLED", "true").lower() in (
 )
 ALIGN_MAX_OFFSET_S = float(os.environ.get("ALIGN_MAX_OFFSET_S", "1.5"))
 ALIGN_MAX_OFFSET_SECONDS = float(os.environ.get("ALIGN_MAX_OFFSET_SECONDS", "60"))
+RETIME_ENABLED = os.environ.get("RETIME_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+RETIME_TEXT_THRESHOLD = float(os.environ.get("RETIME_TEXT_THRESHOLD", "0.55"))
+RETIME_MAX_RATIO = float(os.environ.get("RETIME_MAX_RATIO", "3.0"))
 
 _stop_requested = False
 _paused = False
@@ -186,6 +197,19 @@ def load_config():
     except (TypeError, ValueError):
         cfg["ALIGN_MAX_OFFSET_S"] = ALIGN_MAX_OFFSET_S
         cfg["ALIGN_MAX_OFFSET_SECONDS"] = ALIGN_MAX_OFFSET_SECONDS
+    cfg["RETIME_ENABLED"] = str(
+        cfg.get("RETIME_ENABLED", RETIME_ENABLED)
+    ).lower() in ("1", "true", "yes")
+    try:
+        cfg["RETIME_TEXT_THRESHOLD"] = float(
+            cfg.get("RETIME_TEXT_THRESHOLD", RETIME_TEXT_THRESHOLD)
+        )
+        cfg["RETIME_MAX_RATIO"] = float(
+            cfg.get("RETIME_MAX_RATIO", RETIME_MAX_RATIO)
+        )
+    except (TypeError, ValueError):
+        cfg["RETIME_TEXT_THRESHOLD"] = RETIME_TEXT_THRESHOLD
+        cfg["RETIME_MAX_RATIO"] = RETIME_MAX_RATIO
     tl = cfg.get("TARGET_LANGS", "id,en")
     if isinstance(tl, str) and tl.strip().startswith("["):
         try:
@@ -251,6 +275,9 @@ def _ladder_cfg(cfg):
         "align_max_offset_seconds": _gf(
             "ALIGN_MAX_OFFSET_SECONDS", ALIGN_MAX_OFFSET_SECONDS
         ),
+        "retime_enabled": _gb("RETIME_ENABLED", RETIME_ENABLED),
+        "retime_text_threshold": _gf("RETIME_TEXT_THRESHOLD", RETIME_TEXT_THRESHOLD),
+        "retime_max_ratio": _gf("RETIME_MAX_RATIO", RETIME_MAX_RATIO),
     }
 
 
@@ -599,6 +626,8 @@ def registry_upsert(
     source_kind=None,
     ep_id=None,
     audio_id=None,
+    retimed=None,
+    matched_frac=None,
 ):
     """Append a registry row for (stem, lang): the on-disk sidecar file
     {stem}.{lang}.srt is the unit of provenance. A row describes the CURRENT
@@ -607,10 +636,12 @@ def registry_upsert(
     embedded-stream extraction). source_kind records WHERE the content came
     from ('embedded' = this video's own subtitle stream, aligned by
     construction; 'external' = Jimaku/Bazarr-sourced sidecar file) — used to
-    decide whether the ffsubsync alignment gate must run. ep_id stays a
+    decide whether the ASR-anchored re-timing gate must run. ep_id stays a
     FIELD (nullable: the webhook only knows the file path, never Sonarr
     ids); audio_id is the audio signature of the video an embedded sidecar
-    was extracted from. Keeps the original created_ts, refreshes updated_ts."""
+    was extracted from. retimed ("text"/"order"/"mixed") and matched_frac are
+    optional ASR-anchored re-timing provenance from the ladder's external
+    sidecar gate. Keeps the original created_ts, refreshes updated_ts."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     prev = registry_get(stem, lang, ep_id=ep_id)
     entry = {
@@ -628,6 +659,10 @@ def registry_upsert(
         entry["source_kind"] = source_kind
     if audio_id is not None:
         entry["audio_id"] = audio_id
+    if retimed is not None:
+        entry["retimed"] = retimed
+    if matched_frac is not None:
+        entry["matched_frac"] = matched_frac
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1310,42 +1345,25 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
 
 
 def _silent_remove(path):
+    if not path:
+        return
     try:
         os.remove(path)
     except OSError:
         pass
 
 
-_ALIGN_NO_FFS_WARNED = False
-
-
-def _ffsubsync_available():
-    """True when the ffsubsync CLI ('ffs') is on PATH. Runtime probe so an
-    old image without the package degrades gracefully (gate disabled)."""
-    return shutil.which("ffs") is not None
-
-
-def _warn_ffsubsync_unavailable():
-    global _ALIGN_NO_FFS_WARNED
-    if not _ALIGN_NO_FFS_WARNED:
-        _ALIGN_NO_FFS_WARNED = True
-        log(
-            "WARNING: ladder: ffsubsync (ffs) not available; "
-            "running WITHOUT the alignment gate"
-        )
-
-
 def _sidecar_trusted(stem, lang, media_path, sidecar_path):
     """Trust verification for the on-disk sidecar sidecar_path: TRUSTED
-    (aligned by construction — skip the ffsubsync gate, use as-is) iff the
+    (aligned by construction — skip the re-timing gate, use as-is) iff the
     registry row exists with source_kind 'embedded' (the tdarr webhook
     extracted it from this video's own subtitle stream), the row's audio_id
     matches the CURRENT video's audio signature (not a stale sidecar left
     behind by a Sonarr file upgrade), and the on-disk content hash still
     matches the row's source_hash (not clobbered by Bazarr or another
-    writer). Anything else is NOT trusted: the external rung's alignment
+    writer). Anything else is NOT trusted: the external rung's re-timing
     gate runs on the file as-is (Bazarr content = external; stale content =
-    gate rejects or aligns; either way never silently used misaligned).
+    gate re-times or rejects; either way never silently used misaligned).
     Logs the reason at INFO/WARNING; never raises."""
     row = registry_get(stem, lang)
     if not row:
@@ -1386,7 +1404,7 @@ def _adopt_embedded(stem, kind, media_path, cand, tmp_dir=None):
     lost (pre-ledger extract) or the file survived Bazarr cleanup. Verify by
     re-extracting the current embedded track and comparing content hashes; on
     a match, register source_kind 'embedded' so the sidecar is trusted as
-    aligned-by-construction and the ffsubsync gate is skipped. One attempt
+    aligned-by-construction and the re-timing gate is skipped. One attempt
     per (stem, kind) per daemon lifetime. Never raises; returns True only
     when the sidecar is now registry-trusted."""
     key = (stem, kind)
@@ -1437,44 +1455,256 @@ def _adopt_embedded(stem, kind, media_path, cand, tmp_dir=None):
         return False
 
 
-def _first_cue_start_ms(path):
-    """First cue's start time in ms for an SRT file, or None."""
+def retime_external_cues(
+    sub_cues,
+    asr_cues,
+    sub_lang,
+    video_duration_s,
+    text_threshold=None,
+    max_ratio=None,
+):
+    """Re-time external subtitle cues against ASR speech anchors.
+
+    sub_cues: list of {"start": ms (float), "end": ms (float), "text": str}.
+    asr_cues: list of {"start", "end", "text"} from the ASR cache (already ms).
+    sub_lang: "jpn"|"eng" — text anchoring only applies when sub_lang == "jpn"
+      (the sub's language equals the ja ASR reference); eng subs always use
+      the order-preserving mapping (their text cannot match ja ASR).
+    video_duration_s: container duration in seconds (or None) — the last cue's
+      end is clamped to it.
+
+    Strategy 1 (text anchors, jpn): normalize both texts (strip speaker tags
+    （…） and music notes, drop punctuation and the long-vowel mark, fold
+    katakana<->hiragana), score by character-bigram Jaccard; the best ASR cue
+    anchors when the score >= text_threshold (0.55). 1 sub cue -> best ASR
+    cue; 1 ASR cue may anchor multiple sub cues.
+
+    Strategy 2 (order-preserving fallback): for unanchored cues / eng subs,
+    sub cue i maps to speech segment round(i * len(seg)/len(cue)). When this
+    mapping is needed and len(seg)/len(cue) > max_ratio (3.0) or < 1/max_ratio
+    (release mismatch), the whole sub is REJECTED (None) — same semantics as
+    the old gate reject.
+
+    Re-timing: an anchored cue starts at its ASR cue start, end = start +
+    original duration; an unanchored cue interpolates the start shift between
+    its neighbor anchors (nearest-anchor shift before the first / after the
+    last anchor); pure order mode maps every cue to its segment start.
+    SDH/music cues (♬, （音）, speaker-only) interpolate like any unanchored
+    cue — never dropped. Ends are clamped to next_start - 0.05s (last cue:
+    video duration), starts never negative.
+
+    Returns (retimed_cues, stats) or (None, stats) on reject (empty/None
+    asr_cues, or order ratio out of bounds). stats = {"method":
+    "text"|"order"|"mixed", "anchors": n, "total": m, "matched_frac": n/m}.
+    Deterministic pure logic — no I/O."""
+    total = len(sub_cues)
+    if text_threshold is None:
+        text_threshold = RETIME_TEXT_THRESHOLD
+    if max_ratio is None:
+        max_ratio = RETIME_MAX_RATIO
+    if not sub_cues or not asr_cues:
+        return None, {
+            "method": None,
+            "anchors": 0,
+            "total": total,
+            "matched_frac": 0.0,
+        }
+    seg_ratio = len(asr_cues) / float(total)
+    anchors = (
+        _retime_text_anchors(sub_cues, asr_cues, text_threshold)
+        if sub_lang == "jpn"
+        else []
+    )
+    if anchors:
+        method = "text" if len(anchors) == total else "mixed"
+    else:
+        method = "order"
+    matched_frac = len(anchors) / float(total)
+    stats = {
+        "method": method,
+        "anchors": len(anchors),
+        "total": total,
+        "matched_frac": matched_frac,
+    }
+    if method in ("order", "mixed") and (
+        seg_ratio > max_ratio or seg_ratio < 1.0 / max_ratio
+    ):
+        return None, stats
+    anchored_idx = set(i for i, _ in anchors)
+    starts = [0.0] * total
+    if method == "order":
+        for i in range(total):
+            seg = min(round(i * len(asr_cues) / float(total)), len(asr_cues) - 1)
+            starts[i] = asr_cues[seg]["start"]
+    else:
+        for i, j in anchors:
+            starts[i] = asr_cues[j]["start"]
+        if method == "mixed":
+            pts = sorted(anchors)
+            for i in range(total):
+                if i in anchored_idx:
+                    continue
+                t_i = sub_cues[i]["start"]
+                prev = next((pt for pt in reversed(pts) if pt[0] < i), None)
+                nxt = next((pt for pt in pts if pt[0] > i), None)
+                if prev is not None and nxt is not None:
+                    t_p, j_p = prev
+                    t_n, j_n = nxt
+                    s_p = asr_cues[j_p]["start"] - sub_cues[t_p]["start"]
+                    s_n = asr_cues[j_n]["start"] - sub_cues[t_n]["start"]
+                    denom = sub_cues[t_n]["start"] - sub_cues[t_p]["start"]
+                    frac = (t_i - sub_cues[t_p]["start"]) / denom if denom else 0.0
+                    starts[i] = t_i + s_p + frac * (s_n - s_p)
+                elif prev is not None:
+                    j_p = prev[1]
+                    starts[i] = (
+                        t_i + asr_cues[j_p]["start"] - sub_cues[prev[0]]["start"]
+                    )
+                else:
+                    j_n = nxt[1]
+                    starts[i] = (
+                        t_i + asr_cues[j_n]["start"] - sub_cues[nxt[0]]["start"]
+                    )
+    duration_ms = video_duration_s * 1000.0 if video_duration_s else None
+    out = []
+    for i in range(total):
+        start = max(0.0, starts[i])
+        dur = max(0.0, sub_cues[i]["end"] - sub_cues[i]["start"])
+        end = start + dur
+        if i < total - 1:
+            end = min(end, max(0.0, starts[i + 1]) - 50.0)
+        elif duration_ms:
+            end = min(end, duration_ms)
+        if end < start:
+            end = start
+        out.append({"start": start, "end": end, "text": sub_cues[i]["text"]})
+    return out, stats
+
+
+def _retime_norm_text(text):
+    """Normalize a cue text for anchor matching: strip ASS/SSA styling and
+    speaker tags （…） (SDH), drop music notes and the long-vowel mark, fold
+    katakana -> hiragana, drop punctuation/whitespace, lowercase latin."""
+    text = clean_ass_text(text)
+    text = re.sub(r"[（(][^（）()]*[）)]", "", text)
+    for ch in ("♪", "♬", "♫", "♩", "ー"):
+        text = text.replace(ch, "")
+    text = "".join(
+        chr(ord(ch) - 0x60) if 0x30A1 <= ord(ch) <= 0x30FA else ch for ch in text
+    )
+    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE).lower()
+
+
+def _bigram_jaccard(a, b):
+    """Character-bigram Jaccard similarity of two normalized texts."""
+    if not a or not b:
+        return 0.0
+    if len(a) == 1 or len(b) == 1:
+        return 1.0 if a == b else 0.0
+    ga = {a[i : i + 2] for i in range(len(a) - 1)}
+    gb = {b[i : i + 2] for i in range(len(b) - 1)}
+    if not ga or not gb:
+        return 1.0 if a == b else 0.0
+    inter = len(ga & gb)
+    if inter == 0:
+        return 0.0
+    return inter / float(len(ga | gb))
+
+
+def _retime_text_anchors(sub_cues, asr_cues, threshold):
+    """Best-match text anchors: [(sub_idx, asr_idx)] — every sub cue whose
+    best ASR character-bigram Jaccard score >= threshold anchors to that ASR
+    cue. One ASR cue may anchor many sub cues; cues whose normalized text is
+    empty (SDH/music/speaker-only) never anchor."""
+    norm_sub = [_retime_norm_text(c["text"]) for c in sub_cues]
+    norm_asr = [_retime_norm_text(c["text"]) for c in asr_cues]
+    anchors = []
+    for i, ns in enumerate(norm_sub):
+        if not ns:
+            continue
+        best_j, best_s = None, 0.0
+        for j, na in enumerate(norm_asr):
+            if not na:
+                continue
+            s = _bigram_jaccard(ns, na)
+            if s > best_s:
+                best_j, best_s = j, s
+        if best_j is not None and best_s >= threshold:
+            anchors.append((i, best_j))
+    return anchors
+
+
+def _infer_sub_lang(cues):
+    """Infer a sidecar's language kind ("jpn"/"eng") from its cue text: CJK
+    ratio >= 0.3 -> jpn, else eng (mirrors assess_source_file's ratio)."""
+    non_space = re.sub(r"\s", "", "".join(c["text"] for c in cues))
+    if not non_space:
+        return "jpn"
+    cjk = len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", non_space))
+    return "jpn" if cjk / float(len(non_space)) >= 0.3 else "eng"
+
+
+def _retime_anchor_asr(cfg, media_path, sub_lang):
+    """ASR speech anchors for a media file: probe the audio, look up the ASR
+    cache (audio_id, lang "ja"); on a miss, extract the wav exactly like the
+    ASR rung (extract_wav on the choose_source stream) and transcribe with
+    asr_cues(cfg, wav, "ja"), caching the cues. NEVER raises: returns None on
+    any failure (the caller then uses the sidecar as-is, logged)."""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError:
+        streams = probe_audio(media_path)
+        audio_id = audio_stream_signature(streams)
+        cached = asr_cache_get(audio_id, "ja", media_path)
+        if cached:
+            return cached
+        decision = choose_source(streams, "ja")
+        if decision is None:
+            log(f"ladder: retime: no audio streams in {media_path}")
+            return None
+        tmp_dir = cfg.get("TMP_DIR") or os.environ.get("TMP_DIR") or "/tmp"
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+        except OSError:
+            pass
+        wav = os.path.join(tmp_dir, f"retime_anchor_{os.getpid()}_{sub_lang}.wav")
+        try:
+            extract_wav(media_path, decision["stream_index"], wav)
+            cues = asr_cues(cfg, wav, "ja") or []
+        finally:
+            _silent_remove(wav)
+        asr_cache_put(audio_id, "ja", media_path, cues)
+        return cues
+    except Exception as exc:
+        log(f"ladder: retime: ASR anchors unavailable for {media_path}: {exc}")
         return None
-    for cue in parse_srt(text):
-        ms = srt_ts_ms(cue["start"])
-        if ms is not None:
-            return ms
-    return None
 
 
-def align_external_subtitle(srt_path, video_path, tmp_dir=None):
-    """ffsubsync alignment gate for external (Jimaku/Bazarr-sourced) jpn/eng
-    subtitle sidecars: re-time the subtitle against the video's audio and
-    return (aligned_srt_path, offset_sec) when the alignment is trustworthy.
+def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=None):
+    """ASR-anchored re-timing for external (Jimaku/Bazarr-sourced) jpn/eng
+    subtitle sidecars: converts .ass/.ssa inputs to a temp SRT with ffmpeg
+    (never modifies the input), parses the cues, pulls the episode's ASR
+    speech anchors (_retime_anchor_asr), re-times every cue
+    (retime_external_cues) and writes the retimed SRT as another temp file
+    under tmp_dir (TMP_DIR env / '/tmp' fallback). The caller owns cleanup of
+    the retimed output; the conversion temp is removed here.
 
-    Never modifies the input file: .ass/.ssa inputs are converted to a temp
-    SRT with ffmpeg, and ffsubsync writes the aligned output as another temp
-    file, both under tmp_dir (TMP_DIR env / '/tmp' fallback). The caller owns
-    cleanup of the aligned output; the conversion temp is removed here.
-
-    Returns (None, None) on any failure (fingerprint mismatch, subprocess
-    error, unparseable cues) and (None, offset_sec) when the measured offset
-    exceeds ALIGN_MAX_OFFSET_S (reject). Never raises."""
+    Returns (retimed_srt_path, stats) when the sidecar is usable — retimed,
+    or used AS-IS with stats {"method": None} when no ASR anchors could be
+    computed (probe/ASR failure; the sub keeps its original timing, logged) —
+    and (None, stats) on reject (empty ASR cues, or order-ratio out of bounds
+    = release mismatch): same fall-through semantics as the old ffsubsync
+    gate. Never raises. sub_lang ("jpn"/"eng") enables text anchoring; when
+    None it is inferred from the cue text (CJK vs latin ratio)."""
     tmp_dir = tmp_dir or os.environ.get("TMP_DIR") or "/tmp"
     try:
         os.makedirs(tmp_dir, exist_ok=True)
     except OSError as exc:
-        log(f"WARNING: ladder: align: cannot create {tmp_dir}: {exc}")
-        return None, None
+        log(f"WARNING: ladder: retime: cannot create {tmp_dir}: {exc}")
+        return None, {"method": None, "anchors": 0, "total": 0, "matched_frac": 0.0}
     token = f"{os.getpid()}_{int(time.time() * 1000)}"
-    work = srt_path
+    work = sub_path
     conv = None
-    if os.path.splitext(srt_path)[1].lower() in (".ass", ".ssa"):
-        conv = os.path.join(tmp_dir, f"align_{token}_in.srt")
+    if os.path.splitext(sub_path)[1].lower() in (".ass", ".ssa"):
+        conv = os.path.join(tmp_dir, f"retime_{token}_in.srt")
         try:
             pp = subprocess.run(
                 [
@@ -1484,7 +1714,7 @@ def align_external_subtitle(srt_path, video_path, tmp_dir=None):
                     "error",
                     "-y",
                     "-i",
-                    srt_path,
+                    sub_path,
                     "-c:s",
                     "srt",
                     "-f",
@@ -1503,69 +1733,71 @@ def align_external_subtitle(srt_path, video_path, tmp_dir=None):
         except Exception as exc:
             ok = False
             log(
-                f"WARNING: ladder: align: ffmpeg .ass/.ssa -> srt failed for {srt_path}: {exc}"
+                f"WARNING: ladder: retime: ffmpeg .ass/.ssa -> srt failed for {sub_path}: {exc}"
             )
         if not ok:
             _silent_remove(conv)
-            log(
-                f"WARNING: ladder: align: ffmpeg .ass/.ssa -> srt failed for {srt_path}"
-            )
-            return None, None
+            log(f"WARNING: ladder: retime: ffmpeg .ass/.ssa -> srt failed for {sub_path}")
+            return None, {"method": None, "anchors": 0, "total": 0, "matched_frac": 0.0}
         work = conv
-    in_ms = _first_cue_start_ms(work)
-    out = os.path.join(tmp_dir, f"align_{token}_out.srt")
     try:
-        pp = subprocess.run(
-            [
-                "ffs",
-                video_path,
-                "-i",
-                work,
-                "-o",
-                out,
-                "--max-offset-seconds",
-                str(ALIGN_MAX_OFFSET_SECONDS),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=1800,
+        with open(work, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        log(f"WARNING: ladder: retime: unreadable {work}: {exc}")
+        _silent_remove(conv)
+        return None, {"method": None, "anchors": 0, "total": 0, "matched_frac": 0.0}
+    parsed = parse_srt(text)
+    if not parsed:
+        _silent_remove(conv)
+        return None, {"method": None, "anchors": 0, "total": 0, "matched_frac": 0.0}
+    sub_ms = []
+    for c in parsed:
+        s, e = srt_ts_ms(c["start"]), srt_ts_ms(c["end"])
+        if s is None or e is None:
+            sub_ms = None
+            break
+        sub_ms.append({"start": s, "end": e, "text": c["text"]})
+    if sub_ms is None:
+        log(f"WARNING: ladder: retime: unparseable timestamps in {sub_path}")
+        _silent_remove(conv)
+        return None, {"method": None, "anchors": 0, "total": 0, "matched_frac": 0.0}
+    if sub_lang is None:
+        sub_lang = _infer_sub_lang(sub_ms)
+    lc = _ladder_cfg(cfg)
+    anchors = _retime_anchor_asr(cfg, media_path, sub_lang)
+    if anchors is None:
+        log(
+            f"ladder: retime: no ASR anchors for {os.path.basename(media_path)}; "
+            f"using {os.path.basename(sub_path)} as-is"
         )
-        ran = True
-    except Exception as exc:
-        ran = False
-        log(f"WARNING: ladder: align: ffsubsync failed for {srt_path}: {exc}")
-    finally:
-        if conv is not None:
+        retimed, stats = sub_ms, {
+            "method": None,
+            "anchors": 0,
+            "total": len(sub_ms),
+            "matched_frac": 0.0,
+        }
+    else:
+        duration = media_duration_s(media_path)
+        retimed, stats = retime_external_cues(
+            sub_ms,
+            anchors,
+            sub_lang,
+            duration,
+            text_threshold=lc["retime_text_threshold"],
+            max_ratio=lc["retime_max_ratio"],
+        )
+        if retimed is None:
+            log(
+                f"WARNING: ladder: retime: rejected {sub_path} "
+                f"(method={stats.get('method')}, segments={len(anchors)} vs cues={len(sub_ms)})"
+            )
             _silent_remove(conv)
-    if (
-        not ran
-        or pp.returncode != 0
-        or not os.path.isfile(out)
-        or os.path.getsize(out) == 0
-    ):
-        _silent_remove(out)
-        log(
-            f"WARNING: ladder: align: ffsubsync rejected {srt_path} "
-            f"(exit={getattr(pp, 'returncode', '?')})"
-        )
-        return None, None
-    out_ms = _first_cue_start_ms(out)
-    if in_ms is None or out_ms is None:
-        _silent_remove(out)
-        log(
-            f"WARNING: ladder: align: no parseable first cue in {srt_path} "
-            "or aligned output"
-        )
-        return None, None
-    offset_sec = (out_ms - in_ms) / 1000.0
-    if abs(offset_sec) > ALIGN_MAX_OFFSET_S:
-        _silent_remove(out)
-        log(
-            f"WARNING: ladder: align: offset {offset_sec:+.1f}s exceeds "
-            f"{ALIGN_MAX_OFFSET_S}s for {srt_path}; rejecting"
-        )
-        return None, offset_sec
-    return out, offset_sec
+            return None, stats
+    out = os.path.join(tmp_dir, f"retime_{token}_out.srt")
+    write_srt(retimed, [c["text"] for c in retimed], out)
+    _silent_remove(conv)
+    return out, stats
 
 
 def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, series_id=None):
@@ -1574,12 +1806,13 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
     .jpn.hi/.ja.hi HI variants -> embedded
     jpn stream -> Bazarr jpn) -> eng (external {stem}.eng.srt -> embedded eng
     stream) -> asr. Every jpn/eng candidate must pass the adequacy gates.
-    External sidecars additionally pass the ffsubsync alignment gate unless
-    the registry marks them source_kind 'embedded' (aligned by construction):
-    a rejected alignment falls through to the next rung. Never raises;
-    returns {"kind": "jpn"|"eng"|"asr", "source_path", "source_hash", "cues",
-    "duration_s", "tmp", "align_tmp"}. kind 'asr' = caller falls back to the
-    existing ASR path."""
+    External sidecars additionally pass the ASR-anchored re-timing gate
+    unless the registry marks them source_kind 'embedded' (aligned by
+    construction): a rejected retime falls through to the next rung. Never
+    raises; returns {"kind": "jpn"|"eng"|"asr", "source_path",
+    "source_hash", "cues", "duration_s", "tmp", "align_tmp",
+    "align_stats"}. kind 'asr' = caller falls back to the existing ASR
+    path."""
     stem = os.path.splitext(media_path)[0]
     duration = None
     lc = _ladder_cfg(cfg)
@@ -1601,11 +1834,11 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         }
 
     def _external_hit(cand, kind):
-        """External sidecar rung: adequacy gate, then the ffsubsync alignment
-        gate for Jimaku/Bazarr-sourced subs (skipped when _sidecar_trusted
-        verifies the sidecar as an embedded-stream extract for the CURRENT
-        video: aligned by construction). Returns a _hit dict or None (fall
-        through to the next rung)."""
+        """External sidecar rung: adequacy gate, then the ASR-anchored
+        re-timing gate for Jimaku/Bazarr-sourced subs (skipped when
+        _sidecar_trusted verifies the sidecar as an embedded-stream extract
+        for the CURRENT video: aligned by construction). Returns a _hit dict
+        or None (fall through to the next rung)."""
         verdict = _gate(cand, kind)
         if not verdict["ok"]:
             return None
@@ -1613,34 +1846,35 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         trusted = _sidecar_trusted(stem, kind, media_path, cand)
         if not trusted:
             trusted = _adopt_embedded(stem, kind, media_path, cand, tmp_dir)
-        if not (lc["align_enabled"] and not trusted):
+        if not (lc["retime_enabled"] and not trusted):
             return hit
-        if not _ffsubsync_available():
-            _warn_ffsubsync_unavailable()
-            return hit
-        aligned, offset = align_external_subtitle(cand, media_path, tmp_dir)
-        if aligned is None:
-            if offset is not None:
-                log(
-                    f"WARNING: ladder: {kind} sidecar {os.path.basename(cand)} rejected: "
-                    f"aligned offset {offset:+.1f}s > {lc['align_max_offset_s']}s"
-                )
-            else:
-                log(
-                    f"WARNING: ladder: {kind} sidecar {os.path.basename(cand)} rejected: "
-                    "ffsubsync alignment failed"
-                )
-            return None
-        log(
-            f"ladder: aligned external {kind} sidecar {os.path.basename(cand)} "
-            f"offset={offset:+.1f}s"
+        retimed, stats = retime_external_subtitle(
+            cand, media_path, cfg, tmp_dir, sub_lang=kind
         )
-        verdict_a = _gate(aligned, kind)
+        if retimed is None:
+            log(
+                f"WARNING: ladder: {kind} sidecar {os.path.basename(cand)} rejected: "
+                f"retime gate failed (method={stats.get('method')})"
+            )
+            return None
+        if stats.get("method"):
+            log(
+                f"ladder: retimed external {kind} sidecar {os.path.basename(cand)} "
+                f"method={stats['method']} anchors={stats['anchors']}/{stats['total']} "
+                f"matched_frac={stats['matched_frac']:.2f}"
+            )
+        else:
+            log(
+                f"ladder: retime skipped for {kind} sidecar {os.path.basename(cand)}: "
+                "no ASR anchors; using as-is"
+            )
+        verdict_a = _gate(retimed, kind)
         if not verdict_a["ok"]:
-            _silent_remove(aligned)
+            _silent_remove(retimed)
             return None
         hit["cues"] = verdict_a["cues"]
-        hit["align_tmp"] = aligned
+        hit["align_tmp"] = retimed
+        hit["align_stats"] = stats
         return hit
 
     # (a) jpn — Bazarr/Jimaku manage HI-only files (.ja.hi.srt etc.), so
@@ -2837,6 +3071,8 @@ def process_ladder(
             source_hash=source["source_hash"],
             source_kind=source_kind,
             ep_id=ep_id,
+            retimed=source.get("align_stats", {}).get("method"),
+            matched_frac=source.get("align_stats", {}).get("matched_frac"),
         )
         elapsed = round(time.time() - t0, 1)
         append_state(
