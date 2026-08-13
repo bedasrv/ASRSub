@@ -27,8 +27,17 @@ Usage:
   python3 fetch_glossary.py --all
   python3 fetch_glossary.py --series "Title" --glossary /tmp/test-glossary.json
 
+Cache:
+  AniList responses are cached on disk in
+  ~/.config/asr-pipeline/anilist_cache.json (env override ANILIST_CACHE),
+  keyed by normalized title. A fresh entry (younger than the TTL, default
+  90 days; env override ANILIST_CACHE_TTL_DAYS) short-circuits the API
+  entirely; stale entries are re-fetched and refreshed. Failed lookups
+  (no match / no characters) are never cached. Series whose glossary
+  entry already holds the 15-ref cap are skipped without any API call.
+
 Env overrides: SONARR_URL, SONARR_API_KEY, RADARR_URL, RADARR_API_KEY,
-GLOSSARY_FILE.
+GLOSSARY_FILE, ANILIST_CACHE, ANILIST_CACHE_TTL_DAYS.
 """
 
 import argparse
@@ -38,6 +47,7 @@ import re
 import sys
 import time
 from collections import deque
+from datetime import datetime
 
 import requests
 
@@ -60,7 +70,15 @@ GLOSSARY_FILE = os.environ.get(
     os.path.join(os.path.expanduser("~"), ".config", "asr-pipeline", "glossary.json"),
 )
 
+CACHE_FILE = os.environ.get(
+    "ANILIST_CACHE",
+    os.path.join(os.path.expanduser("~"), ".config", "asr-pipeline", "anilist_cache.json"),
+)
+CACHE_TTL_DAYS = float(os.environ.get("ANILIST_CACHE_TTL_DAYS", "90"))
+
 MAX_PAIRS_PER_SERIES = 15  # consumer cap in pipeline/glossary.py
+
+_api_calls = 0  # AniList GraphQL calls made this run (verification aid)
 
 _kks = pykakasi.kakasi()
 
@@ -129,6 +147,8 @@ query($search: String, $format: MediaFormat) {
 
 
 def anilist_query(variables, query=SEARCH_QUERY, attempts=5):
+    global _api_calls
+    _api_calls += 1
     # AniList 404s when a variable is explicitly null; omit absent args.
     variables = {k: v for k, v in (variables or {}).items() if v is not None}
     for i in range(attempts):
@@ -328,6 +348,58 @@ def radarr_titles():
 
 
 # ---------------------------------------------------------------------------
+# AniList disk cache (never caches failures; corruption-safe)
+# ---------------------------------------------------------------------------
+
+
+def cache_key(title):
+    """Normalized cache key: lowercase, whitespace-collapsed, ×→x,
+    punctuation stripped (same tolerance used for title matching)."""
+    return tolerant(title)
+
+
+def load_cache():
+    """Corruption-safe: unparseable/missing file logs a warning and starts
+    fresh; never raises."""
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+        print(f"warning: {CACHE_FILE} is not a JSON object; starting fresh", file=sys.stderr)
+    except (OSError, ValueError) as e:
+        print(f"warning: cannot read {CACHE_FILE} ({e}); starting fresh", file=sys.stderr)
+    return {}
+
+
+def save_cache(cache):
+    try:
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp, CACHE_FILE)
+    except OSError as e:
+        print(f"warning: cannot write {CACHE_FILE} ({e})", file=sys.stderr)
+
+
+def cache_lookup(cache, title):
+    """Returns (entry, fresh). entry is None on miss; fresh False when the
+    entry is stale (past TTL) or its fetched_at is unparseable."""
+    entry = cache.get(cache_key(title))
+    if not isinstance(entry, dict) or not isinstance(entry.get("characters"), list):
+        return None, False
+    fresh = False
+    try:
+        fetched = datetime.fromisoformat(entry["fetched_at"])
+        age_days = (time.time() - fetched.timestamp()) / 86400.0
+        fresh = age_days < CACHE_TTL_DAYS
+    except (KeyError, TypeError, ValueError):
+        fresh = False
+    return entry, fresh
+
+
+# ---------------------------------------------------------------------------
 # Per-title pipeline
 # ---------------------------------------------------------------------------
 
@@ -405,28 +477,56 @@ def fetch_characters(media):
     return chars
 
 
-def process_title(glossary, title, is_movie=False):
-    """Fetch + merge one title; returns a summary line dict."""
+def resolve_characters(cache, title, is_movie=False):
+    """Returns (chars, source): chars from the disk cache when fresh,
+    otherwise from AniList (and cached on success). source is 'cache' or
+    'api'; on failure returns (None, reason-string)."""
+    entry, fresh = cache_lookup(cache, title)
+    if entry and fresh:
+        return entry["characters"], "cache"
+    if entry:
+        print(f"[cache] stale {title} (refreshing)")
     media, warn = fetch_media(title, is_movie=is_movie)
     if media is None:
-        return {"title": title, "warn": warn, "ok": False}
-    media_title = (
-        media.get("title", {}).get("english")
-        or media.get("title", {}).get("romaji")
-        or "?"
-    )
+        return None, warn
     chars = fetch_characters(media)
     if not chars:
-        return {"title": title, "warn": "AniList returned no characters", "ok": False}
+        return None, "AniList returned no characters"
+    cache[cache_key(title)] = {
+        "fetched_at": datetime.now().isoformat(),
+        "media_id": media.get("id"),
+        "title_romaji": ((media.get("title", {}) or {}).get("romaji") or ""),
+        "characters": chars,
+    }
+    save_cache(cache)
+    return chars, "api"
+
+
+def process_title(cache, glossary, title, is_movie=False):
+    """Fetch (cache-first) + merge one title; returns a summary line dict."""
+    # glossary-as-cache: series already at the ref cap -> no API call at all
+    key = find_existing_key(glossary, title) or title
+    entries = glossary.get(key) or {}
+    if len(entries) >= MAX_PAIRS_PER_SERIES:
+        return {
+            "title": title,
+            "warn": f"glossary already full ({len(entries)} refs); skipped",
+            "ok": False,
+        }
+    chars, src = resolve_characters(cache, title, is_movie=is_movie)
+    if src != "cache" and src != "api":
+        return {"title": title, "warn": src, "ok": False}
+    print(f"[cache] {'hit' if src == 'cache' else 'miss'} {title}")
     pairs = build_pairs(chars)
     key, added, existing_count, skipped_full = merge_pairs(glossary, title, pairs)
     if skipped_full:
         return {
             "title": title,
-            "anilist": media_title,
+            "anilist": (cache.get(cache_key(title), {}) or {}).get("title_romaji") or "?",
             "warn": f"series already at {existing_count} refs; nothing added",
             "ok": False,
         }
+    media_title = (cache.get(cache_key(title), {}) or {}).get("title_romaji") or "?"
     return {
         "title": title,
         "anilist": media_title,
@@ -462,10 +562,12 @@ def main():
 
     glossary = load_glossary(args.glossary)
     print(f"glossary: {args.glossary} ({len(glossary)} series loaded)")
+    cache = load_cache()
+    print(f"cache: {CACHE_FILE} ({len(cache)} entries)")
 
     summaries = []
     if args.series:
-        summaries.append(process_title(glossary, args.series, is_movie=False))
+        summaries.append(process_title(cache, glossary, args.series, is_movie=False))
     else:
         try:
             titles = []
@@ -487,7 +589,7 @@ def main():
                 f"library: {len(unique)} unique titles, {len(missing)} missing from glossary"
             )
             for t, m in missing:
-                summaries.append(process_title(glossary, t, is_movie=m))
+                summaries.append(process_title(cache, glossary, t, is_movie=m))
         except requests.RequestException as e:
             print(f"library scan failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -505,6 +607,7 @@ def main():
             )
         else:
             print(f"  [skip ] {s['title']}: {s.get('warn', 'no change')}")
+    print(f"\nAniList API calls: {_api_calls}")
 
 
 if __name__ == "__main__":
