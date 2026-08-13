@@ -102,12 +102,15 @@ def reset_model():
         _model = None
 
 
-def _parse_chunks(raw, timestamps):
+def _parse_chunks(raw, timestamps, capture_bgm=False):
     """Split raw text into (start_ms, end_ms, text) char-timestamp chunks.
-    Event tags (<|Speech|>, <|BGM|>, <|EMO_*|>) are markers, not text."""
+    Event tags (<|Speech|>, <|BGM|>, <|EMO_*|>) are markers, not text.
+    capture_bgm=True additionally returns a parallel list of bools marking
+    chunks that follow a <|BGM|> marker (the marker is stripped as usual)."""
     parts = _MARKER.split(raw)
     char_offset = 0
     chunks = []
+    bgm = []
     for i in range(len(parts)):
         if i % 2 == 1:
             continue
@@ -125,6 +128,9 @@ def _parse_chunks(raw, timestamps):
         t0 = int(timestamps[s_idx][0])
         t1 = int(timestamps[e_idx][1])
         chunks.append((max(t0, 0), max(t1, t0), clean))
+        bgm.append(i > 0 and parts[i - 1] == "BGM")
+    if capture_bgm:
+        return chunks, bgm
     return chunks
 
 
@@ -247,10 +253,14 @@ def _split_sentence_chunks(chunks):
     return runs
 
 
-def transcribe_cues(wav_path, language="ja"):
+def transcribe_cues(wav_path, language="ja", return_windows=False):
     """SenseVoice + fsmn-vad transcription; sentence-boundary cue splitting
     (SENTENCE_END_PUNCT / SV_MIN_GAP_MS) + min-1s post-pass.
-    Returns {start_ms, end_ms, text} cues (no cue < 1s; spans <= 6s)."""
+    Returns {start_ms, end_ms, text} cues (no cue < 1s; spans <= 6s).
+    return_windows=True additionally returns (cues, windows) where windows
+    is the per-VAD-window metadata used to build cues:
+    [{"start_ms", "end_ms", "bgm", "text"}] — bgm True when any raw chunk in
+    the window carried a <|BGM|> marker; text is the window's stripped text."""
     model = get_model()
     results = model.generate(
         input=wav_path,
@@ -264,17 +274,20 @@ def transcribe_cues(wav_path, language="ja"):
     )
 
     all_chunks = []
+    all_bgm = []
     for res in results:
         raw = res.get("text", "")
         timestamps = res.get("timestamp") or []
-        all_chunks.extend(_parse_chunks(raw, timestamps))
+        chunks, bgms = _parse_chunks(raw, timestamps, capture_bgm=True)
+        all_chunks.extend(chunks)
+        all_bgm.extend(bgms)
     if not all_chunks:
-        return []
+        return ([], []) if return_windows else []
 
     vad = _vad_segments_ms(wav_path)
 
     buckets = {}
-    for chunk in all_chunks:
+    for chunk, bgm in zip(all_chunks, all_bgm):
         best, best_ov = -1, 0.0
         for vi, (vs, ve) in enumerate(vad):
             ov = _overlap_ms(chunk[0], chunk[1], vs, ve)
@@ -285,16 +298,29 @@ def transcribe_cues(wav_path, language="ja"):
             buckets[bkey] = {
                 "bounds": vad[best] if best >= 0 else None,
                 "chunks": [],
+                "bgm": False,
             }
         buckets[bkey]["chunks"].append(chunk)
+        if bgm:
+            buckets[bkey]["bgm"] = True
 
     cues = []
+    windows = []
     for vi in sorted(buckets):
         info = buckets[vi]
         chunks = sorted(info["chunks"], key=lambda c: c[0])
         if not chunks:
             continue
         bounds = info["bounds"]
+        if bounds is not None:
+            windows.append(
+                {
+                    "start_ms": bounds[0],
+                    "end_ms": bounds[1],
+                    "bgm": bool(info["bgm"]),
+                    "text": " ".join(c[2] for c in chunks).strip(),
+                }
+            )
         for run in _split_sentence_chunks(chunks):
             cue = _assemble_cue(run)
             if not cue["text"]:
@@ -311,4 +337,7 @@ def transcribe_cues(wav_path, language="ja"):
                     cue["end"] = nend
             cues.append(cue)
     cues.sort(key=lambda c: c["start"])
-    return _min_dur_postpass(cues)
+    cues = _min_dur_postpass(cues)
+    if return_windows:
+        return cues, windows
+    return cues

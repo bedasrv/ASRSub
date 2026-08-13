@@ -135,7 +135,14 @@ def main(argv):
             import pipeline.asr as pasr
 
             pasr.reset_model()
-        cues = o.asr_cues({}, wav, "ja")
+        if o.EMO_ENABLED and o.ASR_BACKEND == "sensevoice":
+            cues, wmeta = o.asr_cues({}, wav, "ja", return_windows=True)
+            cues = o.maybe_attach_emotion(cues, wav, wmeta)
+            n_emo = sum(1 for c in cues if c.get("emotion"))
+            n_veto = sum(1 for c in cues if c.get("emotion_veto"))
+            print(f"emotion: {n_emo} annotated, {n_veto} vetoed")
+        else:
+            cues = o.asr_cues({}, wav, "ja")
 
         texts = [c["text"] for c in cues]
         sanitized = o.sanitize_lines(texts)
