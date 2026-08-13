@@ -55,20 +55,18 @@ def fake_id_lines(n):
 
 
 def test_merge_10_to_7():
-    """Model returns 7 numbered entries for 10 lines; tail completion must fill
+    """Model returns 7 <sn> entries for 10 lines; tail completion must fill
     the remaining 3 via a separate call, producing 10 groups."""
     calls = []
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        sys_prompt = messages[0]["content"]
-        n_lines = len([l for l in sys_prompt.splitlines() if re.match(r"^\d+\. ", l)]) or \
-            len([l for l in messages[1]["content"].splitlines() if re.match(r"^\d+\. ", l)])
+        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
         calls.append(n_lines)
         if n_lines == 10:
-            return "1. Satu.\n2. Dua.\n3. Tiga.\n4. Empat.\n5. Lima.\n6. Enam.\n7. Tujuh."
+            return "<target><sn>Satu.</sn><sn>Dua.</sn><sn>Tiga.</sn><sn>Empat.</sn><sn>Lima.</sn><sn>Enam.</sn><sn>Tujuh.</sn></target>"
         if n_lines == 3:
-            return "1. Delapan.\n2. Sembilan.\n3. Sepuluh."
-        return "1. Per baris."
+            return "<target><sn>Delapan.</sn><sn>Sembilan.</sn><sn>Sepuluh.</sn></target>"
+        return "<target><sn>Per baris.</sn></target>"
 
     o.post_chat = fake_post_chat
     lines = fake_ja_lines(10)
@@ -83,15 +81,21 @@ def test_merge_10_to_7():
 def test_echo_then_recover():
     """First chunk attempt echoes CJK; next attempt returns clean ID."""
     attempts = {"n": 0}
+    words = ["satu", "dua", "tiga", "empat", "lima", "enam", "tujuh",
+             "delapan", "sembilan", "sepuluh"]
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len([l for l in messages[1]["content"].splitlines() if re.match(r"^\d+\. ", l)])
+        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
         attempts["n"] += 1
         if n_lines == 10 and attempts["n"] <= 2:
-            return "1. テストの台詞です。1\n2. はい、そうです。2\n3. 台詞3\n4. 台詞4\n5. 台詞5\n6. 台詞6\n7. 台詞7\n8. 台詞8\n9. 台詞9\n10. 台詞10"
+            return "<target>" + "".join(
+                f"<sn>テストの台詞です。{i}</sn>" for i in range(1, 11)
+            ) + "</target>"
         if n_lines == 10:
-            return "1. Kalimat satu.\n2. Kalimat dua.\n3. Kalimat tiga.\n4. Kalimat empat.\n5. Kalimat lima.\n6. Kalimat enam.\n7. Kalimat tujuh.\n8. Kalimat delapan.\n9. Kalimat sembilan.\n10. Kalimat sepuluh."
-        return "1. Per baris."
+            return "<target>" + "".join(
+                f"<sn>Kalimat {words[i - 1]}.</sn>" for i in range(1, 11)
+            ) + "</target>"
+        return "<target><sn>Per baris.</sn></target>"
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(10), "Indonesian", "k")
@@ -105,12 +109,12 @@ def test_tail_completion_only():
     """Entries + completion merge: 7 entries + 3-line tail; completion may
     return fewer than asked (model merges), groups still aligned per entry."""
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len([l for l in messages[1]["content"].splitlines() if re.match(r"^\d+\. ", l)])
+        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
         if n_lines == 10:
-            return "1. A.\n2. B.\n3. C.\n4. D.\n5. E.\n6. F.\n7. G."
+            return "<target><sn>A.</sn><sn>B.</sn><sn>C.</sn><sn>D.</sn><sn>E.</sn><sn>F.</sn><sn>G.</sn></target>"
         if n_lines == 3:
-            return "1. H.\n2. I.\n3. J."
-        return "1. X."
+            return "<target><sn>H.</sn><sn>I.</sn><sn>J.</sn></target>"
+        return "<target><sn>X.</sn></target>"
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(10), "Indonesian", "k")
@@ -123,10 +127,12 @@ def test_per_line_fallback():
     """Chunk always echoes; per-line fallback runs and emits empty text on
     persistent failure (mirrors one_shot 1-empty-cue tolerance)."""
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len([l for l in messages[1]["content"].splitlines() if re.match(r"^\d+\. ", l)])
+        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
         if n_lines >= 2:
-            return "1. エコー\n2. エコー\n3. エコー\n4. エコー\n5. エコー"
-        return "1. エコー"
+            return "<target>" + "".join(
+                f"<sn>エコー{i}</sn>" for i in range(1, 6)
+            ) + "</target>"
+        return "<target><sn>エコー</sn></target>"
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(5), "Indonesian", "k")
@@ -142,12 +148,12 @@ def test_glossary_refs_flow():
 
     def fake_post_chat(cfg, messages, model, key, local=False):
         seen.append(messages[0]["content"])
-        n_lines = len([l for l in messages[1]["content"].splitlines() if re.match(r"^\d+\. ", l)])
+        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
         if n_lines == 10:
-            return "1. Satu.\n2. Dua.\n3. Tiga.\n4. Empat.\n5. Lima.\n6. Enam.\n7. Tujuh."
+            return "<target><sn>Satu.</sn><sn>Dua.</sn><sn>Tiga.</sn><sn>Empat.</sn><sn>Lima.</sn><sn>Enam.</sn><sn>Tujuh.</sn></target>"
         if n_lines == 3:
-            return "1. Delapan.\n2. Sembilan.\n3. Sepuluh."
-        return "1. Satu."
+            return "<target><sn>Delapan.</sn><sn>Sembilan.</sn><sn>Sepuluh.</sn></target>"
+        return "<target><sn>Satu.</sn></target>"
 
     o.post_chat = fake_post_chat
     refs = "アーシア翻译成Asia；イッセー翻译成Issei"
@@ -575,12 +581,14 @@ def test_jellyfin_refresh():
 
 
 def test_translate_overcount_clamped():
-    """Model returns MORE numbered lines than the chunk (12 for 10):
+    """Model returns MORE <sn> entries than the chunk (12 for 10):
     entries with k > n must be dropped so exactly n groups are produced and
     cue assembly (cues[s]) never overruns the chunk."""
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        return "\n".join(f"{i}. Baris nomor {i}." for i in range(1, 13))
+        return "<target>" + "".join(
+            f"<sn>Baris nomor {i}.</sn>" for i in range(1, 13)
+        ) + "</target>"
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(
@@ -748,28 +756,34 @@ def test_actions_truncate_preserves_appended():
 
 
 
-def test_translate_offset_keys_clamped():
-    """Model returns exactly n numbered lines but offset-numbered (2..n+1):
-    the m==n branch must drop out-of-range keys instead of producing a group
-    beyond the cue list (IndexError) or negative indices (silent wrap)."""
+def test_translate_stray_prose_ignored():
+    """Model wraps <target> in stray prose and returns MORE <sn> entries
+    than the chunk (12 for 10): prose outside the tags is ignored and
+    entries with k > n are dropped, so exactly n groups are produced and
+    cue assembly never overruns the chunk."""
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        return "\n".join(f"{i}. Baris offset {i}." for i in range(2, 12))
+        return (
+            "Berikut terjemahannya: "
+            + "<target>"
+            + "".join(f"<sn>Baris nomor {i}.</sn>" for i in range(1, 13))
+            + "</target>"
+            + " Selesai."
+        )
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(
         build_cfg(), fake_ja_lines(10), "Indonesian", "k"
     )
-    assert len(groups) == 9, f"keys 2..10 kept, 11 dropped: {groups}"
-    assert [g[0] for g in groups] == list(range(1, 10)), groups
-    assert all(0 <= g[0] < 10 and g[1] <= 10 for g in groups), groups
+    assert len(groups) == 10, f"over-count dropped: {len(groups)} groups"
+    assert [g[0] for g in groups] == list(range(10)), groups
     cues = [
         {"start": i * 1000, "end": i * 1000 + 900, "text": f"cue {i}"}
         for i in range(10)
     ]
     for s, e, _t in groups:
         assert 0 <= s < len(cues) and s < e <= len(cues), (s, e)
-    print("PASS translate_offset_keys_clamped")
+    print("PASS translate_stray_prose_ignored")
 
 
 def test_delete_lang_scoped_action():

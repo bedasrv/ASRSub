@@ -106,13 +106,18 @@ def _parse_chunks(raw, timestamps, capture_bgm=False):
     """Split raw text into (start_ms, end_ms, text) char-timestamp chunks.
     Event tags (<|Speech|>, <|BGM|>, <|EMO_*|>) are markers, not text.
     capture_bgm=True additionally returns a parallel list of bools marking
-    chunks that follow a <|BGM|> marker (the marker is stripped as usual)."""
+    chunks whose preceding marker run contains a <|BGM|> marker (raw text is
+    e.g. <|ja|><|EMO_UNKNOWN|><|BGM|><|withitn|>text — any marker since the
+    previous text chunk counts, not just the immediately adjacent one)."""
     parts = _MARKER.split(raw)
     char_offset = 0
     chunks = []
     bgm = []
+    run_bgm = False
     for i in range(len(parts)):
         if i % 2 == 1:
+            if parts[i] == "BGM":
+                run_bgm = True
             continue
         chunk = parts[i]
         if not chunk.strip():
@@ -128,7 +133,8 @@ def _parse_chunks(raw, timestamps, capture_bgm=False):
         t0 = int(timestamps[s_idx][0])
         t1 = int(timestamps[e_idx][1])
         chunks.append((max(t0, 0), max(t1, t0), clean))
-        bgm.append(i > 0 and parts[i - 1] == "BGM")
+        bgm.append(run_bgm)
+        run_bgm = False
     if capture_bgm:
         return chunks, bgm
     return chunks

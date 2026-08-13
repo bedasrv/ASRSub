@@ -154,7 +154,10 @@ def main(argv):
         }
         lang_name = o.LANG_NAMES.get(args.lang, args.lang)
         refs = o.pipeline_glossary.terminology_block(args.series) if args.series else ""
-        groups = o._translate_merge_aware(cfg, guarded, lang_name, "oneshot", refs=refs)
+        groups = o._translate_merge_aware(
+            cfg, guarded, lang_name, "oneshot", refs=refs,
+            emotions=([c.get("emotion") for c in cues] if o.EMO_ENABLED else None),
+        )
         cues_out = []
         texts_out = []
         for s, e, t in groups:

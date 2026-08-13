@@ -61,6 +61,23 @@ TRANSLATE_PROMPT = (
     "source; (5) no timestamps, no numbering."
 )
 
+# HY-MT1.5 native <sn>/<target> protocol (local 7B path, trained behaviors from
+# the tencent/HY-MT1.5-7B model card; adapted to Indonesian). Assembly order:
+# terminology, context (REF lines + connective), format instruction, fidelity
+# line, tone hints, then the <source> block.
+TRANSLATE_CONTEXT_LINES = int(os.environ.get("TRANSLATE_CONTEXT_LINES", "2"))
+HYMT_FORMAT_INSTRUCTION = (
+    "将以下<source></source>之间的文本翻译为印尼语，注意只需要输出翻译后的结果，"
+    "不要额外解释，原文中的<sn></sn>标签表示标签内文本包含格式信息，需要在译文中"
+    "相应的位置尽量保留该标签。输出格式为：<target>str</target>"
+)
+HYMT_FIDELITY = (
+    "每行译文不超过42个字符，阅读速度需要时再压缩，不要改写原意，专有名词不可省略。"
+)
+HYMT_CONTEXT_CONNECTIVE = (
+    "参考上面的信息，把下面的文本翻译成印尼语，注意不需要翻译上文，也不要额外解释："
+)
+
 BATCH_SIZE = 20
 TIMEOUT = 900
 MODEL_FALLBACKS = [
@@ -2668,6 +2685,22 @@ def _parse_numbered_response(raw):
     return parsed
 
 
+def _parse_target_response(raw):
+    """Extract the <target>...</target> block and split its <sn>...</sn>
+    entries; returns {1-based index: text} or None when no <target> block.
+    Empty <target> without <sn> entries yields {} (count mismatch downstream
+    triggers the existing per-line fallback)."""
+    if not raw:
+        return None
+    m = re.search(r"<target>(.*?)</target>", raw, re.S)
+    if not m:
+        return None
+    out = {}
+    for i, seg in enumerate(re.finditer(r"<sn>(.*?)</sn>", m.group(1), re.S)):
+        out[i + 1] = seg.group(1).strip()
+    return out
+
+
 def sanitize_lines(lines, max_repeat=10):
     """Collapse runs of >max_repeat identical chars to max_repeat + ellipsis
     (anime scream lines otherwise trigger repetition collapse in small models)."""
@@ -2711,34 +2744,62 @@ def guard_foreign_lines(lines, sdh_placeholders=None):
     return out, foreign
 
 
-def _local_chunk(cfg, chunk, lang_name, key, refs=None):
-    """One local-model chat call for a numbered chunk. Returns parsed dict
-    num->text (via _parse_numbered_response) or None on network failure.
-    refs: HY-MT1.5 official terminology-intervention line (glossary) or None."""
+def _hymt_prompt(chunk, lang_name, refs=None, context_lines=None, emotions=None):
+    """Assemble the HY-MT native <sn>/<target> prompt for a chunk. Returns
+    (system, user). Order: terminology block, context (REF lines + contextual
+    connective, capped at TRANSLATE_CONTEXT_LINES), format instruction,
+    fidelity line, tone hints (only when emotions given; <sn> indices are
+    1-based source order), then the <source> block with every line wrapped
+    in its own <sn></sn>."""
     n = len(chunk)
-    system = (
-        f"Translate each line into {lang_name}. Reply as numbered list, "
-        f"e.g. 1. ... 2. ... 3. ..., exactly {n} lines, no extra text."
-    )
+    parts = []
     if refs:
-        system += "\n\n参考下面的翻译：\n" + refs
-    prompt = system + "\n\n" + "\n".join(f"{i}. {l}" for i, l in enumerate(chunk, 1))
+        parts.append("参考下面的翻译：\n" + refs)
+    if context_lines:
+        capped = context_lines[:TRANSLATE_CONTEXT_LINES]
+        parts.append("\n".join(f"REF: {l}" for l in capped))
+        parts.append(HYMT_CONTEXT_CONNECTIVE)
+    parts.append(HYMT_FORMAT_INSTRUCTION)
+    parts.append(HYMT_FIDELITY)
+    if emotions and any(e for e in emotions):
+        hints = ", ".join(
+            f"<sn>{i + 1}</sn>: {emotions[i]}"
+            for i, e in enumerate(emotions)
+            if e
+        )
+        if hints:
+            parts.append("Tone hints: " + hints)
+    system = "\n".join(parts)
+    user = "<source>" + "".join(f"<sn>{l}</sn>" for l in chunk) + "</source>"
+    return system, user
+
+
+def _local_chunk(cfg, chunk, lang_name, key, refs=None, context_lines=None,
+                 emotions=None):
+    """One local-model chat call for a chunk (HY-MT native <sn>/<target>
+    protocol). Returns parsed dict index->text (via _parse_target_response)
+    or None on network failure."""
+    n = len(chunk)
+    system, user = _hymt_prompt(chunk, lang_name, refs=refs,
+                                context_lines=context_lines, emotions=emotions)
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": user},
     ]
     raw = post_chat(cfg, messages, cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL, key, local=True)
     if raw is None:
         return None
-    return _parse_numbered_response(raw)
+    return _parse_target_response(raw)
 
 
-def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None):
+def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None,
+                   context_lines=None, emotions=None):
     """Up to 3 attempts per chunk; corrective retry on echo. Returns clean
     parsed dict or None (all attempts empty/echo/network-fail)."""
     n = len(chunk)
     for _ in range(3):
-        parsed = _local_chunk(cfg, chunk, lang_name, key, refs=refs)
+        parsed = _local_chunk(cfg, chunk, lang_name, key, refs=refs,
+                              context_lines=context_lines, emotions=emotions)
         if not parsed:
             continue
         echo = False
@@ -2752,31 +2813,25 @@ def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None):
     return None
 
 
-def _complete_tail(cfg, tail_lines, m, lang_name, key, refs=None):
+def _complete_tail(cfg, tail_lines, m, lang_name, key, refs=None,
+                   context_lines=None, emotions=None):
     """Complete a chunk's missing tail: translate source lines m..n-1
     (numbered m+1..n in the prompt), remap keys to absolute m+i. Returns
     merged dict for the full chunk (keys 1..n) or None after 3 attempts."""
     n = m + len(tail_lines)
     for _ in range(3):
-        system = (
-            f"Translate each line into {lang_name}. Reply as numbered list, "
-            f"e.g. 1. ... 2. ... 3. ..., exactly {n - m} lines, no extra text."
-        )
-        if refs:
-            system += "\n\n参考下面的翻译：\n" + refs
-        prompt = (
-            system
-            + "\n\n"
-            + "\n".join(f"{i + 1}. {l}" for i, l in enumerate(tail_lines))
+        system, user = _hymt_prompt(
+            tail_lines, lang_name, refs=refs, context_lines=context_lines,
+            emotions=(emotions[m:] if emotions else None),
         )
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": user},
         ]
         raw = post_chat(cfg, messages, cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL, key, local=True)
         if raw is None:
             continue
-        parsed = _parse_numbered_response(raw)
+        parsed = _parse_target_response(raw)
         if not parsed:
             continue
         echo = False
@@ -2791,7 +2846,8 @@ def _complete_tail(cfg, tail_lines, m, lang_name, key, refs=None):
     return None
 
 
-def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
+def _translate_merge_aware(cfg, lines, lang_name, key, refs=None,
+                           context_lines=None, emotions=None):
     """Translate, tolerating HY-MT merging consecutive short lines. Returns
     list of (cue_start_idx, cue_end_idx_exclusive, text)."""
     groups = []
@@ -2799,11 +2855,15 @@ def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
     for start in range(0, len(lines), cs):
         chunk = lines[start : start + cs]
         n = len(chunk)
-        parsed = _attempt_chunk(cfg, chunk, lang_name, key, refs=refs)
+        parsed = _attempt_chunk(cfg, chunk, lang_name, key, refs=refs,
+                                context_lines=context_lines,
+                                emotions=(emotions[start:start + cs] if emotions else None))
         if parsed is None:
             for j in range(n):
                 gi = start + j
-                p = _attempt_chunk(cfg, [chunk[j]], lang_name, key, echo_probe=1, refs=refs)
+                p = _attempt_chunk(cfg, [chunk[j]], lang_name, key, echo_probe=1,
+                                   refs=refs, context_lines=context_lines,
+                                   emotions=([emotions[gi]] if emotions and emotions[gi] else None))
                 text = re.sub(r"^>\s*", "", (p or {}).get(1, ""))
                 groups.append((gi, gi + 1, text))
             continue
@@ -2819,7 +2879,9 @@ def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
         tail_lines = chunk[m:n]
         merged = None
         if tail_lines:
-            completion = _complete_tail(cfg, tail_lines, m, lang_name, key, refs=refs)
+            completion = _complete_tail(cfg, tail_lines, m, lang_name, key,
+                                        refs=refs, context_lines=context_lines,
+                                        emotions=emotions)
             if completion:
                 merged = {**entries_dict, **completion}
         if merged:
@@ -2835,19 +2897,22 @@ def _translate_merge_aware(cfg, lines, lang_name, key, refs=None):
                 groups.append((gi, gi + 1, re.sub(r"^>\s*", "", t)))
             for k in range(m + 1, n + 1):
                 gi = start + k - 1
-                p = _attempt_chunk(cfg, [chunk[k - 1]], lang_name, key, echo_probe=1, refs=refs)
+                p = _attempt_chunk(cfg, [chunk[k - 1]], lang_name, key, echo_probe=1,
+                                   refs=refs, context_lines=context_lines,
+                                   emotions=([emotions[gi]] if emotions and emotions[gi] else None))
                 text = re.sub(r"^>\s*", "", (p or {}).get(1, ""))
                 groups.append((gi, gi + 1, text))
     return groups
 
 
-def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None, series_title=None, skip_guard=False):
+def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None, series_title=None, skip_guard=False, emotions=None):
     lines = sanitize_lines(lines)
     if is_local_translate(cfg):
-        # local 7B path: merge-aware numbered protocol with HY-MT1.5 official
-        # terminology intervention (glossary). Foreign lines become SDH
-        # placeholders (kept in output, not swapped back) — skipped when the
-        # SOURCE is already eng/latin (skip_guard) so it can be translated.
+        # local 7B path: HY-MT native <sn>/<target> protocol with the official
+        # terminology intervention (glossary) and optional tone hints
+        # (emotions, one per line). Foreign lines become SDH placeholders
+        # (kept in output, not swapped back) — skipped when the SOURCE is
+        # already eng/latin (skip_guard) so it can be translated.
         sdh = cfg.get("SDH_PLACEHOLDERS") or DEFAULT_SDH_PLACEHOLDERS
         if not skip_guard:
             lines, _foreign = guard_foreign_lines(lines, sdh)
@@ -2855,7 +2920,8 @@ def chat_translate_batch(cfg, lines, target_lang, key, context_lines=None, serie
         if term:
             log(f"    [translate] glossary terminology for series: {len(term)} chars")
         lang_name = LANG_NAMES.get(target_lang, target_lang)
-        return _translate_merge_aware(cfg, lines, lang_name, key, refs=term)
+        return _translate_merge_aware(cfg, lines, lang_name, key, refs=term,
+                                      context_lines=context_lines, emotions=emotions)
     models = [cfg.get("TRANSLATE_MODEL") or TRANSLATE_MODEL] + [
         m for m in MODEL_FALLBACKS if m != cfg.get("TRANSLATE_MODEL")
     ]
@@ -2929,6 +2995,7 @@ def translate_texts(
     out = chat_translate_batch(
         cfg, lines, target_lang, key, context_lines, series_title=series_title,
         skip_guard=skip_guard,
+        emotions=[c.get("emotion") for c in cues],
     )
     if out is None:
         return None
