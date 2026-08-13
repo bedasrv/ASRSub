@@ -153,6 +153,16 @@ def main(argv):
         for s, e, t in groups:
             cues_out.append({"start": cues[s]["start"], "end": cues[e - 1]["end"]})
             texts_out.append(t)
+        # ASR-translated output: merge too-fast translated cues (see
+        # orchestrator.cps_merge) before SRT serialization.
+        merged = o.cps_merge(
+            [
+                {"start": cues_out[i]["start"], "end": cues_out[i]["end"], "text": texts_out[i]}
+                for i in range(len(cues_out))
+            ]
+        )
+        cues_out = [{"start": c["start"], "end": c["end"]} for c in merged]
+        texts_out = [c["text"] for c in merged]
         o.write_srt(cues_out, texts_out, out, header=o.AI_MARKER if args.ai else None)
 
         num_chunks = (len(guarded) + o.TRANSLATE_CHUNK - 1) // o.TRANSLATE_CHUNK
