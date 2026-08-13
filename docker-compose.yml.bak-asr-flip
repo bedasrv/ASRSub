@@ -9,7 +9,6 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - TZ=Asia/Jakarta
-      - ASR_BACKEND=sensevoice
     network_mode: host
     volumes:
       - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline
