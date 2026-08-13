@@ -15,13 +15,24 @@ never used.
 
 Pipeline (the working path, adapter-verified): generate(..., output_timestamp=
 True, merge_vad=False) -> per-utterance marker-chunks with char timestamps ->
-bucket chunks into fsmn-vad speech windows (best overlap) -> per-window cue ->
-_min_dur_postpass: no cue < 1s is ever emitted (extend to 1s when the gap
-allows, else merge with the closer neighbor — tie prefers the previous —
-capped at 6s total; last resort drops the fragment). This replaces the doc's
+bucket chunks into fsmn-vad speech windows (best overlap) -> split each window
+at sentence boundaries -> one cue per sentence with REAL per-chunk timestamps
+(start = first chunk's start_ms, end = final chunk's end_ms) ->
+_min_dur_postpass: no cue < 1s is ever emitted (extend to 1s into adjacent
+silence — forward into the gap after the cue, else backward into the gap
+before it, so short sentences keep their own cue — else merge with the closer
+neighbor, tie prefers the previous, capped at 6s total; last resort drops the
+fragment). This replaces the doc's
 200ms rule and _merge_tiny's 0.6s-gap rule for this path: with 400ms
 max_end_silence_time, inter-utterance gaps of 300-900ms produce 41% sub-1s
 fragments that neither rule resolves.
+
+Sentence-boundary split: walking a window's sorted chunks, the current cue is
+closed when a chunk's text ends with one of SENTENCE_END_PUNCT (env override,
+default "。！？…") or when the gap to the next chunk is >= SV_MIN_GAP_MS. This
+keeps multi-sentence walls of text (22% of cues held 2+ sentences) out of the
+ASR output; _min_dur_postpass then merges short sentence fragments instead of
+sentence stacks. Commas (、,) are never split points.
 
 Cues are returned as {start_ms, end_ms, text} like pipeline/asr.py.
 """
@@ -40,6 +51,9 @@ SV_MIN_SPEECH_MS = int(os.environ.get("SV_MIN_SPEECH_MS", "250"))
 SV_MIN_CUE_MS = int(os.environ.get("SV_MIN_CUE_MS", "1000"))
 SV_MAX_CUE_MS = int(os.environ.get("SV_MAX_CUE_MS", "6000"))
 SV_MIN_GAP_MS = int(os.environ.get("SV_MIN_GAP_MS", "150"))
+SENTENCE_END_PUNCT = os.environ.get("SENTENCE_END_PUNCT", "。！？…")
+
+_SENT_END_RE = re.compile("[" + re.escape(SENTENCE_END_PUNCT) + "]$")
 
 VAD_KWARGS = {
     "max_single_segment_time": SV_MAX_SEG_MS,
@@ -127,8 +141,11 @@ def _min_dur_postpass(cues, min_dur_ms=SV_MIN_CUE_MS, max_dur_ms=SV_MAX_CUE_MS,
                       min_gap_ms=SV_MIN_GAP_MS):
     """Resolve every cue shorter than min_dur_ms. Never emits a <min_dur cue.
 
-    1) extend the cue's end to min_dur_ms when the gap to the next cue allows
-       (next.start - new_end >= min_gap_ms); a trailing cue extends freely;
+    1) extend the cue to min_dur_ms using adjacent silence — forward into the
+       gap after it first (next.start - new_end >= min_gap_ms), then backward
+       into the gap before it (new_start - prev.end >= min_gap_ms) so a short
+       sentence keeps its own cue instead of re-joining its neighbor; a
+       trailing cue extends freely;
     2) else merge with the NEIGHBOR — prefer the closer one, ties prefer the
        previous — capped at max_dur_ms total span;
     3) else drop the fragment (last resort; only reachable when both
@@ -163,6 +180,11 @@ def _min_dur_postpass(cues, min_dur_ms=SV_MIN_CUE_MS, max_dur_ms=SV_MAX_CUE_MS,
         if cur["start"] + min_dur_ms <= nxt["start"] - min_gap_ms:
             cur["end"] = cur["start"] + min_dur_ms
             continue
+        if prev is not None:
+            new_start = cur["end"] - min_dur_ms
+            if new_start >= prev["end"] + min_gap_ms:
+                cur["start"] = new_start
+                continue
         g_prev = (cur["start"] - prev["end"]) if prev else float("inf")
         g_next = (nxt["start"] - cur["end"]) if nxt else float("inf")
         cands = []
@@ -188,8 +210,38 @@ def _min_dur_postpass(cues, min_dur_ms=SV_MIN_CUE_MS, max_dur_ms=SV_MAX_CUE_MS,
             del out[i]
 
 
+def _assemble_cue(chunks):
+    """One cue from consecutive (start_ms, end_ms, text) chunks: REAL
+    timestamps — start = first chunk's start, end = final chunk's end."""
+    return {
+        "start": chunks[0][0],
+        "end": chunks[-1][1],
+        "text": " ".join(c[2] for c in chunks).strip(),
+    }
+
+
+def _split_sentence_chunks(chunks):
+    """Split a VAD window's sorted chunks into sentence-length runs.
+    A run closes when a chunk's text ends with SENTENCE_END_PUNCT or when
+    the gap to the next chunk is >= SV_MIN_GAP_MS."""
+    runs = []
+    cur = []
+    for i, c in enumerate(chunks):
+        if cur and c[0] - cur[-1][1] >= SV_MIN_GAP_MS:
+            runs.append(cur)
+            cur = []
+        cur.append(c)
+        if _SENT_END_RE.search(c[2]):
+            runs.append(cur)
+            cur = []
+    if cur:
+        runs.append(cur)
+    return runs
+
+
 def transcribe_cues(wav_path, language="ja"):
-    """SenseVoice + fsmn-vad transcription; 5s VAD cap + min-1s post-pass.
+    """SenseVoice + fsmn-vad transcription; sentence-boundary cue splitting
+    (SENTENCE_END_PUNCT / SV_MIN_GAP_MS) + min-1s post-pass.
     Returns {start_ms, end_ms, text} cues (no cue < 1s; spans <= 6s)."""
     model = get_model()
     results = model.generate(
@@ -227,14 +279,9 @@ def transcribe_cues(wav_path, language="ja"):
         chunks = sorted(buckets[vi], key=lambda c: c[0])
         if not chunks:
             continue
-        text = " ".join(c[2] for c in chunks).strip()
-        if text:
-            cues.append(
-                {
-                    "start": chunks[0][0],
-                    "end": max(c[1] for c in chunks),
-                    "text": text,
-                }
-            )
+        for run in _split_sentence_chunks(chunks):
+            cue = _assemble_cue(run)
+            if cue["text"]:
+                cues.append(cue)
     cues.sort(key=lambda c: c["start"])
     return _min_dur_postpass(cues)
