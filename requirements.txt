@@ -13,3 +13,4 @@ uvicorn>=0.30.0
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
 ffsubsync==0.5.1
+pykakasi
