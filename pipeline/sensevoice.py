@@ -34,6 +34,14 @@ keeps multi-sentence walls of text (22% of cues held 2+ sentences) out of the
 ASR output; _min_dur_postpass then merges short sentence fragments instead of
 sentence stacks. Commas (、,) are never split points.
 
+VAD-window clamping: each bucket keeps the (vs, ve) bounds of the fsmn-vad
+window it belongs to, and every cue assembled from it is clamped into those
+bounds. SenseVoice's char-level timestamp array can spill an utterance's tail
+chars into the next speech onset (56s monster spans for ~600ms of speech);
+the VAD windows are correct, so clamping restores real cue spans. Synthetic
+fallback buckets (no VAD overlap) are unclamped. _min_dur_postpass runs after
+clamping and may extend a clamped sub-1s cue into adjacent silence.
+
 Cues are returned as {start_ms, end_ms, text} like pipeline/asr.py.
 """
 
@@ -272,16 +280,35 @@ def transcribe_cues(wav_path, language="ja"):
             ov = _overlap_ms(chunk[0], chunk[1], vs, ve)
             if ov > best_ov:
                 best_ov, best = ov, vi
-        buckets.setdefault(best if best >= 0 else len(vad) + len(buckets), []).append(chunk)
+        bkey = best if best >= 0 else len(vad) + len(buckets)
+        if bkey not in buckets:
+            buckets[bkey] = {
+                "bounds": vad[best] if best >= 0 else None,
+                "chunks": [],
+            }
+        buckets[bkey]["chunks"].append(chunk)
 
     cues = []
     for vi in sorted(buckets):
-        chunks = sorted(buckets[vi], key=lambda c: c[0])
+        info = buckets[vi]
+        chunks = sorted(info["chunks"], key=lambda c: c[0])
         if not chunks:
             continue
+        bounds = info["bounds"]
         for run in _split_sentence_chunks(chunks):
             cue = _assemble_cue(run)
-            if cue["text"]:
-                cues.append(cue)
+            if not cue["text"]:
+                continue
+            if bounds is not None:
+                # Clamp to the VAD window: SenseVoice char timestamps spill
+                # tail chars into the next speech onset (56s monster spans);
+                # the fsmn-vad window bounds are correct. Never emit zero/
+                # negative spans — keep the pre-clamp values on inversion.
+                nstart = max(cue["start"], bounds[0])
+                nend = min(cue["end"], bounds[1])
+                if nstart < nend:
+                    cue["start"] = nstart
+                    cue["end"] = nend
+            cues.append(cue)
     cues.sort(key=lambda c: c["start"])
     return _min_dur_postpass(cues)
