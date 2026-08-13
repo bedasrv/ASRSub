@@ -10,6 +10,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - TZ=Asia/Jakarta
       - ASR_BACKEND=sensevoice
+      - EMO_ENABLED=1
     network_mode: host
     volumes:
       - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline
