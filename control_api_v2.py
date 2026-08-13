@@ -80,7 +80,7 @@ REFINE_FILE = os.path.join(CFG_DIR, "refine_state.jsonl")
 ACTIONS_FILE = os.path.join(CFG_DIR, "actions.jsonl")
 EXCLUSIONS_FILE = os.path.join(CFG_DIR, "exclusions.jsonl")
 
-SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "AUTH", "CRED")
 EP_LABEL_RE = re.compile(r"(\d+)x(\d+)")
 
 
@@ -94,13 +94,19 @@ def _parse_ts(ts):
     for fmt in (
         "%Y-%m-%dT%H:%M:%SZ",
         "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%f%z",
         "%m/%d/%y %H:%M:%S",
     ):
         try:
             d = datetime.strptime(ts, fmt)
-            if fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%fZ"):
+            if fmt in (
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%S",
+            ):
+                # Z-suffixed and naive ISO pipeline state stamps are UTC.
                 d = d.replace(tzinfo=timezone.utc)
             return d.timestamp()
         except ValueError:

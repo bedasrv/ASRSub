@@ -4343,7 +4343,7 @@ def run_pass():
     }
 
 
-SECRET_KEY_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+SECRET_KEY_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "AUTH", "CRED")
 
 
 def _mask_secrets(cfg):
