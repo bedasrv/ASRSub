@@ -2356,7 +2356,9 @@ def cps_merge(cues, max_cps=CPS_MERGE_MAX, max_chars=CPS_MERGE_MAX_CHARS,
       - joined with " " when combined chars <= max_chars/2, else "\\n"
         (2-line cue);
       - combined cps (chars / (next.end - cur.start) secs) <= max_cps;
-      - combined duration <= max_dur_ms.
+      - combined duration <= max_dur_ms;
+      - hard cap: a cue never holds more than 2 lines; a 2-line cue stops
+        the chain (no further merges).
     On merge the next cue is dropped and the chain continues. Cues already
     within limits are never disturbed. Applied ONLY to ASR-translated output
     (process_after_asr, one_shot_test) — never to embedded-subtitle ladder
@@ -2372,6 +2374,12 @@ def cps_merge(cues, max_cps=CPS_MERGE_MAX, max_chars=CPS_MERGE_MAX_CHARS,
         while i + 1 < len(out):
             nxt = out[i + 1]
             if nxt["start"] - cur["end"] > max_gap_ms:
+                break
+            # hard 2-line cap: once the accumulated text holds 2 lines (or
+            # the candidate would add a second line), no further merge.
+            cur_lines = cur["text"].count("\n") + 1
+            nxt_lines = nxt["text"].count("\n") + 1
+            if cur_lines + nxt_lines > 2:
                 break
             joined = cur["text"] + " " + nxt["text"]
             if len(joined) > max_chars:
@@ -2701,6 +2709,30 @@ def _parse_target_response(raw):
     return out
 
 
+_NON_LATIN_LETTER_RE = re.compile(
+    "[\u0370-\u03FF\u0400-\u04FF\u0500-\u052F\u0590-\u05FF\u0600-\u06FF"
+    "\u0900-\u097F\u0E00-\u0E7F\u3040-\u309F\u30A0-\u30FF\u3400-\u4DBF"
+    "\u4E00-\u9FFF\uAC00-\uD7AF]"
+)
+_CJK_KANA_RE = re.compile(r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]")
+
+
+def _wrong_script(line, target_lang):
+    """True when a translated line contains characters of a script the
+    target language must not contain. Latin targets (Indonesian, English)
+    reject any non-Latin letter (Cyrillic/Greek/Arabic/CJK/Kana/Hangul/
+    Thai/...). Japanese rejects only lines that are entirely alien — no CJK
+    and no Latin letters (e.g. Cyrillic-only); mixed CJK+Latin is normal
+    Japanese output."""
+    if not line:
+        return False
+    if target_lang == "Japanese":
+        has_cjk = bool(_CJK_KANA_RE.search(line))
+        has_latin = bool(re.search(r"[A-Za-z]", line))
+        return not has_cjk and not has_latin and bool(_NON_LATIN_LETTER_RE.search(line))
+    return bool(_NON_LATIN_LETTER_RE.search(line))
+
+
 def sanitize_lines(lines, max_repeat=10):
     """Collapse runs of >max_repeat identical chars to max_repeat + ellipsis
     (anime scream lines otherwise trigger repetition collapse in small models)."""
@@ -2794,13 +2826,16 @@ def _local_chunk(cfg, chunk, lang_name, key, refs=None, context_lines=None,
 
 def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None,
                    context_lines=None, emotions=None):
-    """Up to 3 attempts per chunk; corrective retry on echo. Returns clean
-    parsed dict or None (all attempts empty/echo/network-fail)."""
+    """Up to 3 attempts per chunk; corrective retry on echo OR wrong-script
+    output (target-script guard). Returns clean parsed dict or None (all
+    attempts empty/echo/wrong-script/network-fail)."""
     n = len(chunk)
     for _ in range(3):
         parsed = _local_chunk(cfg, chunk, lang_name, key, refs=refs,
                               context_lines=context_lines, emotions=emotions)
         if not parsed:
+            continue
+        if any(_wrong_script(t, lang_name) for t in parsed.values()):
             continue
         echo = False
         for k in range(1, min(echo_probe, n) + 1):
@@ -2833,6 +2868,8 @@ def _complete_tail(cfg, tail_lines, m, lang_name, key, refs=None,
             continue
         parsed = _parse_target_response(raw)
         if not parsed:
+            continue
+        if any(_wrong_script(t, lang_name) for t in parsed.values()):
             continue
         echo = False
         for rel in range(1, min(5, n - m) + 1):
