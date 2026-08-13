@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Single-video subtitle quality test: faster-whisper ASR -> HY-MT1.5 7B merge-aware translate -> SRT.
+"""Single-video subtitle quality test: ASR -> HY-MT1.5 7B merge-aware translate -> SRT.
 
-Refactored for orchestrator v2: ASR via pipeline/asr.py, translate via
-orchestrator._translate_merge_aware (chunk 10 + tail completion + echo retry +
-per-line fallback + glossary REFs), SRT via orchestrator.write_srt with
-proper HH:MM:SS,mmm timestamps and optional AI header.
+The ASR backend follows the ASR_BACKEND env via orchestrator.asr_cues
+dispatch: faster-whisper (pipeline/asr.py) by default, SenseVoice
+(pipeline/sensevoice.py) with ASR_BACKEND=sensevoice.
+
+Refactored for orchestrator v2: ASR via orchestrator.asr_cues (backend-
+aware), translate via orchestrator._translate_merge_aware (chunk 10 + tail
+completion + echo retry + per-line fallback + glossary REFs), SRT via
+orchestrator.write_srt with proper HH:MM:SS,mmm timestamps and optional AI
+header.
 """
 
 import argparse
@@ -119,10 +124,18 @@ def main(argv):
         os.environ["WHISPER_MODEL"] = args.whisper
         os.environ["WHISPER_DEVICE"] = args.device
         os.environ["WHISPER_COMPUTE"] = args.compute
-        import pipeline.asr as pasr
+        # Reset whichever backend ASR_BACKEND selects so a fresh model is
+        # loaded (one_shot_test may run repeatedly in long-lived processes);
+        # orchestrator.asr_cues does not reset models itself.
+        if o.ASR_BACKEND == "sensevoice":
+            from pipeline import sensevoice as _sv
 
-        pasr.reset_model()
-        cues = pasr.transcribe_cues(wav, language="ja")
+            _sv.reset_model()
+        else:
+            import pipeline.asr as pasr
+
+            pasr.reset_model()
+        cues = o.asr_cues({}, wav, "ja")
 
         texts = [c["text"] for c in cues]
         sanitized = o.sanitize_lines(texts)
