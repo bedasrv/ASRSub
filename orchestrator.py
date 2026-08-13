@@ -4385,7 +4385,13 @@ class ControlHandler(BaseHTTPRequestHandler):
         if not CONTROL_API_KEY:
             self._send_json(401, {"error": "CONTROL_API_KEY not configured"})
             return False
-        if self.headers.get("X-API-Key") != CONTROL_API_KEY:
+        # X-API-Key: dashboard/control_api_v2 proxy; X-Control-Key: Sonarr
+        # webhook notification headers (configured on the ASRSub Wake
+        # notification). Either must match the shared CONTROL_API_KEY.
+        if (
+            self.headers.get("X-API-Key") != CONTROL_API_KEY
+            and self.headers.get("X-Control-Key") != CONTROL_API_KEY
+        ):
             self._send_json(401, {"error": "unauthorized"})
             return False
         return True
@@ -4414,6 +4420,9 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path not in ("/health", "/status"):
+            if not self._check_auth():
+                return
         if path == "/health":
             self._send_json(200, {"ok": True})
         elif path == "/status":
@@ -4452,6 +4461,8 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _paused, _run_once_requested
         path = self.path.split("?", 1)[0]
+        if not self._check_auth():
+            return
         if path == "/sonarr-webhook":
             WAKE_EVENT.set()
             self._send_json(200, {"ok": True})
@@ -4477,8 +4488,6 @@ class ControlHandler(BaseHTTPRequestHandler):
             else:
                 log("tdarr-webhook: received POST without 'file' field")
             self._send_json(200, {"ok": True})
-            return
-        if not self._check_auth():
             return
         if path == "/config":
             try:

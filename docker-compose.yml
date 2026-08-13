@@ -11,6 +11,7 @@ services:
       - TZ=Asia/Jakarta
       - ASR_BACKEND=sensevoice
       - EMO_ENABLED=1
+      - CONTROL_API_KEY=68624da8cf4015c6210ebb18a2d88e224a32365323bdbbca
     network_mode: host
     volumes:
       - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline

@@ -1420,6 +1420,7 @@ class ControlAPIv2:
             with open(path, "a", encoding="utf-8") as fh:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                fh.flush()
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         except OSError as exc:
             raise ApiError(500, f"failed to write actions.jsonl: {exc}")
