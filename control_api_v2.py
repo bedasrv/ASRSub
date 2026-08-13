@@ -1441,6 +1441,26 @@ class ControlAPIv2:
     def _h_delete(self, body, id=None, kind="series"):
         return self._append_action("delete", id, body, movie=(kind == "movie"))
 
+    def _lock_exclusions(self):
+        """Exclusive flock on the exclusions file, held across the read-
+        modify-write. Cross-process (unlike self._excl_lock, which only
+        guards threads of this process). Returns the fd to unlock/close."""
+        path = self.opts["EXCLUSIONS_FILE"]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except Exception:
+            os.close(fd)
+            raise
+        return fd
+
+    def _unlock_exclusions(self, fd):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
     def _read_exclusions(self):
         recs = []
         try:
@@ -1512,36 +1532,44 @@ class ControlAPIv2:
         if kind == "movie":
             rec["kind"] = "movie"
         with self._excl_lock:
-            for r in self._read_exclusions():
-                if r.get("episode_id") == store_id and (
-                    (r.get("kind") == "movie") == (kind == "movie")
-                ):
-                    return 200, {"ok": True, "already_excluded": True, "record": r}
+            lock_fd = self._lock_exclusions()
             try:
-                recs = self._read_exclusions()
-                recs.append(rec)
-                self._write_exclusions(recs)
-            except OSError as exc:
-                raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+                for r in self._read_exclusions():
+                    if r.get("episode_id") == store_id and (
+                        (r.get("kind") == "movie") == (kind == "movie")
+                    ):
+                        return 200, {"ok": True, "already_excluded": True, "record": r}
+                try:
+                    recs = self._read_exclusions()
+                    recs.append(rec)
+                    self._write_exclusions(recs)
+                except OSError as exc:
+                    raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+            finally:
+                self._unlock_exclusions(lock_fd)
         return 200, {"ok": True, "record": rec}
 
     def _h_unexclude(self, body, id=None, kind="series"):
         store_id = -id if kind == "movie" else id
         with self._excl_lock:
-            recs = self._read_exclusions()
-            before = len(recs)
-            recs = [
-                r
-                for r in recs
-                if not (
-                    r.get("episode_id") == store_id
-                    and ((r.get("kind") == "movie") == (kind == "movie"))
-                )
-            ]
+            lock_fd = self._lock_exclusions()
             try:
-                self._write_exclusions(recs)
-            except OSError as exc:
-                raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+                recs = self._read_exclusions()
+                before = len(recs)
+                recs = [
+                    r
+                    for r in recs
+                    if not (
+                        r.get("episode_id") == store_id
+                        and ((r.get("kind") == "movie") == (kind == "movie"))
+                    )
+                ]
+                try:
+                    self._write_exclusions(recs)
+                except OSError as exc:
+                    raise ApiError(500, f"failed to write exclusions.jsonl: {exc}")
+            finally:
+                self._unlock_exclusions(lock_fd)
         return 200, {"ok": True, "removed": before - len(recs)}
 
     def _daemon_action(self, path):

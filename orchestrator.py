@@ -553,6 +553,7 @@ def consume_records_jsonl(path):
                 fh.truncate(0)
                 fh.write(tail)
                 fh.flush()
+                os.fsync(fh.fileno())
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
     return records
@@ -3766,7 +3767,7 @@ def halt_on_error(cfg, stage, ep_desc, exc, extra=None):
     global _paused
     _paused = True
     rep = {
-        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
         "stage": stage,
         "episode": ep_desc,
         "error": str(exc)[:500] or type(exc).__name__,
@@ -3785,7 +3786,11 @@ def halt_on_error(cfg, stage, ep_desc, exc, extra=None):
         import shutil
 
         shutil.copy2(
-            dst, os.path.join(hist, f"error_{time.strftime('%Y%m%d_%H%M%S')}.json")
+            dst,
+            os.path.join(
+                hist,
+                f"error_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
+            ),
         )
     except Exception:
         pass
@@ -4528,7 +4533,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                     os.replace(
                         dst,
                         os.path.join(
-                            hist, f"error_{time.strftime('%Y%m%d_%H%M%S')}.json"
+                            hist,
+                            f"error_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json",
                         ),
                     )
                     log("cleared error report")

@@ -1,19 +1,13 @@
 --extra-index-url https://download.pytorch.org/whl/cu130
 faster-whisper==1.2.1
 ctranslate2==4.8.1
-av==18.0.0
 requests==2.34.2
-httpx==0.28.1
 huggingface_hub==1.26.1
 numpy==2.5.1
-PyYAML==6.0.3
-tokenizers==0.23.1
-tqdm==4.70.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
-ffsubsync==0.5.1
 funasr==1.4.0
 torch==2.13.0+cu130
 torchaudio==2.11.0+cu130

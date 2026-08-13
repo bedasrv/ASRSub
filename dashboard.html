@@ -1397,8 +1397,8 @@ function ctlRow(key, value) {
     ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
     : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
   return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
-    '<td style="white-space:nowrap"><button class="mini" onclick="setConfigKey(' + JSON.stringify(key) + ')">Set</button> ' +
-    '<button class="mini unset" onclick="unsetConfigKey(' + JSON.stringify(key) + ')">Unset</button></td></tr>';
+    '<td style="white-space:nowrap"><button type="button" class="mini" data-ckey="' + esc(key) + '" data-act="set">Set</button> ' +
+    '<button type="button" class="mini unset" data-ckey="' + esc(key) + '" data-act="unset">Unset</button></td></tr>';
 }
 
 async function loadControlConfig() {
@@ -1469,6 +1469,17 @@ async function unsetConfigKey(key) {
   } catch (e) {
     toast("unset failed: " + esc(e.message), "err");
   }
+}
+
+const ctlConfigEl = document.getElementById("ctl-config");
+if (ctlConfigEl) {
+  ctlConfigEl.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-ckey]");
+    if (!btn) return;
+    const key = btn.dataset.ckey;
+    if (btn.dataset.act === "set") setConfigKey(key);
+    else if (btn.dataset.act === "unset") unsetConfigKey(key);
+  });
 }
 
 showPage("library");
