@@ -832,6 +832,16 @@ let libraryExcluded = {};
 let selected = {};
 let lastLibrary = null;
 
+function itemKey(it) {
+  if (it.item_key != null) return String(it.item_key);
+  return (it.kind === "movie" ? "m:" : "e:") + String(it.sonarr_episode_id);
+}
+
+function libIsExcluded(it) {
+  if (libraryExcluded[itemKey(it)]) return true;
+  return (it.languages || []).some(function (l) { return l.status === "excluded"; });
+}
+
 function selectedIds() {
   return Object.keys(selected).filter(function (k) { return selected[k]; });
 }
@@ -880,20 +890,24 @@ function setSearchCount(id, n, m) {
 
 const KEBAB_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
 
-function libStatusCell(it, excluded) {
+function libStatusCell(it) {
+  if (libIsExcluded(it)) return '<span class="t-pill excluded">excluded</span>';
   if (it.wanted) return '<span class="t-pill wanted">wanted</span>';
-  if (excluded) return '<span class="t-pill excluded">excluded</span>';
   const sts = (it.languages || []).map(function (l) { return l.status || "wanted"; });
+  if (it.kind === "movie") {
+    if (sts.indexOf("error") >= 0) return '<span class="t-pill error">error</span>';
+    if (sts.indexOf("pending") >= 0) return '<span class="t-pill pending">pending</span>';
+    if (sts.indexOf("done") >= 0) return '<span class="t-pill done">done</span>';
+    return '<span class="t-pill movie">movie</span>';
+  }
   if (sts.indexOf("error") >= 0) return '<span class="t-pill error">error</span>';
   if (sts.indexOf("pending") >= 0) return '<span class="t-pill pending">pending</span>';
-  if (sts.indexOf("excluded") >= 0) return '<span class="t-pill excluded">excluded</span>';
   if (sts.indexOf("done") >= 0) return '<span class="t-pill done">done</span>';
   return '<span class="muted">—</span>';
 }
 
 function libRowHTML(it) {
-  const id = String(it.sonarr_episode_id);
-  const excluded = !!libraryExcluded[id];
+  const id = itemKey(it);
   const langs = (it.languages || []).map(langChip).join("");
   const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
   return (
@@ -904,20 +918,23 @@ function libRowHTML(it) {
     '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
     "</div>" +
     '<div class="f-right">' +
-    '<div class="fr-line1">' + libStatusCell(it, excluded) +
-    '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for episode ' + id + '">' + KEBAB_SVG + "</button></div>" +
+    '<div class="fr-line1">' + libStatusCell(it) +
+    '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for ' + id + '">' + KEBAB_SVG + "</button></div>" +
     (langs ? '<div class="fr-line2">' + langs + "</div>" : "") +
     "</div></div>"
   );
 }
 
 function libMatches(it, q) {
+  const ex = libIsExcluded(it);
   if (libStatus) {
     if (libStatus === "wanted") {
-      if (!it.wanted) return false;
+      if (!it.wanted || ex) return false;
     } else if (libStatus === "movie") {
-      if (!(it.kind === "movie")) return false;
-    } else if (!(it.languages || []).some(function (l) {
+      if (!(it.kind === "movie") || ex) return false;
+    } else if (libStatus === "excluded") {
+      if (!ex) return false;
+    } else if (ex || !(it.languages || []).some(function (l) {
       return (l.status || "wanted") === libStatus;
     })) {
       return false;
@@ -925,7 +942,7 @@ function libMatches(it, q) {
   }
   if (q) {
     const hay = [
-      it.series, it.episode, it.title, it.sonarr_episode_id,
+      it.series, it.episode, it.title, itemKey(it), it.sonarr_episode_id,
       (it.languages || []).map(function (l) { return l.language + " " + (l.prov || l.source || ""); }).join(" "),
     ].join(" ").toLowerCase();
     if (hay.indexOf(q) < 0) return false;
@@ -936,6 +953,8 @@ function libMatches(it, q) {
 function libCounts(items) {
   const c = { all: items.length, wanted: 0, done: 0, error: 0, pending: 0, excluded: 0, movie: 0 };
   for (const it of items) {
+    const ex = libIsExcluded(it);
+    if (ex) { c.excluded++; continue; }
     if (it.kind === "movie") c.movie++;
     if (it.wanted) c.wanted++;
     const sts = {};
@@ -943,7 +962,6 @@ function libCounts(items) {
     if (sts.done) c.done++;
     if (sts.error) c.error++;
     if (sts.pending) c.pending++;
-    if (sts.excluded) c.excluded++;
   }
   return c;
 }
@@ -966,7 +984,8 @@ function renderLibrary(data) {
   renderChipCounts(items);
   libraryItems = {};
   for (const it of items) {
-    if (it.sonarr_episode_id != null) libraryItems[String(it.sonarr_episode_id)] = it;
+    const k = itemKey(it);
+    if (k) libraryItems[k] = it;
   }
   for (const k of Object.keys(selected)) {
     if (!libraryItems[k]) delete selected[k];
@@ -985,7 +1004,7 @@ function renderLibrary(data) {
   bar.hidden = !selMode;
   const q = libQuery.trim().toLowerCase();
   const filtered = items.filter(function (it) { return libMatches(it, q); });
-  libVisible = filtered.map(function (it) { return String(it.sonarr_episode_id); });
+  libVisible = filtered.map(itemKey);
   setSearchCount("lib-search-count", filtered.length, items.length);
   if (!filtered.length) {
     list.innerHTML = q
@@ -1025,7 +1044,10 @@ async function pollLibrary() {
     if (ex.status === 200) {
       libraryExcluded = {};
       for (const r of (ex.data.exclusions || [])) {
-        if (r && r.episode_id != null) libraryExcluded[String(r.episode_id)] = true;
+        if (r && r.key) libraryExcluded[String(r.key)] = true;
+        else if (r && r.episode_id != null) {
+          libraryExcluded[(r.kind === "movie" ? "m:" : "e:") + String(r.episode_id)] = true;
+        }
       }
     }
     renderLibrary(lib.data);
@@ -1040,7 +1062,11 @@ let lastActivity = [];
 let actQuery = "";
 
 function actRowHTML(it) {
-  const tsIso = it.ts ? new Date(it.ts).toISOString() : "";
+  let tsIso = "";
+  if (it.ts) {
+    const d = new Date(it.ts);
+    if (!isNaN(d.getTime())) tsIso = d.toISOString();
+  }
   const rt = relTime(it.ts) || esc(it.relative || "");
   const dur = fmtDur(it.elapsed_s);
   const stBadges = [];
@@ -1164,8 +1190,16 @@ if (actSearchClear) {
 
 /* ============ Actions ============ */
 async function batchAction(act) {
-  const ids = selectedIds();
+  let ids = selectedIds();
   if (!ids.length) return;
+  if (act === "retry" || act === "delete") {
+    const kept = ids.filter(function (k) {
+      const it = libraryItems[k];
+      return !(it && it.kind === "movie");
+    });
+    if (!kept.length) { toast("retry/delete not available for movies", "err"); return; }
+    ids = kept;
+  }
   if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) return;
   const btn = document.getElementById("batch-" + act);
   btnBusy(btn, true);
@@ -1193,7 +1227,7 @@ async function batchAction(act) {
 
 async function episodeAction(act, id, btn, langOverride) {
   const it = libraryItems[String(id)] || activityItems[String(id)];
-  if (it && it.kind === "movie" && (act === "retry" || act === "delete")) {
+  if (it && it.kind === "movie" && (act === "retry" || act === "delete" || act === "skip")) {
     toast("not available for movies", "err");
     return;
   }
@@ -1237,7 +1271,7 @@ function openRowMenu(id, btn) {
   rowMenu.dataset.id = id;
   const it = libraryItems[String(id)];
   const isMovie = !!(it && it.kind === "movie");
-  for (const act of ["retry", "delete"]) {
+  for (const act of ["retry", "delete", "skip"]) {
     const b = rowMenu.querySelector("[data-act='" + act + "']");
     if (b) b.disabled = isMovie;
   }
