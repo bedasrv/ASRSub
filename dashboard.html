@@ -350,31 +350,80 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .bs-icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .bs-text-btn { border: none; background: transparent; color: var(--primary); font-size: 13px; font-weight: 600; cursor: pointer; padding: 4px 6px; }
 .bs-text-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.bs-body { overflow-y: auto; padding: 4px 16px 12px; flex: 1 1 auto; }
+.bs-body { overflow-y: auto; padding: 4px 16px 20px; flex: 1 1 auto; }
 .bs-group { margin: 14px 0; }
 .bs-cat {
   font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   color: var(--on-surface-variant); margin-bottom: 8px;
 }
-.bs-seg { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.bs-seg {
+  display: flex; gap: 0;
+  border: 1px solid var(--outline-variant);
+  border-radius: 10px; overflow: hidden;
+  background: var(--surface-container-high);
+}
 .bs-seg-btn {
-  min-height: 44px; padding: 0 16px; border-radius: var(--r-full);
-  border: 1px solid var(--outline-variant); background: transparent;
-  color: var(--on-surface-variant); font-size: 13px; font-weight: 600; cursor: pointer;
+  flex: 1; min-height: 42px;
+  border: none; background: transparent;
+  color: var(--on-surface-variant);
+  font-size: 13px; font-weight: 600; cursor: pointer;
 }
-.bs-seg-btn:hover { background: var(--surface-variant); }
-.bs-seg-btn.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.bs-seg-btn + .bs-seg-btn { border-left: 1px solid var(--outline-variant); }
+.bs-seg-btn.active {
+  background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 700;
+}
 .bs-seg-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.bs-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+#bs-status { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .bs-chip {
-  min-height: 44px; padding: 0 16px; border-radius: var(--r-full);
-  border: 1px solid var(--outline-variant); background: transparent;
-  color: var(--on-surface-variant); font-size: 13px; font-weight: 600; cursor: pointer;
-  display: inline-flex; align-items: center;
+  min-height: 44px; padding: 0 10px;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  border-radius: 10px; border: 1px solid var(--outline-variant);
+  background: transparent; color: var(--on-surface-variant);
+  font-size: 13px; font-weight: 600; cursor: pointer;
 }
-.bs-chip:hover { background: var(--surface-variant); }
-.bs-chip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.bs-chip .fchip-count { font-size: 11px; font-weight: 700; opacity: .8; }
 .bs-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.bs-st:empty { display: none; }
+.bs-st { font-weight: 700; }
+.bs-chip.st-inc {
+  background: var(--primary-container); border-color: var(--primary);
+  color: var(--on-primary-container);
+}
+.bs-chip.st-inc .bs-st { color: var(--primary); }
+.bs-chip.st-exc {
+  background: var(--error-container); border-color: var(--error);
+  color: var(--on-error-container);
+}
+.bs-chip.st-exc .bs-st { color: var(--error); }
+.bs-chip.st-exc .bs-label { text-decoration: line-through; }
+.lang3 { flex-direction: column; justify-content: center; gap: 2px; }
+.bs-lname { display: block; font-size: 10px; font-weight: 500; opacity: .7; }
+
+/* Sort */
+.bs-sort-row { display: flex; align-items: center; gap: 8px; }
+.bs-select {
+  flex: 1; min-height: 42px; padding: 0 10px;
+  border: 1px solid var(--outline-variant); border-radius: 10px;
+  background: var(--surface-container-high); color: var(--on-surface);
+  font-size: 13px; font-weight: 600;
+}
+.bs-seg-sort { flex: 1.4; }
+.bs-seg-sort .bs-seg-btn { font-size: 12px; }
+
+/* Quick rules switches */
+.bs-switch-row { display: flex; align-items: center; justify-content: space-between; min-height: 44px; font-size: 13px; font-weight: 500; }
+.bs-switch {
+  position: relative; width: 44px; height: 24px; flex: none;
+  border: none; border-radius: 12px; background: var(--surface-variant);
+  cursor: pointer; padding: 0;
+}
+.bs-switch .bs-knob {
+  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--on-surface-variant); transition: transform .15s ease;
+}
+.bs-switch.on { background: var(--primary); }
+.bs-switch.on .bs-knob { transform: translateX(20px); background: var(--on-primary); }
+.bs-switch:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .bs-footer {
   flex: none; padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--outline-variant); background: var(--surface-container-high);
@@ -384,6 +433,20 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   background: var(--primary); color: var(--on-primary); font-size: 14px; font-weight: 700; cursor: pointer;
 }
 .bs-apply:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* Desktop: centered modal dialog (mobile keeps the sliding bottom sheet) */
+@media (min-width: 768px) {
+  .bs-sheet {
+    top: 0; bottom: 0; left: 0; right: 0;
+    margin: auto;
+    width: calc(100% - 32px); max-width: 460px;
+    height: fit-content;
+    max-height: min(85vh, 780px);
+    border-radius: 16px;
+    transform: none;             /* no slide animation on desktop */
+  }
+  .bs-handle { display: none; }  /* drag handle is mobile-only */
+}
 
 /* ============ Library page ============ */
 #sel-bar {
@@ -753,6 +816,21 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   </div>
   <div class="bs-body">
     <div class="bs-group">
+      <div class="bs-cat">Sort By</div>
+      <div class="bs-sort-row">
+        <select class="bs-select" id="bs-sort-field" aria-label="Sort field">
+          <option value="title">Title / Name</option>
+          <option value="status">Status</option>
+          <option value="seasep">Season / Episode</option>
+          <option value="updated">Last Updated</option>
+        </select>
+        <div class="bs-seg bs-seg-sort" id="bs-sort-dir" role="group" aria-label="Sort order">
+          <button type="button" class="bs-seg-btn" data-dir="asc">Ascending</button>
+          <button type="button" class="bs-seg-btn" data-dir="desc">Descending</button>
+        </div>
+      </div>
+    </div>
+    <div class="bs-group">
       <div class="bs-cat">Library Scope</div>
       <div class="bs-seg" id="bs-scope" role="group" aria-label="Library scope">
         <button type="button" class="bs-seg-btn" data-scope="active">Active</button>
@@ -769,15 +847,35 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
       </div>
     </div>
     <div class="bs-group">
+      <div class="bs-cat">Season</div>
+      <select class="bs-select" id="bs-season" aria-label="Season filter">
+        <option value="">All Seasons</option>
+      </select>
+    </div>
+    <div class="bs-group">
       <div class="bs-cat">Status</div>
       <div class="bs-chips" id="bs-status" role="group" aria-label="Status">
-        <button type="button" class="bs-chip" data-status="wanted">Wanted<span class="fchip-count" id="chip-count-wanted"></span></button>
-        <button type="button" class="bs-chip" data-status="done">Done<span class="fchip-count" id="chip-count-done"></span></button>
-        <button type="button" class="bs-chip" data-status="error">Error<span class="fchip-count" id="chip-count-error"></span></button>
-        <button type="button" class="bs-chip" data-status="pending">Pending<span class="fchip-count" id="chip-count-pending"></span></button>
-        <button type="button" class="bs-chip" data-status="excluded">Excluded<span class="fchip-count" id="chip-count-excluded"></span></button>
-        <button type="button" class="bs-chip" data-status="queued">Queued<span class="fchip-count" id="chip-count-queued"></span></button>
+        <button type="button" class="bs-chip" data-status="wanted" data-state=""><span class="bs-st"></span><span class="bs-label">Wanted</span><span class="fchip-count" id="chip-count-wanted"></span></button>
+        <button type="button" class="bs-chip" data-status="done" data-state=""><span class="bs-st"></span><span class="bs-label">Done</span><span class="fchip-count" id="chip-count-done"></span></button>
+        <button type="button" class="bs-chip" data-status="error" data-state=""><span class="bs-st"></span><span class="bs-label">Error</span><span class="fchip-count" id="chip-count-error"></span></button>
+        <button type="button" class="bs-chip" data-status="pending" data-state=""><span class="bs-st"></span><span class="bs-label">Pending</span><span class="fchip-count" id="chip-count-pending"></span></button>
+        <button type="button" class="bs-chip" data-status="excluded" data-state=""><span class="bs-st"></span><span class="bs-label">Excluded</span><span class="fchip-count" id="chip-count-excluded"></span></button>
+        <button type="button" class="bs-chip" data-status="queued" data-state=""><span class="bs-st"></span><span class="bs-label">Queued</span><span class="fchip-count" id="chip-count-queued"></span></button>
       </div>
+    </div>
+    <div class="bs-group">
+      <div class="bs-cat">Languages &amp; Subtitles</div>
+      <div class="bs-chips" id="bs-langs" role="group" aria-label="Subtitle languages">
+        <button type="button" class="bs-chip lang3" data-lang="id" data-state=""><span class="bs-st"></span><span class="bs-label">ID</span><span class="bs-lname">Indonesian</span></button>
+        <button type="button" class="bs-chip lang3" data-lang="ja" data-state=""><span class="bs-st"></span><span class="bs-label">JA</span><span class="bs-lname">Japanese</span></button>
+        <button type="button" class="bs-chip lang3" data-lang="en" data-state=""><span class="bs-st"></span><span class="bs-label">EN</span><span class="bs-lname">English</span></button>
+      </div>
+    </div>
+    <div class="bs-group">
+      <div class="bs-cat">Quick Rules</div>
+      <div class="bs-switch-row"><span>Hide Queued Items</span><button type="button" class="bs-switch" id="qr-queued" role="switch" aria-checked="false" data-qr="queued"><span class="bs-knob"></span></button></div>
+      <div class="bs-switch-row"><span>Hide Completed Items</span><button type="button" class="bs-switch" id="qr-done" role="switch" aria-checked="false" data-qr="done"><span class="bs-knob"></span></button></div>
+      <div class="bs-switch-row"><span>Show Missing Subtitles Only</span><button type="button" class="bs-switch" id="qr-missing" role="switch" aria-checked="false" data-qr="missing"><span class="bs-knob"></span></button></div>
     </div>
   </div>
   <div class="bs-footer">
@@ -1227,8 +1325,14 @@ function langChip(l) {
 }
 
 let libQuery = "";
-let libKind = "";            // "" | "movie" | "series"
-let libStatusSet = new Set(); // subset of wanted/done/error/pending/excluded/queued
+let libKind = "";                      // "" | "movie" | "series"
+let libStatusInc = new Set();          // include statuses
+let libStatusExc = new Set();          // exclude statuses (+ 'missing')
+let libLangInc = new Set();            // must have done sub for EVERY (id/ja/en)
+let libLangExc = new Set();            // must NOT have done sub for ANY
+let libSeason = "";                    // '' = all
+let libSort = "title";                 // title|status|seasep|updated
+let libSortDir = "asc";                // asc|desc
 let selMode = false;
 let libVisible = [];
 let libScope = "active";
@@ -1316,18 +1420,26 @@ function relocateEpisodeCodes() {
   });
 }
 
-function libMatches(it, q) {
+function langDone(it, L) { return (it.languages || []).some(function (l) { return l.language === L && l.status === "done"; }); }
+function langMissing(it) { return !(langDone(it, "ja") && langDone(it, "id") && langDone(it, "en")); }
+function statusHit(it, s) {
   const st = itemStatus(it);
+  if (s === "queued") return !!it.pending_action;
+  if (s === "excluded") return st === "excluded";
+  if (s === "missing") return langMissing(it);
+  return st === s;
+}
+function libMatches(it, q) {
   if (libKind && it.kind !== libKind) return false;
-  if (libStatusSet.size) {
+  for (const s of libStatusExc) if (statusHit(it, s)) return false;   // must NOT be
+  if (libStatusInc.size) {
     let ok = false;
-    for (const s of libStatusSet) {
-      if (s === "queued") { if (it.pending_action) { ok = true; break; } }
-      else if (s === "excluded") { if (st === "excluded") { ok = true; break; } }
-      else if (st === s) { ok = true; break; }
-    }
+    for (const s of libStatusInc) if (statusHit(it, s)) { ok = true; break; }
     if (!ok) return false;
   }
+  for (const L of libLangExc) if (langDone(it, L)) return false;      // must NOT have done sub for ANY
+  for (const L of libLangInc) if (!langDone(it, L)) return false;     // must have done sub for EVERY
+  if (libSeason !== "") { if (it.kind !== "series" || it.season !== libSeason) return false; }
   if (q) {
     const hay = [
       it.series, it.episode, it.title, itemKey(it), it.sonarr_episode_id,
@@ -1359,6 +1471,31 @@ function renderChipCounts(items) {
   }
 }
 
+function libSorter(items) {
+  const dir = libSortDir === "desc" ? -1 : 1; // committed libSortDir
+  const f = libSort;
+  const stIdx = { excluded: 0, wanted: 1, error: 2, pending: 3, done: 4, queued: 5 };
+  const key = function (it) {
+    if (f === "title") return (it.series || it.title || "").toLowerCase();
+    if (f === "status") return (stIdx[itemStatus(it)] != null ? stIdx[itemStatus(it)] : 9) + "|" + (it.series || it.title || "").toLowerCase();
+    if (f === "seasep") {
+      const s = it.kind === "movie" ? 0 : (it.season || 0);
+      const e = it.kind === "movie" ? 0 : (it.episode_number || 0);
+      return String(s).padStart(4, "0") + "|" + String(e).padStart(4, "0") + "|" + (it.series || it.title || "").toLowerCase();
+    }
+    // updated: last language ts (ISO → Date.parse), fallback 0
+    let mx = 0;
+    for (const l of (it.languages || [])) { const t = Date.parse(l.ts); if (!isNaN(t) && t > mx) mx = t; }
+    return mx + "|" + (it.series || it.title || "").toLowerCase();
+  };
+  return items.slice().sort(function (a, b) {
+    const ka = key(a), kb = key(b);
+    if (ka < kb) return -1 * dir;
+    if (ka > kb) return 1 * dir;
+    return 0;
+  });
+}
+
 function renderLibrary(data) {
   lastLibrary = data;
   const list = document.getElementById("library-list");
@@ -1388,7 +1525,8 @@ function renderLibrary(data) {
   }
   bar.hidden = !selMode;
   const q = libQuery.trim().toLowerCase();
-  const filtered = items.filter(function (it) { return libMatches(it, q); });
+  let filtered = items.filter(function (it) { return libMatches(it, q); });
+  filtered = libSorter(filtered);
   libVisible = filtered.map(itemKey);
   setSearchCount("lib-search-count", filtered.length, items.length);
   if (!filtered.length) {
@@ -1545,11 +1683,39 @@ if (libSearchClear) {
   });
 }
 /* ============ Bottom-sheet filters ============ */
-let bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+let bsDraft = {
+  scope: libScope, kind: libKind,
+  statusInc: new Set(), statusExc: new Set(),
+  langInc: new Set(), langExc: new Set(),
+  season: libSeason, sort: libSort, sortDir: libSortDir,
+};
 const filterSheet = document.getElementById("filter-sheet");
 const filterOverlay = document.getElementById("filter-overlay");
 const filterTrigger = document.getElementById("filter-open");
 const bsHandle = document.getElementById("bs-handle");
+
+function buildSeasonOptions() {
+  const sel = document.getElementById("bs-season");
+  if (!sel) return;
+  const seasons = new Set();
+  for (const it of (lastLibrary && lastLibrary.items) || []) {
+    if (it.kind === "series" && it.season != null) seasons.add(it.season);
+  }
+  const sorted = Array.from(seasons).sort(function (a, b) { return a - b; });
+  let html = '<option value="">All Seasons</option>';
+  for (const n of sorted) html += '<option value="S' + n + '">Season ' + n + "</option>";
+  sel.innerHTML = html;
+}
+
+function setChipState(btn, state) {
+  btn.dataset.state = state;
+  btn.classList.toggle("st-inc", state === "inc");
+  btn.classList.toggle("st-exc", state === "exc");
+  const st = btn.querySelector(".bs-st");
+  if (st) st.textContent = state === "inc" ? "✓" : state === "exc" ? "✗" : "";
+  const label = btn.querySelector(".bs-label");
+  if (label) label.classList.toggle("strike", state === "exc");
+}
 
 function syncFilterControls() {
   const scopeBtns = document.querySelectorAll("#bs-scope .bs-seg-btn");
@@ -1557,27 +1723,59 @@ function syncFilterControls() {
   const kindBtns = document.querySelectorAll("#bs-kind .bs-seg-btn");
   for (const b of kindBtns) b.classList.toggle("active", b.dataset.kind === bsDraft.kind);
   const statusBtns = document.querySelectorAll("#bs-status .bs-chip");
-  for (const b of statusBtns) b.classList.toggle("active", bsDraft.status.has(b.dataset.status));
+  for (const b of statusBtns) {
+    const s = b.dataset.status;
+    if (bsDraft.statusInc.has(s)) setChipState(b, "inc");
+    else if (bsDraft.statusExc.has(s)) setChipState(b, "exc");
+    else setChipState(b, "");
+  }
+  const langBtns = document.querySelectorAll("#bs-langs .bs-chip");
+  for (const b of langBtns) {
+    const L = b.dataset.lang;
+    if (bsDraft.langInc.has(L)) setChipState(b, "inc");
+    else if (bsDraft.langExc.has(L)) setChipState(b, "exc");
+    else setChipState(b, "");
+  }
+  const seasonSel = document.getElementById("bs-season");
+  if (seasonSel) seasonSel.value = bsDraft.season;
+  const sortSel = document.getElementById("bs-sort-field");
+  if (sortSel) sortSel.value = bsDraft.sort;
+  const dirBtns = document.querySelectorAll("#bs-sort-dir .bs-seg-btn");
+  for (const b of dirBtns) b.classList.toggle("active", b.dataset.dir === bsDraft.sortDir);
+  for (const qr of ["queued", "done", "missing"]) {
+    const sw = document.getElementById("qr-" + qr);
+    if (!sw) continue;
+    const on = qr === "missing"
+      ? bsDraft.statusInc.has("missing")
+      : bsDraft.statusExc.has(qr);
+    sw.classList.toggle("on", on);
+    sw.setAttribute("aria-checked", on ? "true" : "false");
+  }
+}
+
+function bsDraftFilterHit(it) {
+  if (bsDraft.kind && it.kind !== bsDraft.kind) return false;
+  for (const s of bsDraft.statusExc) if (statusHit(it, s)) return false;
+  if (bsDraft.statusInc.size) {
+    let ok = false;
+    for (const s of bsDraft.statusInc) if (statusHit(it, s)) { ok = true; break; }
+    if (!ok) return false;
+  }
+  for (const L of bsDraft.langExc) if (langDone(it, L)) return false;
+  for (const L of bsDraft.langInc) if (!langDone(it, L)) return false;
+  if (bsDraft.season !== "") {
+    if (it.kind !== "series" || it.season !== bsDraft.season) return false;
+  }
+  return true;
 }
 
 function bsLiveCount() {
   if (!lastLibrary) return null;
   const q = libQuery.trim().toLowerCase();
   const items = lastLibrary.items || [];
-  const st = itemStatus;
-  const kind = bsDraft.kind, statusSet = bsDraft.status;
   let n = 0;
   for (const it of items) {
-    if (kind && it.kind !== kind) continue;
-    if (statusSet.size) {
-      let ok = false;
-      for (const s of statusSet) {
-        if (s === "queued") { if (it.pending_action) { ok = true; break; } }
-        else if (s === "excluded") { if (st(it) === "excluded") { ok = true; break; } }
-        else if (st(it) === s) { ok = true; break; }
-      }
-      if (!ok) continue;
-    }
+    if (!bsDraftFilterHit(it)) continue;
     if (q) {
       const hay = [it.series, it.episode, it.title, itemKey(it), it.sonarr_episode_id,
         (it.languages || []).map(function (l) { return l.language + " " + (l.prov || l.source || ""); }).join(" ")].join(" ").toLowerCase();
@@ -1597,7 +1795,13 @@ function updateApplyLabel() {
 }
 
 function openFilterSheet() {
-  bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+  buildSeasonOptions();
+  bsDraft = {
+    scope: libScope, kind: libKind,
+    statusInc: new Set(libStatusInc), statusExc: new Set(libStatusExc),
+    langInc: new Set(libLangInc), langExc: new Set(libLangExc),
+    season: libSeason, sort: libSort, sortDir: libSortDir,
+  };
   syncFilterControls();
   filterOverlay.hidden = false;
   filterSheet.hidden = false;
@@ -1612,7 +1816,14 @@ function openFilterSheet() {
 }
 
 function closeFilterSheet(discard) {
-  if (discard) bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+  if (discard) {
+    bsDraft = {
+      scope: libScope, kind: libKind,
+      statusInc: new Set(libStatusInc), statusExc: new Set(libStatusExc),
+      langInc: new Set(libLangInc), langExc: new Set(libLangExc),
+      season: libSeason, sort: libSort, sortDir: libSortDir,
+    };
+  }
   filterOverlay.classList.remove("open");
   filterSheet.classList.remove("open");
   if (filterTrigger) filterTrigger.setAttribute("aria-expanded", "false");
@@ -1626,7 +1837,11 @@ function updateFilterBadge() {
   let n = 0;
   if (libScope !== "active") n++;
   if (libKind) n++;
-  n += libStatusSet.size;
+  n += libStatusInc.size;
+  n += libStatusExc.size;
+  n += libLangInc.size;
+  n += libLangExc.size;
+  if (libSeason !== "") n++;
   const b = document.getElementById("filter-badge");
   if (!b) return;
   if (n > 0) { b.textContent = n; b.hidden = false; }
@@ -1637,7 +1852,13 @@ function bsCommitFilters() {
   const scopeChanged = bsDraft.scope !== libScope;
   libScope = bsDraft.scope;
   libKind = bsDraft.kind;
-  libStatusSet = new Set(bsDraft.status);
+  libStatusInc = new Set(bsDraft.statusInc);
+  libStatusExc = new Set(bsDraft.statusExc);
+  libLangInc = new Set(bsDraft.langInc);
+  libLangExc = new Set(bsDraft.langExc);
+  libSeason = bsDraft.season;
+  libSort = bsDraft.sort;
+  libSortDir = bsDraft.sortDir;
   closeFilterSheet(false);
   updateFilterBadge();
   if (scopeChanged) pollLibrary();
@@ -1652,7 +1873,12 @@ if (bsCloseBtn) bsCloseBtn.addEventListener("click", function () { closeFilterSh
 const bsResetBtn = document.getElementById("bs-reset");
 if (bsResetBtn) {
   bsResetBtn.addEventListener("click", function () {
-    bsDraft = { scope: "active", kind: "", status: new Set() };
+    bsDraft = {
+      scope: "active", kind: "",
+      statusInc: new Set(), statusExc: new Set(),
+      langInc: new Set(), langExc: new Set(),
+      season: "", sort: "title", sortDir: "asc",
+    };
     syncFilterControls();
     updateApplyLabel();
   });
@@ -1685,17 +1911,88 @@ if (bsKind) {
     updateApplyLabel();
   });
 }
+const bsSeasonSel = document.getElementById("bs-season");
+if (bsSeasonSel) {
+  bsSeasonSel.addEventListener("change", function () {
+    bsDraft.season = bsSeasonSel.value;
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+const bsSortField = document.getElementById("bs-sort-field");
+if (bsSortField) {
+  bsSortField.addEventListener("change", function () {
+    bsDraft.sort = bsSortField.value;
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+const bsSortDir = document.getElementById("bs-sort-dir");
+if (bsSortDir) {
+  bsSortDir.addEventListener("click", function (ev) {
+    const b = ev.target.closest("button[data-dir]");
+    if (!b) return;
+    bsDraft.sortDir = b.dataset.dir;
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+
+function cycleState(current) {
+  return current === "" ? "inc" : current === "inc" ? "exc" : "";
+}
+
 const bsStatus = document.getElementById("bs-status");
 if (bsStatus) {
   bsStatus.addEventListener("click", function (ev) {
     const b = ev.target.closest("button[data-status]");
     if (!b) return;
     const s = b.dataset.status;
-    if (bsDraft.status.has(s)) bsDraft.status.delete(s);
-    else bsDraft.status.add(s);
+    const next = cycleState(b.dataset.state);
+    setChipState(b, next);
+    bsDraft.statusInc.delete(s);
+    bsDraft.statusExc.delete(s);
+    if (next === "inc") bsDraft.statusInc.add(s);
+    else if (next === "exc") bsDraft.statusExc.add(s);
     syncFilterControls();
     updateApplyLabel();
   });
+}
+const bsLangs = document.getElementById("bs-langs");
+if (bsLangs) {
+  bsLangs.addEventListener("click", function (ev) {
+    const b = ev.target.closest("button[data-lang]");
+    if (!b) return;
+    const L = b.dataset.lang;
+    const next = cycleState(b.dataset.state);
+    setChipState(b, next);
+    bsDraft.langInc.delete(L);
+    bsDraft.langExc.delete(L);
+    if (next === "inc") bsDraft.langInc.add(L);
+    else if (next === "exc") bsDraft.langExc.add(L);
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+
+function toggleQuickRule(qr) {
+  const sw = document.getElementById("qr-" + qr);
+  if (!sw) return;
+  const on = sw.classList.toggle("on");
+  sw.setAttribute("aria-checked", on ? "true" : "false");
+  if (qr === "missing") {
+    if (on) bsDraft.statusInc.add("missing");
+    else bsDraft.statusInc.delete("missing");
+  } else {
+    if (on) bsDraft.statusExc.add(qr);
+    else bsDraft.statusExc.delete(qr);
+  }
+  syncFilterControls();
+  updateApplyLabel();
+}
+for (const qr of ["queued", "done", "missing"]) {
+  const sw = document.getElementById("qr-" + qr);
+  if (sw) sw.addEventListener("click", function () { toggleQuickRule(qr); });
 }
 
 /* Swipe-down dismiss (design guide §3) */
