@@ -76,7 +76,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 @media (min-width: 840px) { main { padding: 16px 16px 64px; } }
 .page { display: none; }
 .page.active { display: block; }
-.page-title { font-size: 15px; font-weight: 600; line-height: 20px; margin: 0 0 8px; }
 .sec-title { font-size: 13px; font-weight: 600; line-height: 18px; margin: 8px 0 6px; }
 #error-banner, #lib-banner { display: none; }
 #error-banner.visible { display: flex; }
@@ -410,7 +409,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Library ============ -->
     <section class="page active" id="page-library" aria-label="Library">
-      <h2 class="page-title">Library</h2>
       <div class="search-bar">
         <div class="search-field">
           <input type="search" id="lib-search-input" placeholder="Search series, episode, language…" aria-label="Search library">
@@ -453,7 +451,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Activity ============ -->
     <section class="page" id="page-activity" aria-label="Activity">
-      <h2 class="page-title">Activity</h2>
       <div class="search-bar">
         <div class="search-field">
           <input type="search" id="act-search-input" placeholder="Search activity…" aria-label="Search activity">
@@ -466,7 +463,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Status ============ -->
     <section class="page" id="page-status" aria-label="Status">
-      <h2 class="page-title">Status</h2>
       <div class="sec-title">Pipeline <span id="refresh-ind"></span></div>
       <div class="pills">
         <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
@@ -500,7 +496,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Settings ============ -->
     <section class="page" id="page-settings" aria-label="Settings">
-      <h2 class="page-title">Settings</h2>
       <div class="sec-title">Theme</div>
       <div class="filter-chips" id="theme-chips" role="group" aria-label="Theme">
         <button type="button" class="fchip theme-opt" data-theme="light">Light</button>
