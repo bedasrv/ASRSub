@@ -338,6 +338,61 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 }
 .settings-note { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 10px; }
 
+/* ============ Settings: grouped config UI ============ */
+.cfg-group { border: 1px solid var(--outline-variant); border-radius: var(--r-m); margin-bottom: 10px; overflow: hidden; background: var(--surface-container-low); }
+.cfg-group > .cfg-group-h { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px; background: none; border: none; color: var(--on-surface); font: 600 14px/20px; cursor: pointer; text-align: left; }
+.cfg-group > .cfg-group-h .caret { color: var(--on-surface-variant); transition: transform .15s; }
+.cfg-group.open > .cfg-group-h .caret { transform: rotate(90deg); }
+.cfg-group-body { display: none; padding: 2px 14px 12px; }
+.cfg-group.open > .cfg-group-body { display: block; }
+.cfg-row { padding: 10px 0; border-bottom: 1px solid var(--divider); }
+.cfg-row:last-child { border-bottom: none; }
+.cfg-row-lbl { font-size: 13px; font-weight: 600; line-height: 18px; }
+.cfg-row-key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--on-surface-variant); margin-top: 1px; }
+.cfg-row-help { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 2px; margin-bottom: 4px; }
+.cfg-badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; padding: 1px 6px; border-radius: var(--r-full); margin-left: 8px; vertical-align: middle; }
+.cfg-badge.restart { background: var(--run-container); color: var(--run); }
+.cfg-badge.hot { background: var(--ok-container); color: var(--ok); }
+.cfg-row input[type="text"], .cfg-row input[type="password"], .cfg-row input[type="number"] {
+  background: var(--surface-variant); color: var(--on-surface); border: none;
+  border-radius: var(--r-s); padding: 7px 10px; font: var(--t-bm); width: 100%; max-width: 420px;
+}
+.cfg-row input[type="number"] { max-width: 140px; }
+.cfg-row input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.cfg-unit { font-size: 11px; color: var(--on-surface-variant); margin-left: 6px; }
+.sw { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
+.sw input { opacity: 0; width: 0; height: 0; }
+.sw .slider { position: absolute; inset: 0; background: var(--surface-variant); border-radius: var(--r-full); transition: background .15s; cursor: pointer; }
+.sw .slider::before { content: ""; position: absolute; height: 16px; width: 16px; left: 3px; top: 3px; background: var(--on-surface-variant); border-radius: 50%; transition: transform .15s, background .15s; }
+.sw input:checked + .slider { background: var(--primary); }
+.sw input:checked + .slider::before { transform: translateX(18px); background: var(--on-primary); }
+.tags { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+.tagchip { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; background: var(--primary-container); color: var(--on-primary-container); border-radius: var(--r-full); font-size: 12px; }
+.tagchip button { border: none; background: none; color: inherit; cursor: pointer; padding: 0 2px; font-size: 12px; line-height: 1; }
+.tag-input { background: transparent; border: 1px dashed var(--outline); border-radius: var(--r-full); padding: 3px 10px; font-size: 12px; color: var(--on-surface); width: 90px; }
+.tag-input:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.cfg-secbtns { display: inline-flex; gap: 4px; margin-left: 6px; }
+.cfg-secbtns button { border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant); border-radius: var(--r-s); font-size: 11px; padding: 3px 8px; cursor: pointer; }
+.cfg-seg { display: inline-flex; gap: 2px; }
+.cfg-seg button { height: 26px; padding: 0 12px; border-radius: var(--r-full); border: 1px solid var(--outline-variant); background: transparent; color: var(--on-surface-variant); font-size: 12px; font-weight: 600; cursor: pointer; }
+.cfg-seg button.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+#cfg-savebar { position: sticky; bottom: 76px; z-index: 20; display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; background: var(--surface-container-high); border: 1px solid var(--outline-variant); border-radius: var(--r-l); }
+#cfg-savebar[hidden] { display: none; }
+#cfg-savebar .m3-btn { height: 36px; }
+.wh-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.wh-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wh-row input[type="text"] { max-width: none; flex: 1 1 260px; }
+.wh-row .mini { height: 30px; padding: 0 12px; }
+.wh-test { font-size: 11px; color: var(--on-surface-variant); }
+.wh-test.ok { color: var(--ok); }
+.wh-test.err { color: var(--error); }
+.wh-events { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+.wh-events label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.wh-events input { accent-color: var(--primary); }
+@media (max-width: 599px) {
+  .cfg-row input[type="text"], .cfg-row input[type="password"], .cfg-row input[type="number"] { max-width: none; }
+}
+
 /* ============ Navigation: bottom bar (mobile) / rail (desktop) ============ */
 .nav-item {
   border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
@@ -521,6 +576,11 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
       </div>
       <div class="sec-title">Configuration</div>
       <div id="ctl-config"><div class="empty">loading…</div></div>
+      <div id="cfg-savebar" hidden>
+        <span class="muted" id="cfg-dirty-count"></span>
+        <button type="button" class="m3-btn filled" id="cfg-save">Save Changes</button>
+        <button type="button" class="m3-btn text" id="cfg-discard">Discard</button>
+      </div>
       <div class="settings-note">status polls every 5s · library/activity every 20s · data is cached server-side</div>
     </section>
   </main>
@@ -1528,16 +1588,212 @@ async function ctlAction(a) {
 }
 
 /* ============ Settings (config) ============ */
-const DEFAULT_KEYS = ["MAX_EPS_PER_RUN", "TARGET_LANGS", "TRANSLATE_BASE", "TRANSLATE_MODEL", "MAX_TRANSLATE_WORKERS"];
+const CFG_RESTART_KEYS = new Set(["ASR_BACKEND", "ASR_URL", "WEBHOOK_PORT", "TARGET_LANGS", "STATE_FILE", "TMP_DIR", "MAX_EPS_PER_RUN"]);
+const CFG_SECRET_RE = /KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH|CRED/i;
 
-function ctlRow(key, value) {
-  const secret = value === "***";
-  const input = secret
-    ? '<input type="text" data-key="' + esc(key) + '" placeholder="secret, re-enter to change">'
-    : '<input type="text" data-key="' + esc(key) + '" value="' + esc(value) + '">';
-  return '<tr><td class="kv">' + esc(key) + '</td><td>' + input + '</td>' +
-    '<td style="white-space:nowrap"><button type="button" class="mini" data-ckey="' + esc(key) + '" data-act="set">Set</button> ' +
-    '<button type="button" class="mini unset" data-ckey="' + esc(key) + '" data-act="unset">Unset</button></td></tr>';
+// [group, key, label, type, help, extra]
+const CFG_FIELDS = [
+  ["media", "SONARR_URL", "Sonarr URL", "text", "Base URL of Sonarr (api/v3 included).", {}],
+  ["media", "SONARR_API_KEY", "Sonarr API Key", "secret", "API key for Sonarr.", {}],
+  ["media", "BAZARR_URL", "Bazarr URL (primary / ja)", "text", "Primary Bazarr; Japanese profile.", {}],
+  ["media", "BAZARR_API_KEY", "Bazarr API Key (primary)", "secret", "API key for primary Bazarr.", {}],
+  ["media", "BAZARR_URL_2", "Bazarr URL 2 (id/en)", "text", "Secondary Bazarr for id/en subs.", {}],
+  ["media", "BAZARR_API_KEY_2", "Bazarr API Key 2", "secret", "API key for secondary Bazarr.", {}],
+  ["media", "JELLYFIN_URL", "Jellyfin URL", "text", "Base URL of Jellyfin.", {}],
+  ["media", "JELLYFIN_API_KEY", "Jellyfin API Key", "secret", "API key for Jellyfin.", {}],
+  ["media", "JELLYFIN_MEDIA_ROOT", "Jellyfin Media Root", "text", "Path prefix Jellyfin sees for NAS media.", {}],
+  ["ai", "ASR_BACKEND", "ASR Engine", "seg", "SenseVoice or faster-whisper backend.", { opts: [["sensevoice", "SenseVoice"], ["whisper", "Whisper"]] }],
+  ["ai", "SV_MODEL_ID", "ASR Model ID", "text", "SenseVoice model id on HuggingFace.", {}],
+  ["ai", "TRANSLATE_BASE", "Translation Base URL", "text", "OpenAI-compatible translate endpoint.", {}],
+  ["ai", "TRANSLATE_MODEL", "Translation Model", "text", "Model served at TRANSLATE_BASE.", {}],
+  ["ai", "TRANSLATE_API_KEY", "Translation API Key", "secret", "Bearer key for the translate API.", {}],
+  ["ai", "TARGET_LANGS", "Target Languages", "csv", "Languages to generate subs for.", {}],
+  ["ai", "MAX_TRANSLATE_WORKERS", "Parallel Workers", "number", "Concurrent translation jobs.", { unit: "workers" }],
+  ["ai", "EMO_ENABLED", "Emotion Detection", "bool", "Attach per-line emotion labels (emotion2vec+).", {}],
+  ["ai", "EMO_MODEL", "Emotion Model", "text", "Emotion model id.", {}],
+  ["workflow", "MAX_EPS_PER_RUN", "Max Episodes Per Run", "number", "Cap on items processed per pass.", { unit: "episodes" }],
+  ["workflow", "MOVIE_LIBRARY", "Movie Library", "bool", "Process Bazarr/Radarr movies.", {}],
+  ["workflow", "REGEN_LIBRARY", "Regeneration Mode", "bool", "Re-process every done (episode, lang) pair.", {}],
+  ["webhooks", "HERMES_WEBHOOK_URL", "Legacy Hermes URL", "text", "Legacy error webhook target (pipeline_error).", {}],
+  ["webhooks", "HERMES_WEBHOOK_SECRET", "Legacy Hermes Secret", "secret", "Legacy HMAC secret for HERMES_WEBHOOK_URL.", {}],
+  ["advanced", "ALIGN_ENABLED", "Alignment Enabled", "bool", "Enable external-sub alignment.", {}],
+  ["advanced", "ALIGN_MAX_OFFSET_S", "Max Offset", "number", "Max alignment offset.", { unit: "seconds" }],
+  ["advanced", "ALIGN_MAX_OFFSET_SECONDS", "Max Global Offset", "number", "Global offset bound for alignment.", { unit: "seconds" }],
+  ["advanced", "RETIME_ENABLED", "Retiming Enabled", "bool", "ASR-anchored re-timing of external subs.", {}],
+  ["advanced", "RETIME_TEXT_THRESHOLD", "Retime Text Threshold", "number", "Bigram match threshold for anchors.", {}],
+  ["advanced", "RETIME_MIN_ANCHOR_FRAC", "Min Anchor Fraction", "number", "Minimum anchored fraction to trust anchors.", {}],
+  ["advanced", "RETIME_MAX_RATIO", "Max Ratio", "number", "Order-ratio bound; reject beyond.", {}],
+  ["advanced", "CPS_MERGE_MAX", "Max Reading Speed", "number", "Chars/sec cap before merging cues.", { unit: "chars/sec" }],
+  ["advanced", "CPS_MERGE_MAX_CHARS", "Max Merged Chars", "number", "Max chars in a merged cue.", { unit: "chars" }],
+  ["advanced", "CPS_MERGE_MAX_DUR_MS", "Max Merged Duration", "number", "Max duration of a merged cue.", { unit: "ms" }],
+  ["advanced", "CPS_MERGE_MAX_GAP_MS", "Max Merge Gap", "number", "Max gap between merged cues.", { unit: "ms" }],
+  ["advanced", "SDH_PLACEHOLDERS", "Lyrics Placeholders", "csv", "Placeholder tokens for foreign/lyric lines.", {}],
+  ["advanced", "AI_MARKER_CUE", "AI Marker Cue", "bool", "Write [AI-generated by ASRSub] as first cue.", {}],
+  ["advanced", "AI_MARKER_CUE_MS", "AI Marker Duration", "number", "Duration of the AI marker cue.", { unit: "ms" }],
+  ["advanced", "LADDER_COOLDOWN_H", "Upgrade Cooldown", "number", "Hours before an episode may be re-upgraded.", { unit: "hours" }],
+  ["advanced", "LADDER_MIN_CHARS", "Ladder Min Chars", "number", "Minimum source chars to accept.", {}],
+  ["advanced", "LADDER_MIN_CJK", "Ladder Min CJK", "number", "Minimum CJK ratio for jpn sources.", {}],
+  ["advanced", "LADDER_MIN_CUES", "Ladder Min Cues", "number", "Minimum source cues to accept.", {}],
+  ["advanced", "LADDER_SPAN_TOLERANCE", "Ladder Span Tolerance", "number", "Max span/duration deviation.", {}],
+  ["advanced", "LADDER_UPGRADE_BUDGET", "Upgrade Budget", "number", "Max auto-upgrades per pass.", {}],
+  ["advanced", "LADDER_SKIP_REFINED", "Skip Refined", "bool", "Skip episodes reviewed by refine_subs.", {}],
+  ["advanced", "TRANSLATE_CHUNK", "Translate Chunk Size", "number", "Lines per translation chunk.", {}],
+  ["advanced", "TRANSLATE_CONTEXT_LINES", "Context Lines", "number", "Prior-episode context lines to include.", {}],
+  ["advanced", "TRANSLATE_FALLBACK_MODELS", "Fallback Models", "csv", "Comma list of fallback translate models.", {}],
+  ["advanced", "WEBHOOK_PORT", "Webhook Port", "number", "Port of the orchestrator control/webhook listener.", {}],
+];
+
+const CFG_GROUPS = [
+  { id: "media", title: "Media Services" },
+  { id: "ai", title: "AI & Engine Pipeline" },
+  { id: "workflow", title: "Processing & Workflow" },
+  { id: "webhooks", title: "Webhooks & Notifications", suite: true },
+  { id: "advanced", title: "Advanced Subtitle Tuning", collapsed: true },
+];
+
+let cfgState = {};
+let cfgOrig = {};
+let cfgDirty = {};
+
+function parseCsv(v) {
+  if (v == null) return [];
+  if (Array.isArray(v)) return v.map(String);
+  const s = String(v).trim();
+  if (s.startsWith("[")) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) return arr.map(String);
+    } catch (e) {}
+  }
+  return s.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+}
+
+function markDirty(key) {
+  const val = cfgState[key];
+  const orig = cfgOrig[key];
+  let dirty = String(val) !== String(orig);
+  if (CFG_SECRET_RE.test(key) && orig === "***") dirty = val !== "";
+  cfgDirty[key] = dirty;
+  updateSaveBar();
+}
+
+function updateSaveBar() {
+  const n = Object.keys(cfgDirty).filter(function (k) { return cfgDirty[k]; }).length;
+  const bar = document.getElementById("cfg-savebar");
+  if (!bar) return;
+  bar.hidden = n === 0;
+  const c = document.getElementById("cfg-dirty-count");
+  if (c) c.textContent = n ? n + " change" + (n === 1 ? "" : "s") : "";
+}
+
+function fieldInputHTML(f) {
+  const k = f[1], type = f[3], extra = f[5] || {};
+  const val = cfgState[k];
+  if (type === "bool") {
+    return '<label class="sw"><input type="checkbox" data-key="' + esc(k) + '" data-ctl="bool"' +
+      (val === "true" || val === "1" ? " checked" : "") + '><span class="slider"></span></label>';
+  }
+  if (type === "csv") {
+    const items = parseCsv(val);
+    return '<div class="tags" data-key="' + esc(k) + '" data-ctl="csv">' +
+      items.map(function (t) {
+        return '<span class="tagchip">' + esc(t) + '<button type="button" data-ctl="tag-rm" data-tag="' + esc(t) + '" aria-label="remove ' + esc(t) + '">×</button></span>';
+      }).join("") +
+      '<input type="text" class="tag-input" data-ctl="tag-add" placeholder="+ add" aria-label="add tag">' +
+      "</div>";
+  }
+  if (type === "secret") {
+    return '<span style="display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;width:100%">' +
+      '<input type="password" data-key="' + esc(k) + '" data-ctl="text" value="' + (val === "***" ? "" : esc(val)) + '"' +
+      (val === "***" ? ' placeholder="secret, re-enter to change"' : "") + ' style="flex:1 1 260px;max-width:340px">' +
+      '<span class="cfg-secbtns"><button type="button" data-ctl="eye">show</button><button type="button" data-ctl="copy">copy</button></span></span>';
+  }
+  if (type === "number") {
+    return '<span style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap"><input type="number" data-key="' + esc(k) + '" data-ctl="num" value="' + esc(val) + '">' +
+      (extra.unit ? '<span class="cfg-unit">' + esc(extra.unit) + "</span>" : "") + "</span>";
+  }
+  if (type === "seg") {
+    const opts = extra.opts || [];
+    return '<div class="cfg-seg" data-key="' + esc(k) + '" data-ctl="seg">' +
+      opts.map(function (o) {
+        return '<button type="button" data-seg-val="' + esc(o[0]) + '" class="' + (String(val) === String(o[0]) ? "active" : "") + '">' + esc(o[1]) + "</button>";
+      }).join("") + "</div>";
+  }
+  return '<input type="text" data-key="' + esc(k) + '" data-ctl="text" value="' + esc(val) + '">';
+}
+
+function fieldRowHTML(f) {
+  const k = f[1], label = f[2], help = f[4];
+  const restart = CFG_RESTART_KEYS.has(k);
+  return '<div class="cfg-row">' +
+    '<div class="cfg-row-lbl">' + esc(label) +
+    '<span class="cfg-badge ' + (restart ? "restart" : "hot") + '">' + (restart ? "restart" : "next pass") + "</span></div>" +
+    '<div class="cfg-row-key">' + esc(k) + "</div>" +
+    (help ? '<div class="cfg-row-help">' + esc(help) + "</div>" : "") +
+    fieldInputHTML(f) +
+    "</div>";
+}
+
+function webhookSuiteHTML() {
+  const urls = parseCsv(cfgState["WEBHOOK_URLS"]);
+  const events = parseCsv(cfgState["WEBHOOK_EVENTS"]);
+  const evDefs = [["subtitle_done", "Subtitle Generated"], ["pipeline_error", "Pipeline Error"], ["pass_completed", "Pass Completed"]];
+  let html = '<div class="cfg-row"><div class="cfg-row-lbl">Endpoints</div>' +
+    '<div class="cfg-row-help">HMAC-SHA256 signed as X-Webhook-Signature-V2 over &lt;ts&gt;.&lt;body&gt;.</div>' +
+    '<div class="wh-list" data-ctl="wh-list">';
+  urls.forEach(function (u) {
+    html += '<div class="wh-row" data-url="' + esc(u) + '">' +
+      '<input type="text" data-ctl="wh-url" value="' + esc(u) + '" aria-label="webhook url">' +
+      '<button type="button" class="mini" data-ctl="wh-test">Send Test</button>' +
+      '<span class="wh-test" data-ctl="wh-result"></span>' +
+      '<button type="button" class="mini unset" data-ctl="wh-rm">Remove</button></div>';
+  });
+  html += '<button type="button" class="mini" data-ctl="wh-add">+ Add Endpoint</button></div></div>';
+  html += '<div class="cfg-row"><div class="cfg-row-lbl">Events</div>' +
+    '<div class="cfg-row-help">Which event types to send.</div>' +
+    '<div class="wh-events" data-ctl="wh-events">' +
+    evDefs.map(function (e) {
+      return '<label><input type="checkbox" data-ev="' + e[0] + '"' + (events.indexOf(e[0]) >= 0 ? " checked" : "") + "> " + e[1] + "</label>";
+    }).join("") + "</div></div>";
+  html += '<div class="cfg-row"><div class="cfg-row-lbl">HMAC Secret</div>' +
+    '<div class="cfg-row-help">Shared secret used to sign outbound payloads.</div>' +
+    '<span style="display:inline-flex;gap:6px;flex-wrap:wrap;align-items:center"><input type="password" data-key="WEBHOOK_SECRET" data-ctl="text" value="' + (cfgState["WEBHOOK_SECRET"] === "***" ? "" : esc(cfgState["WEBHOOK_SECRET"])) + '"' +
+    (cfgState["WEBHOOK_SECRET"] === "***" ? ' placeholder="secret, re-enter to change"' : "") + ' style="flex:1 1 260px;max-width:340px">' +
+    '<button type="button" class="mini" data-ctl="wh-gen">Generate Random Secret</button></span></div>';
+  return html;
+}
+
+function renderConfig(data) {
+  cfgState = {};
+  cfgOrig = {};
+  cfgDirty = {};
+  for (const k in data) {
+    cfgOrig[k] = data[k];
+    cfgState[k] = data[k];
+  }
+  const el = document.getElementById("ctl-config");
+  if (!el) return;
+  let html = "";
+  for (const g of CFG_GROUPS) {
+    html += '<div class="cfg-group' + (g.collapsed ? "" : " open") + '" data-group="' + g.id + '">' +
+      '<button type="button" class="cfg-group-h" data-ctl="group">' + esc(g.title) + ' <span class="caret" aria-hidden="true">▶</span></button>' +
+      '<div class="cfg-group-body">';
+    if (g.suite) {
+      html += webhookSuiteHTML();
+      for (const f of CFG_FIELDS) {
+        if (f[0] === "webhooks" && cfgState[f[1]] !== undefined) html += fieldRowHTML(f);
+      }
+    } else {
+      for (const f of CFG_FIELDS) {
+        if (f[0] !== g.id) continue;
+        if (cfgState[f[1]] === undefined) continue;
+        html += fieldRowHTML(f);
+      }
+    }
+    html += "</div></div>";
+  }
+  el.innerHTML = html;
+  updateSaveBar();
 }
 
 async function loadControlConfig() {
@@ -1548,78 +1804,199 @@ async function loadControlConfig() {
       el.innerHTML = '<div class="empty">config unavailable (' + esc((data && data.error) || status) + ")</div>";
       return;
     }
-    const keys = DEFAULT_KEYS.concat(Object.keys(data).sort()).filter(function (k, i, a) {
-      return a.indexOf(k) === i;
-    });
-    let html = '<table>';
-    for (const k of keys) html += ctlRow(k, data[k] != null ? data[k] : "");
-    html += '<tr><td><input type="text" id="ctl-new-key" placeholder="KEY" style="max-width:140px"></td>' +
-      '<td><input type="text" id="ctl-new-val" placeholder="VALUE"></td>' +
-      '<td><button class="mini" onclick="addKey()">Add</button></td></tr></table>';
-    el.innerHTML = html;
+    renderConfig(data);
   } catch (e) {
     el.innerHTML = '<div class="empty">config unavailable (' + esc(e.message) + ")</div>";
   }
 }
 
-function addKey() {
-  const k = document.getElementById("ctl-new-key").value.trim();
-  const v = document.getElementById("ctl-new-val").value;
-  if (!k) { toast("key required", "err"); return; }
-  setConfigKey(k, v);
+function syncWebhookUrls() {
+  const rows = document.querySelectorAll("#ctl-config .wh-row input[data-ctl='wh-url']");
+  const urls = [];
+  for (const r of rows) {
+    const v = r.value.trim();
+    if (v) urls.push(v);
+  }
+  cfgState["WEBHOOK_URLS"] = urls.join(",");
+  markDirty("WEBHOOK_URLS");
 }
 
-async function setConfigKey(key, value) {
-  let input = null;
-  try { input = document.querySelector('#ctl-config input[data-key="' + CSS.escape(key) + '"]'); } catch (e) {}
-  const val = (value !== undefined && value !== null) ? value : (input ? input.value : "");
-  if (val === "***") {
-    toast("secret keys are masked; re-enter the actual value to change", "err");
-    return;
-  }
-  const body = {}; body[key] = val;
+async function testWebhook(url, resultEl) {
+  if (!resultEl) return;
+  resultEl.textContent = "…";
+  resultEl.className = "wh-test";
   try {
-    const { status, data } = await api("/api2/config", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    const { status, data } = await api("/api2/webhook/test", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: url }),
     });
-    if (status === 200) {
-      toast("applied " + key + "=" + val, "ok");
-      loadControlConfig();
-    } else {
-      toast("set failed: " + esc((data && data.error) || status), "err");
-    }
+    const r = (data && data.results && data.results[0]) || {};
+    const ok = status === 200 && r.status != null && r.status < 300;
+    resultEl.textContent = r.status != null ? ("HTTP " + r.status + " · " + r.latency_ms + "ms") : (r.error || "failed");
+    resultEl.className = "wh-test " + (ok ? "ok" : "err");
   } catch (e) {
-    toast("set failed: " + esc(e.message), "err");
+    resultEl.textContent = "error";
+    resultEl.className = "wh-test err";
   }
 }
 
-async function unsetConfigKey(key) {
-  const body = {}; body[key] = null;
-  try {
-    const { status, data } = await api("/api2/config", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    if (status === 200) {
-      toast("unset " + key, "ok");
-      loadControlConfig();
-    } else {
-      toast("unset failed: " + esc((data && data.error) || status), "err");
-    }
-  } catch (e) {
-    toast("unset failed: " + esc(e.message), "err");
+async function saveConfig() {
+  const dirty = Object.keys(cfgDirty).filter(function (k) { return cfgDirty[k]; });
+  if (!dirty.length) return;
+  const btn = document.getElementById("cfg-save");
+  btnBusy(btn, true);
+  let ok = 0, failed = 0, firstErr = "";
+  for (const k of dirty) {
+    const body = {};
+    body[k] = cfgState[k];
+    try {
+      const { status, data } = await api("/api2/config", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (status === 200) ok++;
+      else { failed++; if (!firstErr) firstErr = (data && data.error) || ("HTTP " + status); }
+    } catch (e) { failed++; if (!firstErr) firstErr = e.message; }
   }
+  btnBusy(btn, false);
+  const msg = "saved " + ok + (failed ? ", " + failed + " failed" : "") + (firstErr ? " — " + esc(firstErr) : "");
+  toast(msg, failed ? "err" : "ok");
+  loadControlConfig();
+}
+
+function rerenderTags(key) {
+  const wrap = document.querySelector('#ctl-config .tags[data-key="' + CSS.escape(key) + '"]');
+  if (!wrap) return;
+  const items = parseCsv(cfgState[key]);
+  wrap.innerHTML = items.map(function (t) {
+    return '<span class="tagchip">' + esc(t) + '<button type="button" data-ctl="tag-rm" data-tag="' + esc(t) + '" aria-label="remove ' + esc(t) + '">×</button></span>';
+  }).join("") + '<input type="text" class="tag-input" data-ctl="tag-add" placeholder="+ add" aria-label="add tag">';
 }
 
 const ctlConfigEl = document.getElementById("ctl-config");
 if (ctlConfigEl) {
   ctlConfigEl.addEventListener("click", function (ev) {
-    const btn = ev.target.closest("button[data-ckey]");
-    if (!btn) return;
-    const key = btn.dataset.ckey;
-    if (btn.dataset.act === "set") setConfigKey(key);
-    else if (btn.dataset.act === "unset") unsetConfigKey(key);
+    const btn = ev.target.closest("button[data-ctl]");
+    const tagBtn = ev.target.closest("button[data-ctl='tag-rm']");
+    if (tagBtn) {
+      const wrap = tagBtn.closest(".tags");
+      const key = wrap.dataset.key;
+      const items = parseCsv(cfgState[key]).filter(function (t) { return t !== tagBtn.dataset.tag; });
+      cfgState[key] = items.join(",");
+      rerenderTags(key);
+      markDirty(key);
+      return;
+    }
+    if (btn && btn.dataset.ctl === "group") {
+      btn.parentElement.classList.toggle("open");
+      return;
+    }
+    if (btn && btn.dataset.ctl === "seg") {
+      const seg = btn.closest("[data-ctl='seg']");
+      const key = seg.dataset.key;
+      cfgState[key] = btn.dataset.segVal;
+      for (const b of seg.querySelectorAll("button")) b.classList.toggle("active", b === btn);
+      markDirty(key);
+      return;
+    }
+    if (btn && btn.dataset.ctl === "wh-add") {
+      const list = ev.target.closest(".wh-list");
+      const row = document.createElement("div");
+      row.className = "wh-row";
+      row.innerHTML = '<input type="text" data-ctl="wh-url" value="" aria-label="webhook url">' +
+        '<button type="button" class="mini" data-ctl="wh-test">Send Test</button>' +
+        '<span class="wh-test" data-ctl="wh-result"></span>' +
+        '<button type="button" class="mini unset" data-ctl="wh-rm">Remove</button>';
+      list.insertBefore(row, btn);
+      row.querySelector("input").focus();
+      return;
+    }
+    if (btn && btn.dataset.ctl === "wh-rm") {
+      const row = btn.closest(".wh-row");
+      if (row) row.remove();
+      syncWebhookUrls();
+      return;
+    }
+    if (btn && btn.dataset.ctl === "wh-test") {
+      const row = btn.closest(".wh-row");
+      const url = row.querySelector("input[data-ctl='wh-url']").value.trim();
+      const res = row.querySelector("[data-ctl='wh-result']");
+      testWebhook(url, res);
+      return;
+    }
+    if (btn && btn.dataset.ctl === "wh-gen") {
+      const arr = new Uint8Array(32);
+      crypto.getRandomValues(arr);
+      const hex = Array.from(arr, function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+      cfgState["WEBHOOK_SECRET"] = hex;
+      const input = ev.target.closest(".cfg-row").querySelector('input[data-key="WEBHOOK_SECRET"]');
+      if (input) { input.value = hex; input.type = "password"; }
+      markDirty("WEBHOOK_SECRET");
+      return;
+    }
+    if (btn && btn.dataset.ctl === "eye") {
+      const row = btn.closest(".cfg-row");
+      const input = row.querySelector('input[data-ctl="text"]') || row.querySelector('input[data-ctl="num"]') || row.querySelector('input[data-key]');
+      if (input && input.type === "password") { input.type = "text"; btn.textContent = "hide"; }
+      else if (input) { input.type = "password"; btn.textContent = "show"; }
+      return;
+    }
+    if (btn && btn.dataset.ctl === "copy") {
+      const row = btn.closest(".cfg-row");
+      const input = row.querySelector('input[data-ctl="text"]');
+      if (input && input.value) {
+        navigator.clipboard && navigator.clipboard.writeText(input.value);
+        toast("copied", "ok");
+      } else {
+        toast("secret is masked; no value to copy", "err");
+      }
+      return;
+    }
+  });
+
+  ctlConfigEl.addEventListener("change", function (ev) {
+    const el = ev.target;
+    if (el.dataset.ctl === "bool") {
+      cfgState[el.dataset.key] = el.checked ? "true" : "false";
+      markDirty(el.dataset.key);
+    } else if (el.dataset.ctl === "num") {
+      cfgState[el.dataset.key] = el.value;
+      markDirty(el.dataset.key);
+    } else if (el.dataset.ctl === "text") {
+      cfgState[el.dataset.key] = el.value;
+      markDirty(el.dataset.key);
+    } else if (el.dataset.ctl === "wh-url") {
+      syncWebhookUrls();
+    } else if (el.dataset.ev) {
+      const events = parseCsv(cfgState["WEBHOOK_EVENTS"]);
+      if (el.checked && events.indexOf(el.dataset.ev) < 0) events.push(el.dataset.ev);
+      if (!el.checked) {
+        const i = events.indexOf(el.dataset.ev);
+        if (i >= 0) events.splice(i, 1);
+      }
+      cfgState["WEBHOOK_EVENTS"] = events.join(",");
+      markDirty("WEBHOOK_EVENTS");
+    }
+  });
+
+  ctlConfigEl.addEventListener("keydown", function (ev) {
+    const el = ev.target;
+    if (el.dataset && el.dataset.ctl === "tag-add" && ev.key === "Enter") {
+      ev.preventDefault();
+      const wrap = el.closest(".tags");
+      const key = wrap.dataset.key;
+      const items = parseCsv(cfgState[key]);
+      const v = el.value.trim();
+      if (v && items.indexOf(v) < 0) items.push(v);
+      cfgState[key] = items.join(",");
+      rerenderTags(key);
+      markDirty(key);
+    }
   });
 }
+
+const cfgSaveBtn = document.getElementById("cfg-save");
+if (cfgSaveBtn) cfgSaveBtn.addEventListener("click", saveConfig);
+const cfgDiscardBtn = document.getElementById("cfg-discard");
+if (cfgDiscardBtn) cfgDiscardBtn.addEventListener("click", loadControlConfig);
 
 showPage("library");
 pollStatus();
