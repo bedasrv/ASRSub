@@ -63,9 +63,11 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1226,10 +1228,69 @@ class ControlAPIv2:
                 }
         return entry
 
+    def _sonarr_all_episodes(self):
+        """Enumerate every Sonarr episode across all series (scope=all
+        library): {episode_id: {"series_id", "series_title", "season_number",
+        "episode_number", "title", "path"}}. Returns None on any failure so
+        the caller falls back to the active-only set."""
+        cfg = self._env()
+        url_base = cfg.get("SONARR_URL", "").rstrip("/")
+        if not url_base:
+            return None
+        headers = {"X-Api-Key": cfg.get("SONARR_API_KEY", "")}
+        try:
+            code, data = _http("GET", url_base + "/series", headers=headers, timeout=15)
+            if code != 200 or not isinstance(data, list):
+                return None
+            series_ids = [
+                s.get("id")
+                for s in data
+                if isinstance(s, dict) and isinstance(s.get("id"), int)
+            ]
+            series_map = self._sonarr_series()
+
+            def _fetch(sid):
+                c, d = _http(
+                    "GET", url_base + f"/episode?seriesId={sid}",
+                    headers=headers, timeout=15,
+                )
+                if c != 200 or not isinstance(d, list):
+                    return []
+                return [
+                    (e.get("id"), e)
+                    for e in d
+                    if isinstance(e, dict) and isinstance(e.get("id"), int)
+                ]
+
+            out = {}
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for pairs in ex.map(_fetch, series_ids):
+                    for eid, e in pairs:
+                        ef = e.get("episodeFile") or {}
+                        out[eid] = {
+                            "series_id": e.get("seriesId"),
+                            "series_title": e.get("seriesTitle")
+                            or series_map.get(e.get("seriesId")),
+                            "season_number": e.get("seasonNumber"),
+                            "episode_number": e.get("episodeNumber"),
+                            "title": e.get("title"),
+                            "path": ef.get("path"),
+                        }
+            return out
+        except Exception:
+            return None
+
     def _h_library(self, body, id=None):
         """Merged library: one item per episode across Bazarr wanted + state
         history + exclusions (series) plus one item per monitored Bazarr
-        movie (kind "movie"), with per-language status. Read-only."""
+        movie (kind "movie"), with per-language status. Read-only.
+
+        scope=all (query param): additionally enumerate EVERY Sonarr episode
+        (full library) so done/archived episodes stay visible; on enumeration
+        failure it falls back to the active-only set."""
+        scope = "active"
+        if isinstance(body, dict):
+            scope = str(body.get("scope") or "active")
         wanted_json = self._bazarr_wanted()
         _entries, latest, latest_by_lang = self._state()
         wanted_data = wanted_json.get("data", []) or []
@@ -1259,13 +1320,44 @@ class ControlAPIv2:
             )
             if isinstance(eid, int)
         }
+        all_ep = None
+        if scope == "all":
+            all_ep = self._sonarr_all_episodes()
+            if all_ep:
+                ep_ids = ep_ids | set(all_ep)
+            else:
+                print(
+                    "api2: library scope=all enumeration failed; using active set",
+                    file=sys.stderr,
+                    flush=True,
+                )
         reg_rows = self._registry()
-        detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id]
+        details = {}
+        if all_ep:
+            # scope=all: seed details from the Sonarr enumeration so ~475
+            # episodes don't each trigger a per-episode Sonarr call.
+            series_map = self._sonarr_series()
+            for eid, em in all_ep.items():
+                details[eid] = {
+                    "series": em.get("series_title")
+                    or series_map.get(em.get("series_id"))
+                    or "?",
+                    "episode": self._episode_label(
+                        em.get("season_number"), em.get("episode_number")
+                    ),
+                    "title": em.get("title"),
+                    "series_id": em.get("series_id"),
+                    "season_number": em.get("season_number"),
+                    "episode_number": em.get("episode_number"),
+                    "path": em.get("path"),
+                    "quality": None,
+                    "media": None,
+                }
+        detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id and eid not in details]
         if reg_rows:
             # registry has rows: also resolve media paths for wanted items so
             # prov labels can match by stem (ep_detail is cached 300s)
-            detail_ids = [eid for eid in ep_ids]
-        details = {}
+            detail_ids = [eid for eid in ep_ids if eid not in details]
         if detail_ids:
             with ThreadPoolExecutor(max_workers=8) as ex:
                 for eid, det in zip(detail_ids, ex.map(self._ep_detail, detail_ids)):
@@ -1599,7 +1691,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if api is None:
             self._send(500, {"error": "api2 not registered"})
             return
-        path = self.path.split("?", 1)[0]
+        raw_path = self.path.split("?", 1)
+        path = raw_path[0]
         body = None
         if method == "POST":
             raw = b""
@@ -1614,6 +1707,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._send(400, {"error": "invalid JSON body"})
                 return
+        elif len(raw_path) > 1:
+            # read-only GET query params (e.g. /api2/library?scope=all)
+            params = urllib.parse.parse_qs(raw_path[1])
+            body = {k: v[0] for k, v in params.items()}
         token = self.headers.get("X-API-Key")
         code, obj = api.handle(method, path, body, token=token)
         self._send(code, obj)

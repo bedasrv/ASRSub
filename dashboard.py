@@ -48,8 +48,9 @@ def api2_wanted():
 
 
 @app.get("/api2/library")
-def api2_library():
-    return _resp(*api2.handle("GET", "/api2/library"))
+def api2_library(scope: str = "active"):
+    body = {"scope": scope} if scope and scope != "active" else None
+    return _resp(*api2.handle("GET", "/api2/library", body))
 
 
 @app.get("/api2/config")

@@ -3048,16 +3048,169 @@ def translate_texts(
 # ---------- upload ----------
 
 
+_JF_SCAN_INTERVAL = 300  # min seconds between full /Library/Refresh scans
+_jf_last_scan = 0.0
+
+
+def _jf_series_dir(path):
+    """Series name guess from a media path: the dir two levels above the file
+    (…/Series Name/Season 01/X.mkv -> "Series Name")."""
+    parts = (path or "").split("/")
+    return parts[-3] if len(parts) >= 3 else None
+
+
+def _jf_season_dir(path):
+    """Season number from the season dir name (…/Season 01/…) or None."""
+    parts = (path or "").split("/")
+    if len(parts) < 2:
+        return None
+    m = re.search(r"Season\s*(\d+)", parts[-2], re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _jf_find_episode(base, headers, media_path, jelly_path, filename):
+    """Path-based episode lookup: resolve the series via SearchTerm on the
+    media path's series dir, then fetch /Shows/{id}/Episodes and match the
+    item whose Path endswith the filename (or equals jelly_path)."""
+    series_name = _jf_series_dir(media_path)
+    if not series_name:
+        return None
+    try:
+        r = requests.get(
+            base + "/Items",
+            params={
+                "Recursive": "true",
+                "IncludeItemTypes": "Series",
+                "SearchTerm": series_name,
+                "Fields": "Path",
+            },
+            headers=headers,
+            timeout=5,
+        )
+        r.raise_for_status()
+        items = r.json().get("Items", [])
+        series = next(
+            (s for s in items if (s.get("Path") or "").endswith("/" + series_name)),
+            None,
+        )
+        if series is None and items:
+            series = items[0]
+        if series is None:
+            return None
+        params = {"Fields": "Path"}
+        season = _jf_season_dir(media_path)
+        if season is not None:
+            params["Season"] = season
+        r2 = requests.get(
+            base + f"/Shows/{series['Id']}/Episodes",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        r2.raise_for_status()
+        for ep in r2.json().get("Items", []):
+            p = ep.get("Path") or ""
+            if p == jelly_path or p.endswith("/" + filename):
+                return ep
+    except Exception as exc:
+        log(f"jellyfin: series lookup failed: {exc}")
+    return None
+
+
+def _jf_find_movie(base, headers, filename, jelly_path):
+    """Path-based movie lookup: SearchTerm on the filename stem, match Path
+    endswith filename (or equals jelly_path)."""
+    stem = os.path.splitext(filename)[0]
+    if not stem:
+        return None
+    try:
+        r = requests.get(
+            base + "/Items",
+            params={
+                "Recursive": "true",
+                "IncludeItemTypes": "Movie",
+                "Fields": "Path",
+                "SearchTerm": stem,
+            },
+            headers=headers,
+            timeout=5,
+        )
+        r.raise_for_status()
+        for it in r.json().get("Items", []):
+            p = it.get("Path") or ""
+            if p == jelly_path or p.endswith("/" + filename):
+                return it
+    except Exception as exc:
+        log(f"jellyfin: movie lookup failed: {exc}")
+    return None
+
+
+def _jf_find_by_title(base, headers, filename, jelly_path, title, item_type):
+    """Legacy SearchTerm-by-title loop (fallback). Jellyfin metadata names can
+    differ from the Sonarr title, so this is only used when the path-based
+    lookup found nothing."""
+    terms = [title or filename]
+    if title:
+        prefix = re.split(r"[:;!?()]", title, maxsplit=1)[0].strip()
+        if prefix and prefix != title:
+            terms.append(prefix)
+    stem_name = os.path.splitext(filename)[0]
+    if stem_name and stem_name != terms[0]:
+        terms.append(stem_name)
+    for term in terms:
+        try:
+            r = requests.get(
+                base + "/Items",
+                params={
+                    "Recursive": "true",
+                    "IncludeItemTypes": item_type,
+                    "SearchTerm": term,
+                    "Fields": "Path,MediaStreams",
+                },
+                headers=headers,
+                timeout=5,
+            )
+            r.raise_for_status()
+            for it in r.json().get("Items", []):
+                p = it.get("Path") or ""
+                if p == jelly_path or p.endswith("/" + filename):
+                    return it
+        except Exception:
+            continue
+    return None
+
+
+def _jf_maybe_scan(base, headers):
+    """Throttled full-library scan: a manual /Library/Refresh is the ONLY
+    reliable way to index new external sidecars when the realtime monitor
+    misses them (NFS). At most one scan per _JF_SCAN_INTERVAL."""
+    global _jf_last_scan
+    now = time.time()
+    if now - _jf_last_scan < _JF_SCAN_INTERVAL:
+        log("jellyfin: library scan skipped (throttled)")
+        return
+    try:
+        rr = requests.post(base + "/Library/Refresh", headers=headers, timeout=10)
+        _jf_last_scan = time.time()
+        log(f"jellyfin: library scan triggered HTTP {rr.status_code}")
+    except Exception as exc:
+        log(f"jellyfin: library scan failed: {exc}")
+
+
 def jellyfin_refresh(cfg, media_path, title=None, item_type="Episode"):
     """Fire-and-forget Jellyfin library refresh for a subtitle event.
 
-    Finds the item by SearchTerm (title; on a miss, falls back to the title
-    prefix before the first separator and then the filename stem), matches
-    Path against the media file (mapped NAS path), then POSTs
-    /Items/{id}/Refresh (204). Runs in a daemon thread, ~5s timeouts; failures
-    are logged but never fail the episode. No-op without JELLYFIN_API_KEY.
-    item_type: Jellyfin item type to search — "Episode" (series) or "Movie"
-    (radarr track)."""
+    Path-based item lookup (robust against Sonarr-vs-Jellyfin title drift):
+    Episodes resolve the series from the media path's series dir and fetch
+    /Shows/{id}/Episodes, matching the item whose Path endswith the filename;
+    Movies search Movie items by filename stem. Falls back to the legacy
+    SearchTerm-by-title loop. Path matching gates every attempt (mapped NAS
+    path). On a successful item refresh, a throttled full POST /Library/Refresh
+    (>= 300s apart) guarantees new external sidecars get indexed even when the
+    realtime monitor misses them (NFS). Runs in a daemon thread, ~5s item
+    timeouts, 10s scan timeout; failures are logged but never fail the
+    episode. No-op without JELLYFIN_API_KEY. item_type: "Episode" (series) or
+    "Movie" (radarr track)."""
     key = cfg.get("JELLYFIN_API_KEY", "")
     if not key or not media_path:
         return
@@ -3073,41 +3226,12 @@ def jellyfin_refresh(cfg, media_path, title=None, item_type="Episode"):
             )
             filename = os.path.basename(media_path)
             headers = {"X-Emby-Token": key}
-            # Jellyfin SearchTerm matches the item Name, whose punctuation can
-            # differ from the Sonarr title (e.g. ':' vs '!'): a rigid single
-            # search misses episodes whose title/subtitle separator differs.
-            # Try the title first (happy path unchanged), then the title
-            # prefix before the first separator, then the filename stem.
-            # Path matching gates every attempt the same way.
-            terms = [title or filename]
-            if title:
-                prefix = re.split(r"[:;!?()]", title, maxsplit=1)[0].strip()
-                if prefix and prefix != title:
-                    terms.append(prefix)
-            stem_name = os.path.splitext(filename)[0]
-            if stem_name and stem_name != terms[0]:
-                terms.append(stem_name)
-            item = None
-            for term in terms:
-                r = requests.get(
-                    base + "/Items",
-                    params={
-                        "Recursive": "true",
-                        "IncludeItemTypes": item_type,
-                        "SearchTerm": term,
-                        "Fields": "Path,MediaStreams",
-                    },
-                    headers=headers,
-                    timeout=5,
-                )
-                r.raise_for_status()
-                for it in r.json().get("Items", []):
-                    p = it.get("Path") or ""
-                    if p == jelly_path or p.endswith("/" + filename):
-                        item = it
-                        break
-                if item is not None:
-                    break
+            if item_type == "Episode":
+                item = _jf_find_episode(base, headers, media_path, jelly_path, filename)
+            else:
+                item = _jf_find_movie(base, headers, filename, jelly_path)
+            if item is None:
+                item = _jf_find_by_title(base, headers, filename, jelly_path, title, item_type)
             if item is None:
                 log(f"jellyfin: {item_type.lower()} item not found for {filename}")
                 return
@@ -3124,6 +3248,7 @@ def jellyfin_refresh(cfg, media_path, title=None, item_type="Episode"):
                 timeout=5,
             )
             log(f"jellyfin: refresh {filename} HTTP {rr.status_code}")
+            _jf_maybe_scan(base, headers)
         except Exception as exc:
             log(f"jellyfin: refresh failed for {media_path}: {exc}")
 
