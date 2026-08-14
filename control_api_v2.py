@@ -84,6 +84,9 @@ EXCLUSIONS_FILE = os.path.join(CFG_DIR, "exclusions.jsonl")
 
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "AUTH", "CRED")
 EP_LABEL_RE = re.compile(r"(\d+)x(\d+)")
+# ISO 639-2 -> ISO 639-1 for registry/state language codes shown in the UI
+# (eng/jpn/ind merge into en/ja/id so provenance rows don't duplicate).
+LANG_NORM = {"eng": "en", "jpn": "ja", "ind": "id", "en": "en", "ja": "ja", "id": "id"}
 
 
 def _now_iso():
@@ -434,7 +437,7 @@ class ControlAPIv2:
                 totals["external"] += 1
             else:
                 totals["unknown_kind"] += 1
-            lang = r.get("lang") or "unknown"
+            lang = LANG_NORM.get(r.get("lang") or "unknown", r.get("lang") or "unknown")
             entry = by_lang.setdefault(
                 lang, {"embedded": 0, "external": 0, "unknown": 0, "total": 0}
             )
@@ -863,7 +866,7 @@ class ControlAPIv2:
             recent_out.append(
                 {
                     "basename": os.path.basename(stem) or stem,
-                    "lang": r.get("lang"),
+                    "lang": LANG_NORM.get(r.get("lang"), r.get("lang")),
                     "source_kind": r.get("source_kind"),
                     "source": r.get("source"),
                     "ts": r.get("ts"),
@@ -1217,6 +1220,7 @@ class ControlAPIv2:
             langs_by_id[eid] = entry
         for stem in stem_cands:
             for lang, rec in (reg_by_stem.get(stem) or {}).items():
+                lang = LANG_NORM.get(lang, lang)
                 if lang in entry:
                     continue
                 entry[lang] = {
@@ -1366,6 +1370,7 @@ class ControlAPIv2:
         for r in reg_rows:
             stem, lang = r.get("stem"), r.get("lang")
             if stem and lang:
+                lang = LANG_NORM.get(lang, lang)
                 keys = [
                     stem,
                     self._clean_stem(stem),
@@ -1464,6 +1469,14 @@ class ControlAPIv2:
             title = m.get("title") or "?"
             stem_cands = self._registry_stems(path)
             self._registry_lang_entries(movie_langs, rid, stem_cands, reg_by_stem)
+            movie_wanted = bool(m.get("missing_subtitles"))
+            if (
+                scope == "active"
+                and not movie_wanted
+                and not movie_langs.get(rid)
+                and rid not in excluded_movies
+            ):
+                continue  # idle movie (no langs, not wanted, not excluded): all scope only
             items.append(
                 {
                     "item_key": f"m:{rid}",
@@ -1475,7 +1488,7 @@ class ControlAPIv2:
                     "season": None,
                     "episode_number": None,
                     "path": path,
-                    "wanted": False,
+                    "wanted": movie_wanted,
                     "excluded": rid in excluded_movies,
                     "languages": self._lang_entries(movie_langs, rid, stem_cands, reg_by_stem),
                 }
