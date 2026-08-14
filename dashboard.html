@@ -427,6 +427,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           <button type="button" class="fchip" data-status="pending">Pending<span class="fchip-count" id="chip-count-pending"></span></button>
           <button type="button" class="fchip" data-status="excluded">Excluded<span class="fchip-count" id="chip-count-excluded"></span></button>
           <button type="button" class="fchip" data-status="movie">Movies<span class="fchip-count" id="chip-count-movie"></span></button>
+          <button type="button" class="fchip" data-status="series">Series<span class="fchip-count" id="chip-count-series"></span></button>
         </div>
         <button type="button" class="fchip sel-toggle" id="sel-toggle" aria-pressed="false">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
@@ -1025,6 +1026,8 @@ function libMatches(it, q) {
       if (st !== "wanted") return false;
     } else if (libStatus === "movie") {
       if (!(it.kind === "movie") || st === "excluded") return false;
+    } else if (libStatus === "series") {
+      if (!(it.kind === "series") || st === "excluded") return false;
     } else if (libStatus === "excluded") {
       if (st !== "excluded") return false;
     } else if (st !== libStatus) {
@@ -1042,19 +1045,20 @@ function libMatches(it, q) {
 }
 
 function libCounts(items) {
-  const c = { all: items.length, wanted: 0, done: 0, error: 0, pending: 0, excluded: 0, movie: 0 };
+  const c = { all: items.length, wanted: 0, done: 0, error: 0, pending: 0, excluded: 0, movie: 0, series: 0 };
   for (const it of items) {
     const st = itemStatus(it);
     if (st === "excluded") { c.excluded++; continue; }
     if (c[st] != null) c[st]++;
     if (it.kind === "movie") c.movie++;
+    else c.series++;
   }
   return c;
 }
 
 function renderChipCounts(items) {
   const c = libCounts(items);
-  for (const st of ["all", "wanted", "done", "error", "pending", "excluded", "movie"]) {
+  for (const st of ["all", "wanted", "done", "error", "pending", "excluded", "movie", "series"]) {
     const el = document.getElementById("chip-count-" + st);
     if (el) el.textContent = c[st];
   }
