@@ -1439,7 +1439,7 @@ function libMatches(it, q) {
   }
   for (const L of libLangExc) if (langDone(it, L)) return false;      // must NOT have done sub for ANY
   for (const L of libLangInc) if (!langDone(it, L)) return false;     // must have done sub for EVERY
-  if (libSeason !== "") { if (it.kind !== "series" || it.season !== libSeason) return false; }
+  if (libSeason !== "") { if (it.kind !== "series" || ("S" + it.season) !== libSeason) return false; }
   if (q) {
     const hay = [
       it.series, it.episode, it.title, itemKey(it), it.sonarr_episode_id,
@@ -1764,7 +1764,7 @@ function bsDraftFilterHit(it) {
   for (const L of bsDraft.langExc) if (langDone(it, L)) return false;
   for (const L of bsDraft.langInc) if (!langDone(it, L)) return false;
   if (bsDraft.season !== "") {
-    if (it.kind !== "series" || it.season !== bsDraft.season) return false;
+    if (it.kind !== "series" || ("S" + it.season) !== bsDraft.season) return false;
   }
   return true;
 }
