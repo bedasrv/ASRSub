@@ -3359,6 +3359,78 @@ def _delete_movie_subtitles(cfg, movie_id, langs=None):
     return deleted
 
 
+def _clear_movie_state(movie_id, lang):
+    """Remove state.jsonl rows for (kind "movie", sonarrEpisodeId ==
+    movie_id, language == lang) via atomic rewrite (tmp + os.replace).
+    Never raises."""
+    try:
+        kept = []
+        changed = False
+        for e in load_records_jsonl(STATE_FILE):
+            if (
+                (e.get("kind") or "") == "movie"
+                and e.get("sonarrEpisodeId") == movie_id
+                and e.get("language") == lang
+            ):
+                changed = True
+                continue
+            kept.append(e)
+        if changed:
+            rewrite_jsonl(STATE_FILE, kept)
+    except Exception as exc:
+        log(f"recovery: state clear failed for movie {movie_id} [{lang}]: {exc}")
+
+
+def recover_fileless_movies(cfg=None):
+    """Recovery sweep for movies marked done without a target-lang sidecar
+    on disk (Bazarr's async upload crashes on NULL profileId, so the file
+    never lands but the pipeline trusted the 204). For each movie missing ANY
+    target-lang {stem}.{lang}.srt: clear its registry rows and matching
+    state rows so the sweep re-selects it. Movies whose target sidecars all
+    exist are skipped; series rows and exclusions are untouched.
+
+    Returns {"cleared": {movie_id: [langs]}, "skipped": n, "fileless": n}."""
+    if cfg is None:
+        cfg = load_config()
+    target_langs = cfg.get("TARGET_LANGS") or []
+    try:
+        movies = get_movies(cfg)
+    except Exception as exc:
+        log(f"recovery: movies fetch failed: {exc}")
+        return {"cleared": {}, "skipped": 0, "fileless": 0}
+    cleared = {}
+    skipped = 0
+    fileless = 0
+    for m in movies.get("data") or []:
+        rid = m.get("radarrId")
+        if not isinstance(rid, int):
+            continue
+        p = m.get("path") or ""
+        if not p:
+            continue
+        media_path = map_path(p)
+        stem = os.path.splitext(media_path)[0]
+        missing = [
+            lang for lang in target_langs if not os.path.isfile(f"{stem}.{lang}.srt")
+        ]
+        if not missing:
+            skipped += 1
+            continue
+        fileless += 1
+        title = m.get("title") or "?"
+        for lang in missing:
+            registry_delete(ep_id=rid, lang=lang)
+            registry_delete(stem=stem, lang=lang)
+            _clear_movie_state(rid, lang)
+            log(
+                f"recovery: cleared registry+state for movie {rid} {title} "
+                f"[{lang}] (file missing)"
+            )
+        cleared[rid] = missing
+    log(f"recovery: {fileless} fileless movie(s) cleared, {skipped} skipped (have files)")
+    return {"cleared": cleared, "skipped": skipped, "fileless": fileless}
+
+
 def consume_actions(cfg):
     """Process pending actions.jsonl records once per pass; consumed records
     removed in place (tail-preserving: records appended mid-pass survive).
@@ -3496,14 +3568,47 @@ def _bazarr_endpoint(cfg, lang):
     return cfg["BAZARR_URL"].rstrip("/"), cfg["BAZARR_API_KEY"]
 
 
-def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
+def _ensure_sidecar_on_disk(cfg, media_path, lang, srt_bytes, retries=3, delay=2.0):
+    """After a Bazarr upload 204, confirm {stem}.{lang}.srt exists on the
+    NAS. Bazarr's upload endpoint returns 204 after QUEUEING the job async,
+    and the async job can crash (movies: NULL profileId -> TypeError in
+    Bazarr upload.py) so the file never lands. Poll for it, then write it
+    directly (tmp + os.replace, exactly like the ladder path) if still
+    missing. Returns (path, wrote) or (None, False) on persistent failure.
+    media_path MUST be the already-mapped NAS path."""
+    if not media_path:
+        return None, False
+    stem = os.path.splitext(media_path)[0]
+    target = f"{stem}.{lang}.srt"
+    for i in range(retries):
+        if os.path.isfile(target):
+            return target, False
+        if i < retries - 1:
+            time.sleep(delay)
+    if os.path.isfile(target):
+        return target, False
+    try:
+        tmp = target + ".direct.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(srt_bytes)
+        os.replace(tmp, target)
+        return target, True
+    except OSError as exc:
+        log(f"upload: direct write failed for {target}: {exc}")
+        return None, False
+
+
+def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt", media_path=None):
     """Manual upload via POST /api/episodes/subtitles (verified against live
     Bazarr swagger.json 2026-08-07): query seriesid/episodeid/language/
     forced/hi + multipart file. Movies use POST /api/movies/subtitles
     (radarrid) via upload_srt_movie. Bazarr ignores the uploaded
     filename (subliminal writes {video stem}.{lang alpha2}.srt), and the
     endpoint has no comment/history field, so AI provenance lives only in the
-    first SRT cue."""
+    first SRT cue. After a 204 (Bazarr queues the job async), the on-disk
+    sidecar is verified/direct-written via _ensure_sidecar_on_disk when
+    media_path is provided; a missing file that cannot be written fails the
+    upload (returns None) so the item is NOT marked done."""
     base, key = _bazarr_endpoint(cfg, lang)
     url = base + "/episodes/subtitles"
     params = {
@@ -3523,6 +3628,21 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
             )
             last_code = r.status_code
             if r.status_code == 204:
+                if media_path is None:
+                    log("series upload 204 (no media path to verify; trusting Bazarr)")
+                    return 204
+                target, wrote = _ensure_sidecar_on_disk(cfg, media_path, lang, srt_bytes)
+                if target is None:
+                    log(
+                        f"series upload 204 + file MISSING -> direct write failed "
+                        f"({media_path})"
+                    )
+                    return None
+                log(
+                    "series upload 204 + "
+                    + ("file MISSING -> direct write" if wrote else "file confirmed")
+                    + f" ({target})"
+                )
                 return 204
             log(
                 f"    [upload] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]}"
@@ -3535,13 +3655,27 @@ def upload_srt(cfg, series_id, ep_id, lang, srt_bytes, filename="sub.srt"):
     return last_code
 
 
-def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
+def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt", media_path=None):
     """Manual movie subtitle upload via POST /api/movies/subtitles (radarr):
     query radarrid/language/forced/hi + multipart file (Bazarr's swagger
     requires the param literally named radarrid; movieid -> HTTP 400).
     Identical semantics to upload_srt (3 attempts, 5s*attempt backoff, 204
     success, last_code returned otherwise); Bazarr ignores the uploaded
-    filename and writes {video stem}.{lang alpha2}.srt."""
+    filename and writes {video stem}.{lang alpha2}.srt. After a 204, the
+    on-disk sidecar is verified/direct-written via _ensure_sidecar_on_disk
+    (movie path resolved from Bazarr when media_path is not passed); a
+    missing file that cannot be written fails the upload (returns None)."""
+    if not media_path:
+        try:
+            movies = get_movies(cfg)
+            m = next(
+                (x for x in (movies.get("data") or []) if x.get("radarrId") == movie_id),
+                None,
+            )
+            if m and m.get("path"):
+                media_path = map_path(m["path"])
+        except Exception:
+            media_path = None
     base, key = _bazarr_endpoint(cfg, lang)
     url = base + "/movies/subtitles"
     params = {
@@ -3560,6 +3694,21 @@ def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
             )
             last_code = r.status_code
             if r.status_code == 204:
+                if media_path is None:
+                    log("movie upload 204 (no media path to verify; trusting Bazarr)")
+                    return 204
+                target, wrote = _ensure_sidecar_on_disk(cfg, media_path, lang, srt_bytes)
+                if target is None:
+                    log(
+                        f"movie upload 204 + file MISSING -> direct write failed "
+                        f"({media_path})"
+                    )
+                    return None
+                log(
+                    "movie upload 204 + "
+                    + ("file MISSING -> direct write" if wrote else "file confirmed")
+                    + f" ({target})"
+                )
                 return 204
             log(
                 f"    [upload] HTTP {r.status_code} (attempt {attempt + 1}): {r.text[:200]}"
@@ -3780,9 +3929,11 @@ def process_after_asr(
         write_srt(cues_out, texts_out, srt_path, header=AI_MARKER)
         with open(srt_path, "rb") as fh:
             srt_bytes = fh.read()
+        media_path = map_path((info.get("episodeFile") or {}).get("path", "")) or None
         if movie_id is not None:
             code = upload_srt_movie(
-                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path)
+                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path),
+                media_path=media_path,
             )
         else:
             code = upload_srt(
@@ -3792,6 +3943,7 @@ def process_after_asr(
                 lang,
                 srt_bytes,
                 filename=os.path.basename(srt_path),
+                media_path=media_path,
             )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
@@ -3922,7 +4074,8 @@ def process_ladder(
             srt_bytes = fh.read()
         if movie_id is not None:
             code = upload_srt_movie(
-                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path)
+                cfg, movie_id, lang, srt_bytes, filename=os.path.basename(srt_path),
+                media_path=media_path,
             )
         else:
             code = upload_srt(
@@ -3932,6 +4085,7 @@ def process_ladder(
                 lang,
                 srt_bytes,
                 filename=os.path.basename(srt_path),
+                media_path=media_path,
             )
         if code != 204:
             raise RuntimeError(f"upload HTTP {code} (expected 204)")
