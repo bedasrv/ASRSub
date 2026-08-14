@@ -308,6 +308,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .prog-txt { color: var(--on-surface); }
 .lastpass { font-size: 12px; line-height: 16px; margin-top: 8px; }
 .lastpass.err { color: var(--error); }
+#st-current.live { color: var(--primary); font-weight: 600; }
 
 /* ============ Settings page ============ */
 #ctl-config table { width: 100%; border-collapse: collapse; }
@@ -479,6 +480,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <div class="status-meta">
           <span class="muted">Uptime: <span id="st-uptime">–</span></span>
           <span class="muted">Queue: <span id="st-queue">–</span></span>
+          <span class="muted">Now: <span id="st-current">–</span></span>
         </div>
         <div class="ctl-actions">
           <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
@@ -692,6 +694,22 @@ function renderStatus(data) {
   const queue = data.queue || {};
   document.getElementById("st-uptime").textContent = daemon.uptime_s != null ? fmtDur(daemon.uptime_s) : "–";
   document.getElementById("st-queue").textContent = queue.wanted != null ? queue.wanted : "–";
+
+  const cur = (data.daemon && data.daemon.current) || null;
+  const curEl = document.getElementById("st-current");
+  if (curEl) {
+    if (cur) {
+      const name = cur.kind === "movie"
+        ? (cur.title || cur.series || "movie")
+        : (cur.series || "series") + (cur.tag ? " " + cur.tag : "");
+      const stage = cur.stage === "translate" ? "translating" : cur.stage === "asr" ? "ASR" : cur.stage || "";
+      curEl.textContent = name + " [" + (cur.lang || "") + "]" + (stage ? " · " + stage : "");
+      curEl.classList.add("live");
+    } else {
+      curEl.textContent = "–";
+      curEl.classList.remove("live");
+    }
+  }
 
   const lp = daemon.last_pass || {};
   const stLp = document.getElementById("st-lastpass");
