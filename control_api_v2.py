@@ -184,6 +184,51 @@ def validate_retry_target(cfg, ep_id, lookup=None):
     return True, None
 
 
+def _bazarr_movies_fetch(cfg):
+    """Bazarr movies list (plain fetch, no cache): {"total", "data": [...]}.
+    Same call shape as the ControlAPIv2._bazarr_movies cached method."""
+    url_base = (cfg or {}).get("BAZARR_URL", "").rstrip("/")
+    if not url_base:
+        return {"total": 0, "data": []}
+    code, data = _http(
+        "GET",
+        url_base + "/movies?start=0&length=500",
+        headers={"X-API-KEY": (cfg or {}).get("BAZARR_API_KEY", "")},
+        timeout=10,
+    )
+    if code != 200 or not isinstance(data, dict):
+        return {"total": 0, "data": []}
+    return data
+
+
+def validate_movie_target(cfg, radarr_id, lookup=None):
+    """Validate that a movie retry/delete action can actually be processed.
+
+    Returns (True, None) when the movie exists in Bazarr/Radarr, is monitored
+    and has a video file path; otherwise (False, <reason>). `lookup` overrides
+    the Bazarr movies fetch (test seam); default is _bazarr_movies_fetch."""
+    if lookup is None:
+        def _lookup(cfg, rid):
+            return next(
+                (
+                    m
+                    for m in (_bazarr_movies_fetch(cfg).get("data") or [])
+                    if m.get("radarrId") == rid
+                ),
+                None,
+            )
+
+        lookup = _lookup
+    m = lookup(cfg, radarr_id)
+    if not m:
+        return False, "movie not found in Bazarr/Radarr"
+    if m.get("monitored") is False:
+        return False, "movie unmonitored in Radarr; monitor it first"
+    if not m.get("path"):
+        return False, "movie has no video file; cannot process"
+    return True, None
+
+
 class ApiError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
@@ -642,17 +687,7 @@ class ControlAPIv2:
 
     def _bazarr_movies(self):
         def _fn():
-            cfg = self._env()
-            url_base = cfg.get("BAZARR_URL", "").rstrip("/")
-            if not url_base:
-                return {"total": 0, "data": []}
-            url = url_base + "/movies?start=0&length=500"
-            code, data = _http(
-                "GET", url, headers={"X-API-KEY": cfg.get("BAZARR_API_KEY", "")}, timeout=10
-            )
-            if code != 200 or not isinstance(data, dict):
-                return {"total": 0, "data": []}
-            return data
+            return _bazarr_movies_fetch(self._env())
 
         return self._cached("bazarr.movies", 30, _fn)
 
@@ -1316,7 +1351,9 @@ class ControlAPIv2:
 
         scope=all (query param): additionally enumerate EVERY Sonarr episode
         (full library) so done/archived episodes stay visible; on enumeration
-        failure it falls back to the active-only set."""
+        failure it falls back to the active-only set. scope=inactive: return
+        ONLY idle items (not wanted, not excluded, no languages) — series
+        episodes and movies that have never been touched."""
         scope = "active"
         if isinstance(body, dict):
             scope = str(body.get("scope") or "active")
@@ -1350,7 +1387,7 @@ class ControlAPIv2:
             if isinstance(eid, int)
         }
         all_ep = None
-        if scope == "all":
+        if scope in ("all", "inactive"):
             all_ep = self._sonarr_all_episodes()
             if all_ep:
                 ep_ids = ep_ids | set(all_ep)
@@ -1518,6 +1555,14 @@ class ControlAPIv2:
                     "languages": self._lang_entries(movie_langs, rid, stem_cands, reg_by_stem),
                 }
             )
+        if scope == "inactive":
+            items = [
+                it
+                for it in items
+                if not it.get("wanted")
+                and not it.get("excluded")
+                and not (it.get("languages") or [])
+            ]
         items.sort(
             key=lambda it: (
                 1 if it.get("kind") == "movie" else 0,
@@ -1533,10 +1578,13 @@ class ControlAPIv2:
         return 200, out
 
     def _append_action(self, kind, ep_id, body, movie=False):
-        if movie:
+        if movie and kind == "skip":
             return 409, {"ok": False, "error": "action not available for movies"}
         if kind in ("retry", "delete"):
-            ok, err = validate_retry_target(self._env(), ep_id)
+            if movie:
+                ok, err = validate_movie_target(self._env(), ep_id)
+            else:
+                ok, err = validate_retry_target(self._env(), ep_id)
             if not ok:
                 return 409, {"ok": False, "error": err}
         lang = None
@@ -1550,6 +1598,8 @@ class ControlAPIv2:
             "source": "dashboard",
             "note": "",
         }
+        if movie:
+            rec["kind"] = "movie"
         path = self.opts["ACTIONS_FILE"]
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)

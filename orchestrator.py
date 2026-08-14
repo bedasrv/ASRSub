@@ -3288,6 +3288,43 @@ def _delete_episode_subtitles(cfg, ep_id, langs=None):
     return deleted
 
 
+def _delete_movie_subtitles(cfg, movie_id, langs=None):
+    """Remove {video stem}.{lang}.srt files (NAS path) plus TMP_DIR copies
+    the pipeline wrote for the movie. The path is resolved from Bazarr/Radarr
+    (movies are not in Sonarr). langs=None deletes all TARGET_LANGS;
+    otherwise only the listed languages. Never raises."""
+    deleted = []
+    langs = langs or list(cfg.get("TARGET_LANGS", []))
+    try:
+        movies = get_movies(cfg)
+        m = next(
+            (x for x in (movies.get("data") or []) if x.get("radarrId") == movie_id),
+            None,
+        )
+        p = map_path(m.get("path") or "") if m and m.get("path") else ""
+        if p and os.path.isfile(p):
+            stem = os.path.splitext(p)[0]
+            for lang in langs:
+                cand = f"{stem}.{lang}.srt"
+                if os.path.isfile(cand):
+                    try:
+                        os.remove(cand)
+                        deleted.append(cand)
+                    except OSError:
+                        pass
+    except Exception as exc:
+        log(f"action: delete: locating movie {movie_id} failed: {exc}")
+    for lang in langs:
+        cand = os.path.join(cfg.get("TMP_DIR", "/tmp"), f"{movie_id}_{lang}.srt")
+        if os.path.isfile(cand):
+            try:
+                os.remove(cand)
+                deleted.append(cand)
+            except OSError:
+                pass
+    return deleted
+
+
 def consume_actions(cfg):
     """Process pending actions.jsonl records once per pass; consumed records
     removed in place (tail-preserving: records appended mid-pass survive).
@@ -3317,17 +3354,22 @@ def consume_actions(cfg):
     skip_ids, retry_ids, delete_ids = set(), set(), set()
     retry_langs = {}
     delete_langs = {}
+    retry_kinds = {}
+    delete_kinds = {}
     for rec in records:
         eid = rec.get("episode_id")
         if not isinstance(eid, int):
             continue
+        kind = rec.get("kind") or "series"
         action = rec.get("type") or rec.get("action") or ""
         if action == "skip":
             skip_ids.add(eid)
         elif action in ("retry", "delete"):
             ids = retry_ids if action == "retry" else delete_ids
             langs = retry_langs if action == "retry" else delete_langs
+            kinds = retry_kinds if action == "retry" else delete_kinds
             ids.add(eid)
+            kinds.setdefault(eid, set()).add(kind)
             lang = rec.get("language")
             entry = langs.setdefault(eid, set())
             if isinstance(lang, str) and lang:
@@ -3341,13 +3383,16 @@ def consume_actions(cfg):
         for e in states:
             eid = e.get("sonarrEpisodeId")
             lang = e.get("language")
+            e_kind = e.get("kind") or "series"
             drop = False
             if isinstance(eid, int) and eid in retry_ids:
-                langs = retry_langs.get(eid)
-                drop = not langs or (None in langs) or (lang in langs)
+                if e_kind in (retry_kinds.get(eid) or {"series"}):
+                    langs = retry_langs.get(eid)
+                    drop = not langs or (None in langs) or (lang in langs)
             elif isinstance(eid, int) and eid in delete_ids:
-                langs = delete_langs.get(eid)
-                drop = not langs or (None in langs) or (lang in langs)
+                if e_kind in (delete_kinds.get(eid) or {"series"}):
+                    langs = delete_langs.get(eid)
+                    drop = not langs or (None in langs) or (lang in langs)
             if drop:
                 changed = True
             else:
@@ -3355,29 +3400,51 @@ def consume_actions(cfg):
         if changed:
             rewrite_jsonl(STATE_FILE, kept)
     for eid in sorted(delete_ids):
+        kinds = delete_kinds.get(eid) or {"series"}
         langs = delete_langs.get(eid)
         all_langs = not langs or None in langs
-        deleted = _delete_episode_subtitles(
-            cfg, eid, langs=None if all_langs else sorted(langs)
-        )
-        log(f"action: delete episode {eid} (removed {len(deleted)} SRTs, state cleared)")
-        media_path, title = "", None
-        try:
-            info = get_episode(cfg, eid)
-            ef = info.get("episodeFile") or {}
-            media_path = map_path(ef.get("path", "")) if ef.get("path") else ""
-            title = info.get("title") or info.get("Name")
-        except Exception:
-            pass
-        if media_path:
-            jellyfin_refresh(cfg, media_path, title)
+        lang_list = None if all_langs else sorted(langs)
+        if "series" in kinds:
+            deleted = _delete_episode_subtitles(cfg, eid, langs=lang_list)
+            log(f"action: delete episode {eid} (removed {len(deleted)} SRTs, state cleared)")
+        if "movie" in kinds:
+            deleted = _delete_movie_subtitles(cfg, eid, langs=lang_list)
+            log(f"action: delete movie {eid} (removed {len(deleted)} SRTs, state cleared)")
+        if "series" in kinds:
+            media_path, title = "", None
+            try:
+                info = get_episode(cfg, eid)
+                ef = info.get("episodeFile") or {}
+                media_path = map_path(ef.get("path", "")) if ef.get("path") else ""
+                title = info.get("title") or info.get("Name")
+            except Exception:
+                pass
+            if media_path:
+                jellyfin_refresh(cfg, media_path, title)
+        if "movie" in kinds:
+            try:
+                movies = get_movies(cfg)
+                m = next(
+                    (x for x in (movies.get("data") or []) if x.get("radarrId") == eid),
+                    None,
+                )
+                if m and m.get("path"):
+                    jellyfin_refresh(
+                        cfg, map_path(m["path"]), m.get("title"), item_type="Movie"
+                    )
+            except Exception:
+                pass
     for eid in sorted(retry_ids):
+        kinds = retry_kinds.get(eid) or {"series"}
         langs = retry_langs.get(eid)
         all_langs = not langs or None in langs
-        deleted = _delete_episode_subtitles(
-            cfg, eid, langs=None if all_langs else sorted(langs)
-        )
-        log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
+        lang_list = None if all_langs else sorted(langs)
+        if "series" in kinds:
+            deleted = _delete_episode_subtitles(cfg, eid, langs=lang_list)
+            log(f"action: retry episode {eid} (state cleared, {len(deleted)} SRTs removed)")
+        if "movie" in kinds:
+            deleted = _delete_movie_subtitles(cfg, eid, langs=lang_list)
+            log(f"action: retry movie {eid} (state cleared, {len(deleted)} SRTs removed)")
     for eid in sorted(skip_ids):
         log(f"action: skip episode {eid} (excluded this pass)")
     return skip_ids
