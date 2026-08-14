@@ -275,6 +275,9 @@ def load_config():
             except Exception:
                 sdh = None
     cfg["SDH_PLACEHOLDERS"] = list(sdh) if isinstance(sdh, list) else list(DEFAULT_SDH_PLACEHOLDERS)
+    cfg["WEBHOOK_URLS"] = cfg.get("WEBHOOK_URLS") or ""
+    cfg["WEBHOOK_SECRET"] = cfg.get("WEBHOOK_SECRET") or ""
+    cfg["WEBHOOK_EVENTS"] = cfg.get("WEBHOOK_EVENTS") or ""
     return cfg
 
 
@@ -3568,46 +3571,149 @@ def upload_srt_movie(cfg, movie_id, lang, srt_bytes, filename="sub.srt"):
     return last_code
 
 
-def notify_hermes(cfg, ep_id, lang, series, tag, exc):
-    global _GLOBAL_HELP_LAST
+_WEBHOOK_COOLDOWN = {}
+_WEBHOOK_LOCK = threading.Lock()
+_WEBHOOK_EVENT_COOLDOWN = {
+    "pipeline_error": 1800,  # per ep_key; plus 600s global
+    "subtitle_done": 60,     # per ep_key
+    "pass_completed": 300,   # global
+}
+
+
+def _webhook_urls(cfg):
+    """Configured outbound webhook URLs. WEBHOOK_URLS (comma list) wins;
+    the legacy HERMES_WEBHOOK_URL is used when unset."""
+    urls = [
+        u.strip()
+        for u in str(cfg.get("WEBHOOK_URLS") or "").split(",")
+        if u.strip()
+    ]
+    if not urls:
+        legacy = (cfg.get("HERMES_WEBHOOK_URL") or "").strip()
+        if legacy:
+            urls = [legacy]
+    return urls
+
+
+def _webhook_secret(cfg):
+    return cfg.get("WEBHOOK_SECRET") or cfg.get("HERMES_WEBHOOK_SECRET") or ""
+
+
+def _webhook_events(cfg):
+    """Enabled event types; empty/unset = all."""
+    raw = cfg.get("WEBHOOK_EVENTS")
+    if raw is None or not str(raw).strip():
+        return {"subtitle_done", "pipeline_error", "pass_completed"}
+    return {e.strip() for e in str(raw).split(",") if e.strip()}
+
+
+def notify_webhook(cfg, event_type, payload, ep_key=None):
+    """Fire-and-forget HMAC-signed webhook POST to every configured URL.
+
+    Signature (unchanged from notify_hermes):
+      X-Webhook-Signature-V2 = hmac_sha256_hex(secret, "<ts>.<body>")
+      X-Webhook-Timestamp = str(int(time.time()))
+    Retries twice on network error / 5xx with 2s/5s backoff. Per-event
+    cooldowns: pipeline_error 1800s per ep_key + 600s global; subtitle_done
+    60s per ep_key; pass_completed 300s global. Never raises, never blocks
+    (daemon thread)."""
     try:
-        url = cfg.get("HERMES_WEBHOOK_URL", "")
-        secret = cfg.get("HERMES_WEBHOOK_SECRET", "")
-        if not url or not secret:
+        urls = _webhook_urls(cfg)
+        secret = _webhook_secret(cfg)
+        if not urls or not secret:
             return
-        now = time.time()
-        last = _HELP_COOLDOWN.get((ep_id, lang), 0)
+        if event_type not in _webhook_events(cfg):
+            return
+    except Exception:
+        return
+
+    global _GLOBAL_HELP_LAST
+    now = time.time()
+    if event_type == "pipeline_error":
+        with _WEBHOOK_LOCK:
+            last = _HELP_COOLDOWN.get(ep_key, 0.0)
         if now - last < 1800:
             return
-        if now - _GLOBAL_HELP_LAST < 600:
-            log("help: throttled (global)")
+        with _WEBHOOK_LOCK:
+            if now - _GLOBAL_HELP_LAST < 600:
+                log("webhook: pipeline_error throttled (global)")
+                return
+    elif event_type == "subtitle_done":
+        with _WEBHOOK_LOCK:
+            last = _WEBHOOK_COOLDOWN.get(("subtitle_done",) + tuple(ep_key or ()), 0.0)
+        if now - last < 60:
             return
-        payload = {
+    elif event_type == "pass_completed":
+        with _WEBHOOK_LOCK:
+            last = _WEBHOOK_COOLDOWN.get(("pass_completed",), 0.0)
+        if now - last < 300:
+            return
+
+    def _run():
+        global _GLOBAL_HELP_LAST
+        for url in urls:
+            try:
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                ts = str(int(time.time()))
+                sig = hmac.new(
+                    secret.encode(), ts.encode() + b"." + body, hashlib.sha256
+                ).hexdigest()
+                headers = {
+                    "X-Webhook-Signature-V2": sig,
+                    "X-Webhook-Timestamp": ts,
+                    "Content-Type": "application/json",
+                }
+                code = None
+                for attempt in range(3):
+                    try:
+                        r = requests.post(url, data=body, headers=headers, timeout=10)
+                        code = r.status_code
+                        if code < 500:
+                            break
+                    except requests.RequestException:
+                        code = None
+                    if attempt < 2:
+                        time.sleep(2 if attempt == 0 else 5)
+                if code is None:
+                    log(f"webhook: {event_type} -> {url} failed: network error")
+                elif code in (200, 202, 204):
+                    log(f"webhook: {event_type} -> {url} HTTP {code}")
+                    if event_type == "pipeline_error":
+                        with _WEBHOOK_LOCK:
+                            if ep_key:
+                                _HELP_COOLDOWN[ep_key] = time.time()
+                            _GLOBAL_HELP_LAST = time.time()
+                    elif event_type == "subtitle_done" and ep_key:
+                        with _WEBHOOK_LOCK:
+                            _WEBHOOK_COOLDOWN[
+                                ("subtitle_done",) + tuple(ep_key)
+                            ] = time.time()
+                    elif event_type == "pass_completed":
+                        with _WEBHOOK_LOCK:
+                            _WEBHOOK_COOLDOWN[("pass_completed",)] = time.time()
+                else:
+                    log(f"webhook: {event_type} -> {url} failed: HTTP {code}")
+            except Exception as exc:
+                log(f"webhook: {event_type} -> {url} failed: {exc}")
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def notify_hermes(cfg, ep_id, lang, series, tag, exc):
+    """Legacy Hermes error notifier — thin wrapper over the generalized
+    notify_webhook (pipeline_error event, same payload shape + cooldowns)."""
+    notify_webhook(
+        cfg,
+        "pipeline_error",
+        {
             "event_type": "pipeline_error",
             "episode": f"{tag} {series}",
             "lang": lang,
             "error": str(exc)[:500],
             "log_tail": list(_LOG_RING),
-        }
-        body = json.dumps(payload).encode()
-        ts = str(int(time.time()))
-        sig = hmac.new(
-            secret.encode(), ts.encode() + b"." + body, hashlib.sha256
-        ).hexdigest()
-        headers = {
-            "X-Webhook-Signature-V2": sig,
-            "X-Webhook-Timestamp": ts,
-            "Content-Type": "application/json",
-        }
-        r = requests.post(url, data=body, headers=headers, timeout=10)
-        if r.status_code in (200, 202):
-            _HELP_COOLDOWN[(ep_id, lang)] = time.time()
-            _GLOBAL_HELP_LAST = time.time()
-            log(f"help: {tag} {series} [{lang}] notified Hermes")
-        else:
-            log(f"help: notify failed: HTTP {r.status_code}")
-    except Exception as e:
-        log(f"help: notify failed: {e}")
+        },
+        ep_key=(ep_id, lang),
+    )
 
 
 def process_after_asr(
@@ -3710,6 +3816,19 @@ def process_after_asr(
             st_entry["kind"] = "movie"
         append_state(st_entry)
         log(f"done: {tag} {series} [{src}->{lang}] in {elapsed}s (upload 204)")
+        notify_webhook(
+            cfg,
+            "subtitle_done",
+            {
+                "event_type": "subtitle_done",
+                "episode": f"{tag} {series}",
+                "lang": lang,
+                "source": "asr",
+                "duration_s": int(elapsed),
+                "status_code": code,
+            },
+            ep_key=(ep_id, lang),
+        )
         return "done"
     except Exception as exc:
         st_entry = {
@@ -3865,6 +3984,19 @@ def process_ladder(
             item_type="Movie" if movie_id is not None else "Episode",
         )
         log(f"done: {tag} {series} [{kind}->{lang}] in {elapsed}s (upload 204, ladder)")
+        notify_webhook(
+            cfg,
+            "subtitle_done",
+            {
+                "event_type": "subtitle_done",
+                "episode": f"{tag} {series}",
+                "lang": lang,
+                "source": kind,
+                "duration_s": int(elapsed),
+                "status_code": code,
+            },
+            ep_key=(ep_id, lang),
+        )
         return "done"
     except Exception as exc:
         st_entry = {
@@ -4581,6 +4713,19 @@ def run_pass():
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
         f"wanted_before={wanted_before} wanted_after={wanted_after} "
         f"movies_remaining={movies_remaining}"
+    )
+    notify_webhook(
+        cfg,
+        "pass_completed",
+        {
+            "event_type": "pass_completed",
+            "processed": processed,
+            "done": done,
+            "failed": failed,
+            "skipped": skipped,
+            "wanted_before": wanted_before,
+            "wanted_after": wanted_after,
+        },
     )
     return {
         "processed": processed,
