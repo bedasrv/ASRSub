@@ -1080,6 +1080,12 @@ class ControlAPIv2:
             in ("1", "true", "yes"),
             "emo_model": env.get("EMO_MODEL") or "emotion2vec/emotion2vec_plus_large",
         }
+        _pa = self._read_pending_actions()
+        pending_actions = {"total": len(_pa), "retry": 0, "delete": 0, "skip": 0}
+        for rec in _pa:
+            t = rec.get("type") or rec.get("action") or ""
+            if t in pending_actions:
+                pending_actions[t] += 1
         return 200, {
             "updated_at": _now_iso(),
             "daemon": daemon,
@@ -1096,6 +1102,7 @@ class ControlAPIv2:
             "llama": llama,
             "registry": self._registry_block(),
             "episodes": episodes,
+            "pending_actions": pending_actions,
         }
 
     def _registry_block(self):
@@ -1563,6 +1570,19 @@ class ControlAPIv2:
                 and not it.get("excluded")
                 and not (it.get("languages") or [])
             ]
+        pending_map = {}
+        for rec in self._read_pending_actions():
+            t = rec.get("type") or rec.get("action") or ""
+            if t not in ("retry", "delete", "skip"):
+                continue
+            key = ("m:" if rec.get("kind") == "movie" else "e:") + str(
+                rec.get("episode_id")
+            )
+            # prefer retry/delete over skip if both somehow queued for the item
+            if key not in pending_map or (pending_map[key] == "skip" and t != "skip"):
+                pending_map[key] = t
+        for it in items:
+            it["pending_action"] = pending_map.get(it.get("item_key"))
         items.sort(
             key=lambda it: (
                 1 if it.get("kind") == "movie" else 0,
@@ -1654,6 +1674,26 @@ class ControlAPIv2:
                     except Exception:
                         continue
                     if isinstance(e, dict) and e.get("episode_id") is not None:
+                        recs.append(e)
+        except OSError:
+            pass
+        return recs
+
+    def _read_pending_actions(self):
+        """Pending (unconsumed) actions.jsonl records. Read-only, no flock
+        needed for display purposes; malformed lines skipped. Never raises."""
+        recs = []
+        try:
+            with open(self.opts["ACTIONS_FILE"], encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(e, dict) and isinstance(e.get("episode_id"), int):
                         recs.append(e)
         except OSError:
             pass
