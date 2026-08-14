@@ -565,15 +565,18 @@ def test_jellyfin_refresh():
         cfg2 = dict(cfg, JELLYFIN_API_KEY="k123")
         o.jellyfin_refresh(cfg2, "/mnt/nas/share/media/jellyfin/sonarr-tv-shows/X/Ep.mkv", "Ep Title")
         deadline = time.time() + 5
-        while len(calls) < 2 and time.time() < deadline:
+        while len(calls) < 4 and time.time() < deadline:
             time.sleep(0.05)
-        assert len(calls) == 2, calls
-        m1 = calls[0]
-        assert m1[0] == "GET" and m1[1].endswith("/Items"), m1
-        assert m1[2]["SearchTerm"] == "Ep Title" and m1[2]["IncludeItemTypes"] == "Episode"
-        m2 = calls[1]
-        assert m2[0] == "POST" and m2[1].endswith("/Items/abc123/Refresh"), m2
-        assert m2[2]["MetadataRefreshMode"] == "FullRefresh", m2
+        assert len(calls) >= 4, calls
+        # path-based lookup: series SearchTerm, then /Shows/{id}/Episodes, then
+        # item refresh + throttled /Library/Refresh scan.
+        gets = [c for c in calls if c[0] == "GET"]
+        assert any(c[1].endswith("/Items") and c[2].get("IncludeItemTypes") == "Series" for c in gets), calls
+        assert any(c[1].endswith("/Shows/abc123/Episodes") for c in gets), calls
+        posts = [c for c in calls if c[0] == "POST"]
+        refresh = [c for c in posts if c[1].endswith("/Items/abc123/Refresh")]
+        assert refresh and refresh[0][2]["MetadataRefreshMode"] == "FullRefresh", calls
+        assert any(c[1].endswith("/Library/Refresh") for c in posts), calls
     finally:
         o.requests = saved_requests
     print("PASS jellyfin_refresh (noop without key; item match + refresh POST)")
@@ -2656,10 +2659,10 @@ def test_assess_source_file_cleans_ass_styling():
 
 
 def test_jellyfin_refresh_fallback_terms():
-    """When the title SearchTerm misses (Jellyfin Name punctuation differs
-    from the Sonarr title), the refresh falls back to the title prefix
-    before the separator and then the filename stem; the path match still
-    gates the refresh POST."""
+    """When the path-based lookup fails (series dir SearchTerm misses), the
+    refresh falls back to the title SearchTerm loop (title, then prefix
+    before the separator); the path match still gates the refresh POST, and
+    the throttled /Library/Refresh scan fires."""
     class FakeResp:
         def __init__(self, obj, status=200):
             self._obj, self.status_code = obj, status
@@ -2676,7 +2679,9 @@ def test_jellyfin_refresh_fallback_terms():
     class FakeRequests:
         @staticmethod
         def get(url, params=None, headers=None, timeout=None):
-            calls.append(("GET", dict(params or {})))
+            calls.append(("GET", url, dict(params or {})))
+            if (params or {}).get("IncludeItemTypes") == "Series":
+                return FakeResp({"Items": []})  # path-based lookup fails
             if (params or {}).get("SearchTerm") == "Ep Title: Subtitle":
                 return FakeResp({"Items": []})
             return FakeResp({"Items": [
@@ -2686,12 +2691,13 @@ def test_jellyfin_refresh_fallback_terms():
 
         @staticmethod
         def post(url, json=None, headers=None, timeout=None):
-            calls.append(("POST", url))
+            calls.append(("POST", url, dict(json or {})))
             return FakeResp(None, 204)
 
     saved_requests = o.requests
     o.requests = FakeRequests
     try:
+        o._jf_last_scan = 0.0  # ensure the throttled library scan fires
         cfg = {"JELLYFIN_API_KEY": "k123", "JELLYFIN_URL": "http://jf:8096"}
         o.jellyfin_refresh(
             cfg,
@@ -2699,12 +2705,24 @@ def test_jellyfin_refresh_fallback_terms():
             "Ep Title: Subtitle",
         )
         deadline = time.time() + 5
-        while len(calls) < 3 and time.time() < deadline:
+        while not (
+            any(
+                c[0] == "POST" and c[1].endswith("/Items/abc123/Refresh") for c in calls
+            )
+            and any(
+                c[0] == "POST" and c[1].endswith("/Library/Refresh") for c in calls
+            )
+        ) and time.time() < deadline:
             time.sleep(0.05)
-        assert len(calls) == 3, calls
-        terms = [c[1]["SearchTerm"] for c in calls if c[0] == "GET"]
+        terms = [
+            c[2].get("SearchTerm")
+            for c in calls
+            if c[0] == "GET" and c[2].get("IncludeItemTypes") == "Episode"
+        ]
         assert terms == ["Ep Title: Subtitle", "Ep Title"], terms
-        assert calls[-1][0] == "POST" and calls[-1][1].endswith("/Items/abc123/Refresh")
+        posts = [c for c in calls if c[0] == "POST"]
+        assert any(c[1].endswith("/Items/abc123/Refresh") for c in posts), calls
+        assert any(c[1].endswith("/Library/Refresh") for c in posts), calls
     finally:
         o.requests = saved_requests
     print("PASS jellyfin_refresh_fallback_terms")
@@ -3743,8 +3761,10 @@ def test_jellyfin_refresh_movie_item_type():
 
 
 def test_order_pass_candidates_priority_and_slice():
-    """Priority helper: series wanted -> movie candidates -> series regen,
-    capped at max_eps; movies_remaining is the FULL pre-cap movie count."""
+    """Pass-queue helper (new FCFS-by-mtime semantics): candidates without a
+    resolvable video file sort by episode_id tiebreak and are capped at
+    max_eps across the merged queue; movies_remaining is the FULL pre-cap
+    movie count."""
     wanted = [{"sonarrEpisodeId": 1}, {"sonarrEpisodeId": 2}]
     movies = [
         {"sonarrEpisodeId": 10, "movie": True},
@@ -3754,25 +3774,25 @@ def test_order_pass_candidates_priority_and_slice():
         {"sonarrEpisodeId": 20, "regen": True},
         {"sonarrEpisodeId": 21, "regen": True},
     ]
-    ordered, remaining = o._order_pass_candidates(wanted, movies, regen, 8)
+    ordered, remaining = o._order_pass_candidates({}, wanted, movies, regen, 8)
     assert [c["sonarrEpisodeId"] for c in ordered] == [1, 2, 10, 11, 20, 21], ordered
     assert remaining == 2
-    ordered2, rem2 = o._order_pass_candidates(wanted, movies, regen, 4)
+    ordered2, rem2 = o._order_pass_candidates({}, wanted, movies, regen, 4)
     assert [c["sonarrEpisodeId"] for c in ordered2] == [1, 2, 10, 11], ordered2
     assert rem2 == 2, "movies_remaining must be the full pre-slice list"
-    ordered3, rem3 = o._order_pass_candidates(wanted, movies, regen, 1)
+    ordered3, rem3 = o._order_pass_candidates({}, wanted, movies, regen, 1)
     assert [c["sonarrEpisodeId"] for c in ordered3] == [1], ordered3
     assert rem3 == 2
-    ordered4, rem4 = o._order_pass_candidates([], [], [], 8)
+    ordered4, rem4 = o._order_pass_candidates({}, [], [], [], 8)
     assert ordered4 == [] and rem4 == 0
     print("PASS order_pass_candidates_priority_and_slice")
 
 
 def test_pass_priority_wanted_movies_regen():
-    """run_pass candidate order: series wanted -> movies -> regen. With a
-    full cap every class is processed in that order; shrinking the cap
-    starves regen first, then movies, never series wanted. The wanted-total
-    log reports movies remaining from the FULL pre-cap candidate list."""
+    """run_pass candidate order is now FCFS by video-file mtime across the
+    merged wanted/movie/regen queue (no class priority). Explicit mtimes
+    drive the order; shrinking the cap slices the mtime-sorted queue; the
+    wanted-total log reports movies remaining from the FULL pre-cap list."""
     import tempfile
 
     d = tempfile.mkdtemp()
@@ -3795,6 +3815,19 @@ def test_pass_priority_wanted_movies_regen():
         {"sonarrEpisodeId": 3, "language": "id", "status": "done", "seriesTitle": "Show"},
         {"sonarrEpisodeId": 4, "language": "id", "status": "done", "seriesTitle": "Show"},
     ]
+    # explicit, distinct mtimes (Ep1 < Alpha < Ep3 < Ep2 < Beta < Ep4) so the
+    # merged queue is deterministic and class-agnostic.
+    base = time.time() - 10000
+    for p, off in (
+        (os.path.join(d, "Ep1.mkv"), 0),
+        (m1, 100),
+        (os.path.join(d, "Ep3.mkv"), 200),
+        (os.path.join(d, "Ep2.mkv"), 300),
+        (m2, 400),
+        (os.path.join(d, "Ep4.mkv"), 500),
+    ):
+        os.utime(p, (base + off, base + off))
+
     stats, mocks = _run_pass_movie(
         d,
         movies,
@@ -3819,10 +3852,12 @@ def test_pass_priority_wanted_movies_regen():
     i_m2 = idx("movies: process Beta [id]")
     i_r1 = idx("regen: process S01E03 Show [id]")
     i_r2 = idx("regen: process S01E04 Show [id]")
-    assert i_w1 < i_w2 < i_m1 < i_m2 < i_r1 < i_r2, mocks["log"]
+    # FCFS by mtime across classes: Ep1, Alpha, Ep3, Ep2, Beta, Ep4
+    assert i_w1 < i_m1 < i_r1 < i_w2 < i_m2 < i_r2, mocks["log"]
     assert any(
         "wanted total=" in l and "movies remaining=2" in l for l in mocks["log"]
     ), mocks["log"]
+    assert any("pass queue: upgraded=0 of 6" in l for l in mocks["log"]), mocks["log"]
 
     stats2, mocks2 = _run_pass_movie(
         d,
@@ -3836,9 +3871,10 @@ def test_pass_priority_wanted_movies_regen():
         target_langs=["id"],
     )
     assert stats2["processed"] == 4 and stats2["done"] == 4, stats2
-    assert not any("regen: process" in l for l in mocks2["log"]), mocks2["log"]
+    # top-4 by mtime: Ep1, Alpha, Ep3, Ep2
     assert any("movies: process Alpha [id]" in l for l in mocks2["log"])
-    assert any("movies: process Beta [id]" in l for l in mocks2["log"])
+    assert not any("movies: process Beta [id]" in l for l in mocks2["log"])
+    assert not any("regen: process S01E04 Show [id]" in l for l in mocks2["log"])
     assert any(
         "wanted total=" in l and "movies remaining=2" in l for l in mocks2["log"]
     ), mocks2["log"]
@@ -3855,7 +3891,9 @@ def test_pass_priority_wanted_movies_regen():
         target_langs=["id"],
     )
     assert stats3["processed"] == 2 and stats3["done"] == 2, stats3
-    assert not any("movies: process" in l for l in mocks3["log"]), mocks3["log"]
+    # top-2 by mtime: Ep1, Alpha
+    assert any("movies: process Alpha [id]" in l for l in mocks3["log"])
+    assert not any("proc: S01E02 Show [jpn->id]" in l for l in mocks3["log"])
     assert not any("regen: process" in l for l in mocks3["log"]), mocks3["log"]
     assert any(
         "wanted total=" in l and "movies remaining=2" in l for l in mocks3["log"]
@@ -4148,6 +4186,93 @@ def test_library_kind_no_cross_feed():
     assert movie_item["series"] == "Avatar", movie_item
     assert movie_item["languages"][0]["status"] == "error", movie_item
     print("PASS library_kind_no_cross_feed")
+
+
+def test_pass_queue_fcfs_mtime_and_upgrade_priority():
+    """_order_pass_candidates: upgraded items jump ahead (oldest upgrade
+    first), else FCFS by video mtime; stat failures sort last without
+    raising; max_eps cap applies across the merged queue; movies_remaining
+    stays the full pre-cap movie count."""
+    now = time.time()
+    paths = {
+        1: {"path": "/mnt/x/a.mkv", "dateAdded": now - 5000},   # upgraded (dateAdded)
+        2: {"path": "/mnt/x/b.mkv", "dateAdded": None},          # upgraded (mtime fallback)
+        3: {"path": "/mnt/x/c.mkv", "dateAdded": None},          # not upgraded
+        4: {"path": "/mnt/x/d.mkv", "dateAdded": None},          # not upgraded
+        5: {"path": "/mnt/x/e.mkv", "dateAdded": None},          # stat fail
+    }
+    mtimes = {
+        "/mnt/x/a.mkv": now - 4000,
+        "/mnt/x/b.mkv": now - 9000,
+        "/mnt/x/c.mkv": now - 8000,
+        "/mnt/x/d.mkv": now - 1000,
+        # e.mkv absent -> OSError -> sentinel
+    }
+
+    def fake_get(cfg, ep_id):
+        p = paths[ep_id]
+        return {"episodeFile": {"path": p["path"], "dateAdded": p["dateAdded"]}}
+
+    def fake_mtime(p):
+        if p not in mtimes:
+            raise OSError("missing")
+        return mtimes[p]
+
+    saved = (o.get_episode, o.os.path.getmtime, o.load_state, o.load_registry)
+    try:
+        o.get_episode = fake_get
+        o.os.path.getmtime = fake_mtime
+        o.load_state = lambda: []
+        # prior rows only for ep 1 and 2 (old; drives upgrade detection)
+        o.load_registry = lambda: {
+            ("/mnt/x/a", "id"): {
+                "episode_id": 1, "lang": "id",
+                "updated_ts": "2026-08-10T00:00:00Z",
+            },
+            ("/mnt/x/b", "id"): {
+                "episode_id": 2, "lang": "id",
+                "updated_ts": "2026-08-10T00:00:00Z",
+            },
+        }
+
+        def mk(ep_id, movie=False, missing=None):
+            c = {
+                "sonarrEpisodeId": ep_id,
+                "missing_subtitles": missing or [{"code2": "id"}],
+            }
+            if movie:
+                c.update({
+                    "movie": True, "radarrId": ep_id, "movieTitle": "M%d" % ep_id,
+                    "path": paths[ep_id]["path"], "dateAdded": paths[ep_id]["dateAdded"],
+                })
+            return c
+
+        wanted = [mk(3), mk(4)]
+        movies = [mk(5, movie=True)]
+        regen = [mk(1), mk(2)]
+
+        ordered, rem = o._order_pass_candidates({}, wanted, movies, regen, 10)
+        ids = [it["sonarrEpisodeId"] for it in ordered]
+        # (b) upgraded first, oldest upgrade mtime first: ep2 (now-9000) then ep1 (now-4000)
+        assert ids[0] == 2 and ids[1] == 1, ids
+        # (e) no-prior-row items FCFS by mtime: ep3 (now-8000) before ep4 (now-1000)
+        assert ids[2] == 3 and ids[3] == 4, ids
+        # (c) stat-failure sorts last, no raise
+        assert ids[-1] == 5, ids
+        # (f) movies_remaining = full movie count pre-cap
+        assert rem == 1, rem
+
+        # (a) upgraded beats a newer-mtime non-upgraded item
+        ordered_a, _ = o._order_pass_candidates({}, wanted, [], [mk(1)], 10)
+        ids_a = [it["sonarrEpisodeId"] for it in ordered_a]
+        assert ids_a[0] == 1, ids_a  # ep1 upgraded ahead of ep3/ep4 (newer mtime)
+
+        # (d) cap applies across the merged queue
+        ordered2, _ = o._order_pass_candidates({}, wanted, movies, regen, 2)
+        assert len(ordered2) == 2, len(ordered2)
+        assert [it["sonarrEpisodeId"] for it in ordered2] == [2, 1]
+    finally:
+        o.get_episode, o.os.path.getmtime, o.load_state, o.load_registry = saved
 
 
 if __name__ == "__main__":

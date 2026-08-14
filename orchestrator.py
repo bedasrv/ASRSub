@@ -912,6 +912,7 @@ def _movie_sweep(cfg, target_langs):
                     "sonarrEpisodeId": rid,
                     "movieTitle": title,
                     "path": path,
+                    "dateAdded": (m.get("movieFile") or {}).get("dateAdded"),
                     "missing_subtitles": missing,
                     "movie": True,
                 }
@@ -4153,17 +4154,115 @@ def halt_on_error(cfg, stage, ep_desc, exc, extra=None):
     )
 
 
-def _order_pass_candidates(wanted_items, movie_items, regen_items, max_eps):
-    """Pass priority ordering: series wanted first, then movie candidates,
-    then series regen items; the combined list is capped at max_eps. Movies
-    rank above regen so a heavy regen backlog cannot starve the movie track.
+_MTIME_SENTINEL = float("inf")
+
+
+def _ts_epoch(ts):
+    """ISO timestamp (Z or offset) -> epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
+def _order_pass_candidates(cfg, wanted_items, movie_items, regen_items, max_eps):
+    """Single merged pass queue, oldest video-file mtime first, with upgraded
+    episodes (video file replaced after we generated their subtitles) jumping
+    to the front — oldest upgrade first. Replaces the fixed
+    series->movie->regen priority. Stat failures (missing/moved file or
+    unresolvable path) sort LAST and never crash the pass.
+
     Returns (ordered_candidates, movies_remaining) where movies_remaining is
     the FULL movie candidate count (pre-cap), used for the pass log."""
     movies_remaining = len(movie_items)
-    return (
-        (list(wanted_items) + list(movie_items) + list(regen_items))[:max_eps],
-        movies_remaining,
+    merged = list(wanted_items) + list(movie_items) + list(regen_items)
+    # Latest state row per (kind, ep, lang): prior-row fallback for upgrades.
+    state_latest = {}
+    for e in load_state():
+        k = (e.get("kind") or "series", e.get("sonarrEpisodeId"), e.get("language"))
+        cur = state_latest.get(k)
+        if cur is None or (e.get("ts") or "") >= (cur.get("ts") or ""):
+            state_latest[k] = e
+    # Registry rows indexed by (episode_id, lang) for cheap prior lookups.
+    ep_registry = {}
+    for rec in load_registry().values():
+        eid = rec.get("episode_id")
+        if isinstance(eid, int) and rec.get("lang"):
+            ep_registry[(eid, rec["lang"])] = rec
+
+    def _prior_ts(kind, ep_id, lang):
+        rec = ep_registry.get((ep_id, lang))
+        if rec and rec.get("updated_ts"):
+            t = _ts_epoch(rec["updated_ts"])
+            if t is not None:
+                return t
+        st = state_latest.get((kind, ep_id, lang))
+        if st and st.get("ts"):
+            return _ts_epoch(st["ts"])
+        return None
+
+    ranked = []
+    stat_fail = 0
+    upgraded = 0
+    for item in merged:
+        kind = "movie" if item.get("movie") else "series"
+        ep_id = item.get("sonarrEpisodeId")
+        langs = [
+            m.get("code2")
+            for m in item.get("missing_subtitles", [])
+            if isinstance(m, dict) and m.get("code2")
+        ]
+        lang = langs[0] if langs else None
+        path = None
+        date_added = None
+        if item.get("movie"):
+            path = item.get("path") or ""
+            date_added = item.get("dateAdded")
+        elif isinstance(ep_id, int):
+            try:
+                info = get_episode(cfg, ep_id)
+                ef = info.get("episodeFile") or {}
+                path = ef.get("path") or ""
+                date_added = ef.get("dateAdded")
+            except Exception:
+                path = None
+        mtime = None
+        if path:
+            try:
+                mtime = os.path.getmtime(map_path(path))
+            except OSError:
+                mtime = None
+        if mtime is None:
+            stat_fail += 1
+            mtime = _MTIME_SENTINEL
+        prior = (
+            _prior_ts(kind, ep_id, lang) if (isinstance(ep_id, int) and lang) else None
+        )
+        is_upgraded = False
+        if prior is not None:
+            da = _ts_epoch(date_added) if date_added else None
+            if da is not None and da > prior + 120:
+                is_upgraded = True
+            elif mtime != _MTIME_SENTINEL and mtime > prior + 3600:
+                is_upgraded = True
+        if is_upgraded:
+            upgraded += 1
+        ranked.append(
+            (0 if is_upgraded else 1, mtime, ep_id if isinstance(ep_id, int) else 0, item)
+        )
+
+    ranked.sort(key=lambda e: (e[0], e[1], e[2]))
+    ordered = [e[3] for e in ranked][:max_eps]
+    log(
+        f"pass queue: upgraded={upgraded} of {len(merged)} candidates "
+        "(oldest-first by mtime)"
     )
+    if stat_fail:
+        log(
+            f"pass queue: {stat_fail} candidate(s) without resolvable video file "
+            "(sorted last)"
+        )
+    return ordered, movies_remaining
 
 
 def run_pass():
@@ -4264,7 +4363,7 @@ def run_pass():
         )
 
     candidates, movies_remaining = _order_pass_candidates(
-        candidates, movie_cands, regen_items, cfg["MAX_EPS_PER_RUN"]
+        cfg, candidates, movie_cands, regen_items, cfg["MAX_EPS_PER_RUN"]
     )
 
     processed = done = skipped = failed = 0
