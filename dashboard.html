@@ -5,20 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ASRSub</title>
 <style>
-/* ============ Catppuccin design tokens (Latte light / Mocha dark) ============ */
+/* ============ ASRSub design tokens (light / dark) ============ */
 :root {
   color-scheme: light;
-  --primary: #1e66f5; --on-primary: #ffffff; --primary-container: #bbcef5; --on-primary-container: #1e66f5;
-  --secondary: #179299; --on-secondary: #ffffff; --secondary-container: #b9d9de; --on-secondary-container: #0c6a70;
-  --tertiary: #ea76cb; --on-tertiary: #4c4f69; --tertiary-container: #eed2eb; --on-tertiary-container: #8839ef;
-  --error: #d20f39; --on-error: #ffffff; --error-container: #e8b9c6; --on-error-container: #5f0d20;
-  --surface: #eff1f5; --on-surface: #4c4f69;
-  --surface-variant: #bcc0cc; --on-surface-variant: #8c8fa1;
-  --surface-container-low: #e6e9ef; --surface-container: #ccd0da; --surface-container-high: #bcc0cc;
-  --outline: #9ca0b0; --outline-variant: #bcc0cc;
+  --primary: #047857; --on-primary: #ffffff; --primary-container: #D1FAE5; --on-primary-container: #065F46;
+  --secondary: #0B57D0; --on-secondary: #ffffff; --secondary-container: #E8F0FE; --on-secondary-container: #0A3C9E;
+  --tertiary: #7C3AED; --on-tertiary: #ffffff; --tertiary-container: #EDE9FE; --on-tertiary-container: #5B21B6;
+  --error: #B3261E; --on-error: #ffffff; --error-container: #FCE8E6; --on-error-container: #7A1F16;
+  --surface: #FFFFFF; --on-surface: #0F172A;
+  --surface-variant: #F0F4F9; --on-surface-variant: #475569;
+  --surface-container-low: #F8FAFC; --surface-container: #F1F7F4; --surface-container-high: #E8EDF2;
+  --outline: #E2E8F0; --outline-variant: #E2E8F0;
   --divider: var(--outline-variant);
-  --inverse-surface: #4c4f69; --inverse-on-surface: #eff1f5;
-  --ok: #40a02b; --run: #df8e1d;
+  --inverse-surface: #0F172A; --inverse-on-surface: #FFFFFF;
+  --ok: #146C2E; --ok-container: #E8F5E9; --run: #B25900; --run-container: #FFF3E0;
   --r-s: 8px; --r-m: 12px; --r-l: 16px; --r-xl: 28px; --r-full: 999px;
   --sh1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
   --sh2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
@@ -31,30 +31,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --primary: #cba6f7; --on-primary: #1e1e2e; --primary-container: #494060; --on-primary-container: #cdd6f4;
-    --secondary: #94e2d5; --on-secondary: #1e1e2e; --secondary-container: #45475a; --on-secondary-container: #cdd6f4;
-    --tertiary: #f5c2e7; --on-tertiary: #1e1e2e; --tertiary-container: #54475c; --on-tertiary-container: #f5c2e7;
-    --error: #f38ba8; --on-error: #3b0a16; --error-container: #53394d; --on-error-container: #f5e0dc;
-    --surface: #1e1e2e; --on-surface: #cdd6f4;
-    --surface-variant: #45475a; --on-surface-variant: #7f849c;
-    --surface-container-low: #181825; --surface-container: #313244; --surface-container-high: #45475a;
-    --outline: #6c7086; --outline-variant: #45475a;
-    --inverse-surface: #cdd6f4; --inverse-on-surface: #1e1e2e;
-    --ok: #a6e3a1; --run: #f9e2af;
+    --primary: #34D399; --on-primary: #022C22; --primary-container: #064E3B; --on-primary-container: #A7F3D0;
+    --secondary: #A8C7FA; --on-secondary: #0A1F44; --secondary-container: #1E3A5F; --on-secondary-container: #C7DDFF;
+    --tertiary: #C4B5FD; --on-tertiary: #241250; --tertiary-container: #3B2F63; --on-tertiary-container: #DDD6FE;
+    --error: #F2B8B5; --on-error: #3B0A16; --error-container: #4C1D1A; --on-error-container: #FCE8E6;
+    --surface: #0F172A; --on-surface: #F8FAFC;
+    --surface-variant: #1E293B; --on-surface-variant: #94A3B8;
+    --surface-container-low: #131C31; --surface-container: #1E293B; --surface-container-high: #273449;
+    --outline: #334155; --outline-variant: #334155;
+    --inverse-surface: #F8FAFC; --inverse-on-surface: #0F172A;
+    --ok: #81C995; --ok-container: #1E3A2A; --run: #F9AB00; --run-container: #3B2F1D;
   }
 }
 html[data-theme="dark"] {
   color-scheme: dark;
-  --primary: #cba6f7; --on-primary: #1e1e2e; --primary-container: #494060; --on-primary-container: #cdd6f4;
-  --secondary: #94e2d5; --on-secondary: #1e1e2e; --secondary-container: #45475a; --on-secondary-container: #cdd6f4;
-  --tertiary: #f5c2e7; --on-tertiary: #1e1e2e; --tertiary-container: #54475c; --on-tertiary-container: #f5c2e7;
-  --error: #f38ba8; --on-error: #3b0a16; --error-container: #53394d; --on-error-container: #f5e0dc;
-  --surface: #1e1e2e; --on-surface: #cdd6f4;
-  --surface-variant: #45475a; --on-surface-variant: #7f849c;
-  --surface-container-low: #181825; --surface-container: #313244; --surface-container-high: #45475a;
-  --outline: #6c7086; --outline-variant: #45475a;
-  --inverse-surface: #cdd6f4; --inverse-on-surface: #1e1e2e;
-  --ok: #a6e3a1; --run: #f9e2af;
+  --primary: #34D399; --on-primary: #022C22; --primary-container: #064E3B; --on-primary-container: #A7F3D0;
+  --secondary: #A8C7FA; --on-secondary: #0A1F44; --secondary-container: #1E3A5F; --on-secondary-container: #C7DDFF;
+  --tertiary: #C4B5FD; --on-tertiary: #241250; --tertiary-container: #3B2F63; --on-tertiary-container: #DDD6FE;
+  --error: #F2B8B5; --on-error: #3B0A16; --error-container: #4C1D1A; --on-error-container: #FCE8E6;
+  --surface: #0F172A; --on-surface: #F8FAFC;
+  --surface-variant: #1E293B; --on-surface-variant: #94A3B8;
+  --surface-container-low: #131C31; --surface-container: #1E293B; --surface-container-high: #273449;
+  --outline: #334155; --outline-variant: #334155;
+  --inverse-surface: #F8FAFC; --inverse-on-surface: #0F172A;
+  --ok: #81C995; --ok-container: #1E3A2A; --run: #F9AB00; --run-container: #3B2F1D;
 }
 
 * { box-sizing: border-box; }
@@ -159,8 +159,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.excluded, .t-pill.new, .t-pill.neutral, .t-pill.idle { background: var(--surface-variant); color: var(--on-surface-variant); }
 .t-pill.ai, .t-pill.movie { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .t-pill.queued { background: transparent; border: 1px dashed var(--primary); color: var(--primary); }
-.prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
-.prov-external { background: var(--run); color: var(--inverse-on-surface); }
+.prov-embedded { background: var(--ok-container); color: var(--ok); }
+.prov-external { background: var(--run-container); color: var(--run); }
 .prov-asr { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .prov-unknown { background: var(--surface-variant); color: var(--on-surface-variant); }
 .prov-langchip { background: var(--secondary-container); color: var(--on-secondary-container); }
