@@ -59,6 +59,8 @@ exclusions.jsonl schema (runtime file, never committed):
 
 import fcntl
 import glob
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -271,6 +273,7 @@ class ControlAPIv2:
             self._h_resume,
             self._h_run_once,
             self._h_wake,
+            self._h_webhook_test,
         )
         self.endpoints = {
             "/api2/status": self._h_status,
@@ -290,6 +293,7 @@ class ControlAPIv2:
             "/api2/resume": self._h_resume,
             "/api2/run-once": self._h_run_once,
             "/api2/wake": self._h_wake,
+            "/api2/webhook/test": self._h_webhook_test,
         }
 
     # ---------- dispatch ----------
@@ -1813,6 +1817,71 @@ class ControlAPIv2:
 
     def _h_wake(self, body, id=None):
         return self._daemon_action("/wake")
+
+    def _h_webhook_test(self, body, id=None):
+        """Send a test event to configured webhook URLs (or the single URL
+        from the body) and report per-URL HTTP status + latency. Uses the
+        same HMAC scheme as the daemon's outbound webhooks. No retry."""
+        try:
+            import orchestrator as _orch
+
+            cfg = _orch.load_config()
+        except Exception:
+            cfg = {}
+        secret = cfg.get("WEBHOOK_SECRET") or cfg.get("HERMES_WEBHOOK_SECRET") or ""
+        urls = []
+        if isinstance(body, dict) and body.get("url"):
+            urls = [str(body["url"])]
+        else:
+            urls = [u.strip() for u in str(cfg.get("WEBHOOK_URLS") or "").split(",") if u.strip()]
+            if not urls:
+                legacy = (cfg.get("HERMES_WEBHOOK_URL") or "").strip()
+                if legacy:
+                    urls = [legacy]
+        if not urls:
+            return 200, {"ok": True, "configured": False, "results": []}
+        payload = {
+            "event_type": "webhook_test",
+            "test": True,
+            "ts": _now_iso(),
+            "note": "ASRSub webhook test",
+        }
+        body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        results = []
+        for url in urls:
+            t0 = time.time()
+            try:
+                ts = str(int(time.time()))
+                headers = {"X-Webhook-Timestamp": ts, "Content-Type": "application/json"}
+                if secret:
+                    sig = hmac.new(
+                        secret.encode(), ts.encode() + b"." + body_bytes, hashlib.sha256
+                    ).hexdigest()
+                    headers["X-Webhook-Signature-V2"] = sig
+                req = urllib.request.Request(url, data=body_bytes, headers=headers, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        status = resp.status
+                except urllib.error.HTTPError as exc:
+                    status = exc.code
+                results.append(
+                    {
+                        "url": url,
+                        "status": status,
+                        "latency_ms": int((time.time() - t0) * 1000),
+                        "error": None,
+                    }
+                )
+            except Exception as exc:
+                results.append(
+                    {
+                        "url": url,
+                        "status": None,
+                        "latency_ms": int((time.time() - t0) * 1000),
+                        "error": str(exc),
+                    }
+                )
+        return 200, {"ok": True, "configured": True, "results": results}
 
 
 class _RequestHandler(BaseHTTPRequestHandler):
