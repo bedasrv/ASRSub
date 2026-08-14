@@ -90,7 +90,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 /* ============ Flex row list (file-manager list view) ============ */
 .f-row {
   display: flex; align-items: stretch;
-  gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--divider);
+  gap: 8px; padding: 6px 8px;
 }
 .f-row:hover { background: var(--surface-container-high); }
 .f-left {
@@ -180,8 +180,9 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .gpu-core-fill.hot { background: var(--run); }
 .vram-txt { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 6px; }
 .model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-.model-name { margin-top: 6px; font-size: 12px; color: var(--on-surface-variant); }
-.model-name + .model-name { margin-top: 2px; }
+.model-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tag { display: inline-flex; gap: 6px; align-items: center; height: 24px; padding: 0 10px; background: var(--surface-variant); color: var(--on-surface-variant); border-radius: var(--r-s); font-size: 12px; }
+.tag b { color: var(--on-surface); font-weight: 600; }
 .unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .gpu-err { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 8px; word-break: break-word; }
 
@@ -292,17 +293,20 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 /* ============ Status page ============ */
 .ctl-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .ctl-actions .m3-btn { flex: 1 1 40%; }
-.counts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 16px; margin-top: 8px; }
-.tile {
-  background: none; border: none; border-bottom: 1px solid var(--outline-variant);
-  border-radius: 0; padding: 8px 4px;
+.stat-card {
+  background: var(--surface-container-low);
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-l);
+  padding: 12px 14px;
+  margin-bottom: 12px;
 }
-.tile .lbl { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--on-surface-variant); }
-.tile .val { font-size: 16px; font-weight: 600; line-height: 20px; margin-top: 4px; word-break: break-word; }
-.tile .val.ok { color: var(--ok); }
-.tile .val.err { color: var(--error); }
-.tile .val.run { color: var(--run); }
+.status-meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; line-height: 16px; margin-top: 8px; }
+.prog-row { margin-top: 8px; }
+.prog-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; line-height: 16px; }
+.prog-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--on-surface-variant); font-weight: 600; }
+.prog-txt { color: var(--on-surface); }
+.lastpass { font-size: 12px; line-height: 16px; margin-top: 8px; }
+.lastpass.err { color: var(--error); }
 
 /* ============ Settings page ============ */
 #ctl-config table { width: 100%; border-collapse: collapse; }
@@ -463,35 +467,41 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Status ============ -->
     <section class="page" id="page-status" aria-label="Status">
-      <div class="sec-title">Pipeline <span id="refresh-ind"></span></div>
-      <div class="pills">
-        <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
-        <span class="pill"><span class="dot stopped" id="q-dot"></span><span id="q-text">queue …</span></span>
+      <div class="stat-card">
+        <div class="sec-title">Pipeline Control <span id="refresh-ind"></span></div>
+        <div class="pills">
+          <span class="pill"><span class="dot stopped" id="p-dot"></span><span id="p-text">pipeline …</span></span>
+        </div>
+        <div class="status-meta">
+          <span class="muted">Uptime: <span id="st-uptime">–</span></span>
+          <span class="muted">Queue: <span id="st-queue">–</span></span>
+        </div>
+        <div class="ctl-actions">
+          <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
+          <button id="act-pause" class="m3-btn outlined" onclick="ctlAction('pause')">Pause</button>
+          <button id="act-run-once" class="m3-btn tonal" onclick="ctlAction('run-once')">Run once</button>
+          <button id="act-wake" class="m3-btn tonal" onclick="ctlAction('wake')">Wake now</button>
+        </div>
+        <div class="status-meta">
+          <span class="muted">Started <span id="st-started">–</span></span>
+          <span class="muted">Consecutive failures <span id="st-failures">–</span></span>
+          <span class="muted">Run-once <span id="st-runonce">–</span></span>
+        </div>
       </div>
-      <div class="counts" id="st-counts"></div>
-      <div class="ctl-actions">
-        <button id="act-wake" class="m3-btn tonal" onclick="ctlAction('wake')">Wake now</button>
-        <button id="act-run-once" class="m3-btn tonal" onclick="ctlAction('run-once')">Run once</button>
-        <button id="act-pause" class="m3-btn outlined" onclick="ctlAction('pause')">Pause</button>
-        <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
+      <div class="stat-card">
+        <div class="sec-title">Queue &amp; Progress</div>
+        <div id="progress-body"></div>
+        <div id="st-lastpass" class="lastpass"></div>
       </div>
-      <div class="stats-grid">
-        <div class="tile"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
-        <div class="tile"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
-        <div class="tile"><div class="lbl">Queue (wanted)</div><div class="val" id="st-queue">–</div></div>
-        <div class="tile"><div class="lbl">Series</div><div class="val" id="st-series">–</div></div>
-        <div class="tile"><div class="lbl">Movies</div><div class="val" id="st-movies">–</div></div>
-        <div class="tile"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
-        <div class="tile"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
-        <div class="tile"><div class="lbl">Started at</div><div class="val" id="st-started">–</div></div>
-        <div class="tile"><div class="lbl">Run-once requested</div><div class="val" id="st-runonce">–</div></div>
+      <div class="stat-card">
+        <div class="sec-title">Hardware &amp; Models</div>
+        <div id="gpu-body"><div class="muted">loading…</div></div>
+        <div id="model-body"><div class="muted">loading…</div></div>
       </div>
-      <div class="sec-title">GPU</div>
-      <div id="gpu-body"><div class="muted">loading…</div></div>
-      <div class="sec-title">Model</div>
-      <div id="model-body"><div class="muted">loading…</div></div>
-      <div class="sec-title">Subtitle Provenance</div>
-      <div id="prov-body"><div class="muted">loading…</div></div>
+      <div class="stat-card">
+        <div class="sec-title">Subtitle Provenance &amp; Extractions</div>
+        <div id="prov-body"><div class="muted">loading…</div></div>
+      </div>
     </section>
 
     <!-- ============ Settings ============ -->
@@ -674,65 +684,27 @@ function renderStatus(data) {
   else if (reachable) { pd.className = "dot up"; pt.textContent = "daemon running"; }
   else { pd.className = "dot down"; pt.textContent = "daemon down" + (daemon.error ? " (" + esc(daemon.error) + ")" : ""); }
 
-  const qd = document.getElementById("q-dot");
-  const qt = document.getElementById("q-text");
   const queue = data.queue || {};
-  const mv = data.movies || {};
-  qd.className = (queue.wanted || (mv.remaining != null && mv.remaining > 0)) ? "dot running" : "dot up";
-  qt.textContent = "queue: " + (queue.wanted != null ? queue.wanted + " wanted" : "?") +
-    (mv.remaining != null ? " · " + mv.remaining + " movies" : "");
-
-  const stDaemon = document.getElementById("st-daemon");
-  stDaemon.textContent = reachable ? (daemon.paused ? "paused" : "running") : "stopped";
-  stDaemon.className = "val " + (reachable ? (daemon.paused ? "run" : "ok") : "err");
   document.getElementById("st-uptime").textContent = daemon.uptime_s != null ? fmtDur(daemon.uptime_s) : "–";
   document.getElementById("st-queue").textContent = queue.wanted != null ? queue.wanted : "–";
-  const stMv = document.getElementById("st-movies");
-  if (stMv) {
-    if (mv.total != null && mv.remaining != null) {
-      const done = Math.max(0, mv.total - mv.remaining);
-      stMv.textContent = done + " done / " + mv.remaining + " remaining";
-      stMv.className = "val " + (mv.remaining > 0 ? "run" : "ok");
-    } else if (mv.remaining != null) {
-      stMv.textContent = mv.remaining + " pending";
-      stMv.className = "val " + (mv.remaining > 0 ? "run" : "ok");
-    } else {
-      stMv.textContent = "–";
-    }
-  }
-  const sr = data.series || {};
-  const stSr = document.getElementById("st-series");
-  if (stSr) {
-    if (sr.total != null && sr.done != null && sr.remaining != null) {
-      stSr.textContent = sr.done + " done / " + sr.remaining + " remaining";
-      stSr.className = "val " + (sr.remaining > 0 ? "run" : "ok");
-    } else {
-      stSr.textContent = "–";
-    }
-  }
+
   const lp = daemon.last_pass || {};
   const stLp = document.getElementById("st-lastpass");
-  stLp.textContent = lp.processed != null
-    ? (lp.processed + " processed · " + (lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?") + " d/s/f")
-    : "–";
-  stLp.className = "val" + ((lp.failed || 0) > 0 ? " err" : "");
-  const stF = document.getElementById("st-failures");
-  stF.textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
-  stF.className = "val" + ((daemon.consecutive_failures || 0) > 0 ? " err" : "");
+  if (stLp) {
+    if (lp.processed != null) {
+      stLp.innerHTML = "Last pass: <b>" + esc(lp.processed) + " processed</b> (" +
+        (lp.done ?? "?") + "/" + (lp.skipped ?? "?") + "/" + (lp.failed ?? "?") + " d/s/f)";
+      stLp.className = "lastpass" + ((lp.failed || 0) > 0 ? " err" : "");
+    } else {
+      stLp.textContent = "Last pass: –";
+      stLp.className = "lastpass";
+    }
+  }
+  document.getElementById("st-failures").textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
   document.getElementById("st-started").textContent = daemon.started_at ? relTime(daemon.started_at) : "–";
   document.getElementById("st-runonce").textContent = daemon.run_once_requested ? "yes" : "no";
 
-  const sc = data.state_counts || {};
-  const cEl = document.getElementById("st-counts");
-  if (sc.total != null) {
-    cEl.innerHTML =
-      '<span class="pill"><span class="dot up"></span>' + esc(sc.done ?? "?") + " done</span>" +
-      '<span class="pill"><span class="dot ' + ((sc.error || 0) > 0 ? "down" : "up") + '"></span>' + esc(sc.error ?? "?") + " error</span>" +
-      '<span class="pill"><span class="dot stopped"></span>' + esc(sc.pending ?? "?") + " pending (" + esc(sc.total) + ")</span>";
-  } else {
-    cEl.innerHTML = "";
-  }
-
+  renderProgress(data);
   renderGpu(data.gpu || {}, data.llama || {}, data.models || {});
   const pa = document.getElementById("act-pause");
   const re = document.getElementById("act-resume");
@@ -750,6 +722,35 @@ function renderStatus(data) {
       pa.className = "m3-btn outlined";
     }
   }
+}
+
+function renderProgress(data) {
+  const el = document.getElementById("progress-body");
+  if (!el) return;
+  const sr = data.series || {};
+  const mv = data.movies || {};
+  let rows = "";
+  if (sr.total != null) {
+    const done = sr.done != null ? sr.done : 0;
+    const remaining = sr.remaining != null ? sr.remaining : 0;
+    const pct = sr.total > 0 ? Math.round((done / sr.total) * 100) : 0;
+    rows += '<div class="prog-row">' +
+      '<div class="prog-top"><span class="prog-lbl">Series</span>' +
+      '<span class="prog-txt"><b>' + esc(pct) + '%</b> (' + esc(done) + ' / ' + esc(sr.total) + ') · <span class="muted">' + esc(remaining) + ' pending</span></span></div>' +
+      '<div class="vram-bar" style="margin-top:4px"><div class="vram-fill" style="width:' + pct + '%"></div></div>' +
+      "</div>";
+  }
+  if (mv.total != null) {
+    const remaining = mv.remaining != null ? mv.remaining : 0;
+    const done = Math.max(0, mv.total - remaining);
+    const pct = mv.total > 0 ? Math.round((done / mv.total) * 100) : 0;
+    rows += '<div class="prog-row">' +
+      '<div class="prog-top"><span class="prog-lbl">Movies</span>' +
+      '<span class="prog-txt"><b>' + esc(pct) + '%</b> (' + esc(done) + ' / ' + esc(mv.total) + ') · <span class="muted">' + esc(remaining) + ' pending</span></span></div>' +
+      '<div class="vram-bar" style="margin-top:4px"><div class="vram-fill" style="width:' + pct + '%"></div></div>' +
+      "</div>";
+  }
+  el.innerHTML = rows || '<span class="muted">–</span>';
 }
 
 function renderGpu(gpu, llama, models) {
@@ -777,6 +778,14 @@ function renderGpu(gpu, llama, models) {
   renderModel(llama, models);
 }
 
+function friendlyModel(raw, camel) {
+  if (!raw) return "";
+  let s = String(raw).split("/").pop();
+  s = s.replace(/\.gguf$/i, "").replace(/-Q[0-9]_[A-Z_]+$/i, "").replace(/_plus_large$/i, "+");
+  if (camel) s = s.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return s;
+}
+
 function renderModel(llama, models) {
   const el = document.getElementById("model-body");
   if (!el) return;
@@ -786,16 +795,13 @@ function renderModel(llama, models) {
     '<span class="pill"><span class="dot ' + (up ? "up" : "down") + '"></span>' +
     "<span>" + (up ? "llama-server up" + (llama.latency_ms != null ? " (" + esc(llama.latency_ms) + "ms)" : "") : "llama-server down") + "</span></span>" +
     "</div>";
-  if (llama.model) {
-    html += '<div class="model-name mono">' + esc(llama.model) + "</div>";
-  }
-  if (models && models.asr_backend) {
-    html += '<div class="model-name mono">ASR  ' + esc(models.asr_backend) +
-      (models.asr_model ? " · " + esc(models.asr_model) : "") + "</div>";
-    html += '<div class="model-name mono">VAD  ' + esc(models.vad_model || "") + "</div>";
-    if (models.emo_enabled) {
-      html += '<div class="model-name mono">EMO  ' + esc(models.emo_model || "") + "</div>";
-    }
+  const tags = [];
+  if (llama.model) tags.push('<span class="tag"><b>LLM</b> ' + esc(friendlyModel(llama.model)) + "</span>");
+  if (models && models.asr_model) tags.push('<span class="tag"><b>ASR</b> ' + esc(friendlyModel(models.asr_model, true)) + "</span>");
+  if (models && models.vad_model) tags.push('<span class="tag"><b>VAD</b> ' + esc(String(models.vad_model).toUpperCase()) + "</span>");
+  if (models && models.emo_enabled && models.emo_model) tags.push('<span class="tag"><b>EMO</b> ' + esc(friendlyModel(models.emo_model)) + "</span>");
+  if (tags.length) {
+    html += '<div class="model-tags">' + tags.join("") + "</div>";
   }
   el.innerHTML = html;
 }
@@ -839,13 +845,6 @@ function provKindChip(r) {
 function renderProvenance(data) {
   const el = document.getElementById("prov-body");
   if (!el) return;
-  const tot = data.totals || {};
-  const chips = [];
-  if (tot.rows) {
-    chips.push('<span class="pill">' + esc(tot.rows) + " registry rows</span>");
-    chips.push('<span class="pill"><span class="dot up"></span>' + esc(tot.embedded ?? 0) + " embedded</span>");
-    chips.push('<span class="pill"><span class="dot running"></span>' + esc(tot.external ?? 0) + " external</span>");
-  }
   let langHtml = "";
   const byLang = data.by_lang || {};
   const langNames = Object.keys(byLang).sort();
@@ -866,21 +865,42 @@ function renderProvenance(data) {
   if (!recent.length) {
     feed = '<div class="empty">no extractions yet</div>';
   } else {
-    feed = recent.map(function (r) {
-      const rt = relTime(r.ts);
+    // group by basename, one row per file (entries arrive newest-first)
+    const groups = [];
+    const seen = {};
+    for (const r of recent) {
+      const key = r.basename || "";
+      if (!(key in seen)) {
+        seen[key] = groups.length;
+        groups.push({ basename: key, entries: [], rt: "" });
+      }
+      const g = groups[seen[key]];
+      g.entries.push(r);
+      if (!g.rt) g.rt = relTime(r.ts);
+    }
+    feed = groups.map(function (g) {
+      const kinds = {};
+      for (const r of g.entries) {
+        kinds[r.source_kind || r.source || "unknown"] = true;
+      }
+      const sharedKind = Object.keys(kinds).length === 1;
+      let badges = "";
+      for (const r of g.entries) {
+        badges += '<span class="t-pill lang">' + esc(String(r.lang || "").toUpperCase()) + "</span>";
+        if (!sharedKind) badges += provKindChip(r);
+      }
+      if (sharedKind) badges += provKindChip(g.entries[0]);
       return '<div class="f-row">' +
         '<div class="f-left">' +
-        '<div class="feed-title" title="' + esc(r.basename || "") + '">' + smartEllipsis(r.basename, 48) + "</div>" +
+        '<div class="feed-title" title="' + esc(g.basename || "") + '">' + smartEllipsis(g.basename, 48) + "</div>" +
         "</div>" +
         '<div class="f-right"><div class="fr-line1">' +
-        (r.lang ? '<span class="t-pill lang">' + esc(r.lang) + "</span>" : "") +
-        provKindChip(r) +
-        (rt ? '<span class="muted" style="font:var(--t-bs)">' + rt + "</span>" : "") +
+        badges +
+        (g.rt ? '<span class="muted" style="font:var(--t-bs)">' + g.rt + "</span>" : "") +
         "</div></div></div>";
     }).join("");
   }
   el.innerHTML =
-    (chips.length ? '<div class="pills">' + chips.join("") + "</div>" : "") +
     langHtml +
     '<div class="sec-title">Recent extractions</div>' + feed;
 }
