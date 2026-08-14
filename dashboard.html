@@ -435,6 +435,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <div class="seg" id="scope-seg" role="group" aria-label="Library scope">
           <button type="button" class="seg-btn active" data-scope="active">Active</button>
           <button type="button" class="seg-btn" data-scope="all">All</button>
+          <button type="button" class="seg-btn" data-scope="inactive">Inactive</button>
         </div>
       </div>
       <div id="lib-banner" class="retry-banner" role="alert">
@@ -1122,7 +1123,7 @@ function itemLangTarget(it) {
 
 async function pollLibrary() {
   try {
-    const lib = await api("/api2/library" + (libScope === "all" ? "?scope=all" : ""));
+    const lib = await api(libScope === "active" ? "/api2/library" : "/api2/library?scope=" + libScope);
     if (lib.status === 404) { libUnavailable("HTTP 404 — endpoint not ready yet"); return; }
     if (lib.status !== 200) { libUnavailable("HTTP " + lib.status); return; }
     const ex = await api("/api2/exclusions");
@@ -1287,14 +1288,6 @@ if (actSearchClear) {
 async function batchAction(act) {
   let ids = selectedIds();
   if (!ids.length) return;
-  if (act === "retry" || act === "delete") {
-    const kept = ids.filter(function (k) {
-      const it = libraryItems[k];
-      return !(it && it.kind === "movie");
-    });
-    if (!kept.length) { toast("retry/delete not available for movies", "err"); return; }
-    ids = kept;
-  }
   if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) return;
   const btn = document.getElementById("batch-" + act);
   btnBusy(btn, true);
@@ -1322,7 +1315,7 @@ async function batchAction(act) {
 
 async function episodeAction(act, id, btn, langOverride) {
   const it = libraryItems[String(id)] || activityItems[String(id)];
-  if (it && it.kind === "movie" && (act === "retry" || act === "delete" || act === "skip")) {
+  if (it && it.kind === "movie" && act === "skip") {
     toast("not available for movies", "err");
     return;
   }
@@ -1368,7 +1361,7 @@ function openRowMenu(id, btn) {
   const isMovie = !!(it && it.kind === "movie");
   for (const act of ["retry", "delete", "skip"]) {
     const b = rowMenu.querySelector("[data-act='" + act + "']");
-    if (b) b.disabled = isMovie;
+    if (b) b.disabled = act === "skip" && isMovie;
   }
   const exclBtn = rowMenu.querySelector("[data-act='exclude'], [data-act='unexclude']");
   if (exclBtn) {
