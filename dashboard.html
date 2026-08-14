@@ -116,6 +116,43 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 }
 .fr-line1 { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .fr-line2 { display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
+
+/* Ultra-compact library rows: media icon + 2-line (title/ep + lang chips) */
+.m-icon { flex: none; width: 16px; height: 16px; color: var(--on-surface-variant); }
+.f-main {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 3px; justify-content: center;
+}
+.m-line1 { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.m-title {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; font-weight: 600; line-height: 18px;
+}
+.m-ep {
+  flex: 0 0 auto; font-size: 12px; line-height: 16px;
+  color: var(--on-surface-variant); white-space: nowrap;
+}
+.m-line2 {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding-left: 20px;
+}
+.st-cell {
+  flex: none; width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.st-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.st-dot.done { background: var(--ok); }
+.st-dot.error { background: var(--error); }
+.st-dot.wanted { background: var(--run); }
+.st-dot.pending { background: var(--primary); }
+.st-dot.excluded { background: var(--on-surface-variant); }
+.st-check { color: var(--ok); font-size: 14px; line-height: 1; font-weight: 700; }
+.m-queued {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px dashed var(--primary);
+}
+.f-row.excluded { opacity: .55; }
 .kebab {
   border: none; background: transparent; color: var(--on-surface-variant); cursor: pointer;
   width: 20px; height: 20px; border-radius: 4px;
@@ -144,10 +181,13 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   display: inline-flex; align-items: center; line-height: 1; padding: 3px 8px;
   border-radius: var(--r-full); font-size: 11px; font-weight: 600; white-space: nowrap;
 }
-.lang-badge.done { background: var(--secondary-container); color: var(--on-secondary-container); }
-.lang-badge.error { background: var(--error-container); color: var(--on-error-container); }
-.lang-badge.excluded { background: var(--surface-variant); color: var(--on-surface-variant); }
-.lang-badge.wanted { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.lang-badge.src-embedded { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 700; border: 1px solid transparent; }
+.lang-badge.src-embedded.done { background: var(--secondary-container); color: var(--on-secondary-container); }
+.lang-badge.src-embedded.error { background: var(--error-container); color: var(--on-error-container); }
+.lang-badge.src-embedded.excluded { background: var(--surface-variant); color: var(--on-surface-variant); }
+.lang-badge.src-embedded.wanted { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.lang-badge.src-external { background: transparent; border: 1px solid var(--outline); color: var(--on-surface-variant); font-weight: 500; }
+.lang-badge.src-asr { background: transparent; border: 1px dashed var(--outline); color: var(--on-surface-variant); opacity: .8; font-weight: 500; }
 .t-pill {
   display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: var(--r-full);
   font-size: 10px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; white-space: nowrap;
@@ -1064,10 +1104,18 @@ function selectAll(on) {
 
 function langChip(l) {
   const st = l.status || "wanted";
-  const cls = st === "done" ? "done" : st === "error" ? "error" : st === "excluded" ? "excluded" : "wanted";
-  const src = l.prov || l.source || "";
-  const label = l.language + (src ? " · " + String(src).toUpperCase() : "");
-  return '<span class="lang-badge ' + cls + '">' + esc(label) + (st === "done" ? " ✓" : "") + "</span>";
+  const statusCls = st === "done" ? "done" : st === "error" ? "error" : st === "excluded" ? "excluded" : "wanted";
+  const prov = l.prov || "";
+  const source = l.source || "";
+  let srcCls = "src-external";
+  if (prov === "embedded" || source === "eng" || source === "jpn") srcCls = "src-embedded";
+  else if (prov === "asr" || source === "asr") srcCls = "src-asr";
+  const label = String(l.language || "").toUpperCase();
+  const detail = prov
+    ? (source && source !== prov ? prov + " (" + source + ")" : prov)
+    : (source || "external");
+  const title = (l.language || "") + " · " + st + " · " + detail;
+  return '<span class="lang-badge ' + statusCls + " " + srcCls + '" title="' + esc(title) + '">' + esc(label) + "</span>";
 }
 
 let libQuery = "";
@@ -1095,31 +1143,48 @@ function itemStatus(it) {
 
 function libStatusCell(it) {
   const st = itemStatus(it);
-  const cls = st === "excluded" ? "excluded" : st === "wanted" ? "wanted" : st === "error" ? "error" : st === "pending" ? "pending" : st === "done" ? "done" : "idle";
-  return '<span class="t-pill ' + cls + '">' + st + "</span>";
+  if (st === "done") {
+    return '<span class="st-cell" title="done"><span class="st-check" aria-hidden="true">✓</span></span>';
+  }
+  if (st === "idle") {
+    return '<span class="st-cell" title="idle"></span>';
+  }
+  return '<span class="st-cell" title="' + st + '"><span class="st-dot ' + st + '"></span></span>';
 }
 
-function libKindChip(it) {
-  return '<span class="t-pill neutral">' + (it.kind === "movie" ? "MOVIE" : "SERIES") + "</span>";
+const ICON_MOVIE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M3 15h18" stroke="currentColor" stroke-width="1.4"/></svg>';
+const ICON_TV = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="2.5" y="5" width="19" height="13" rx="2"/><path d="M8.5 2.5l3.5 3 3.5-3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function libKindIcon(it) {
+  const svg = it.kind === "movie" ? ICON_MOVIE : ICON_TV;
+  return '<span class="m-icon" title="' + (it.kind === "movie" ? "Movie" : "Series") + '">' + svg + "</span>";
 }
 
 function libRowHTML(it) {
   const id = itemKey(it);
   const langs = (it.languages || []).map(langChip).join("");
-  const sub = (it.episode || "") + (it.title ? " · " + esc(it.title) : "");
+  const st = itemStatus(it);
+  const rowCls = st === "excluded" ? "f-row excluded" : "f-row";
+  const titleAttr = it.kind === "series" && it.title ? ' title="' + esc(it.title) + '"' : "";
+  const queuedDot = it.pending_action
+    ? '<span class="m-queued" title="queued: ' + esc(it.pending_action) + '"></span>'
+    : "";
   return (
-    '<div class="f-row">' +
+    '<div class="' + rowCls + '">' +
     (selMode ? '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label>" : "") +
-    '<div class="f-left">' +
-    '<div class="f-title">' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + "</div>" +
-    '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
+    libKindIcon(it) +
+    '<div class="f-main">' +
+    '<div class="m-line1">' +
+    '<span class="m-title"' + titleAttr + '>' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + "</span>" +
+    (it.episode ? '<span class="m-ep">' + esc(it.episode) + "</span>" : "") +
+    queuedDot +
     "</div>" +
-    '<div class="f-right">' +
-    '<div class="fr-line1">' + libKindChip(it) + libStatusCell(it) +
-    (it.pending_action ? '<span class="t-pill queued">queued · ' + esc(it.pending_action) + '</span>' : "") +
-    '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for ' + id + '">' + KEBAB_SVG + "</button></div>" +
-    (langs ? '<div class="fr-line2">' + langs + "</div>" : "") +
-    "</div></div>"
+    (langs ? '<div class="m-line2">' + langs + "</div>" : "") +
+    "</div>" +
+    '<div class="f-right"><div class="fr-line1">' +
+    libStatusCell(it) +
+    '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for ' + id + '">' + KEBAB_SVG + "</button></div></div>" +
+    "</div>"
   );
 }
 
