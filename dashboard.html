@@ -182,6 +182,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .vram-txt { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 6px; }
 .model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
 .model-name { margin-top: 6px; font-size: 12px; color: var(--on-surface-variant); }
+.model-name + .model-name { margin-top: 2px; }
 .unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .gpu-err { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 8px; word-break: break-word; }
 
@@ -482,6 +483,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <div class="tile"><div class="lbl">Daemon</div><div class="val" id="st-daemon">–</div></div>
         <div class="tile"><div class="lbl">Uptime</div><div class="val" id="st-uptime">–</div></div>
         <div class="tile"><div class="lbl">Queue (wanted)</div><div class="val" id="st-queue">–</div></div>
+        <div class="tile"><div class="lbl">Series</div><div class="val" id="st-series">–</div></div>
         <div class="tile"><div class="lbl">Movies</div><div class="val" id="st-movies">–</div></div>
         <div class="tile"><div class="lbl">Last pass</div><div class="val" id="st-lastpass">–</div></div>
         <div class="tile"><div class="lbl">Consecutive failures</div><div class="val" id="st-failures">–</div></div>
@@ -513,40 +515,32 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 </div>
 
 <nav class="bottom-nav" aria-label="Pages">
-  <button class="nav-item active" data-page="library" aria-current="page">
+  <button class="nav-item active" data-page="library" aria-current="page" aria-label="Library">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
-    <span>Library</span>
   </button>
-  <button class="nav-item" data-page="activity">
+  <button class="nav-item" data-page="activity" aria-label="Activity">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6.1"/><path d="M3.5 2.5v4h4"/><path d="M12 7.5V12l3 2"/></svg></span>
-    <span>Activity</span>
   </button>
-  <button class="nav-item" data-page="status">
+  <button class="nav-item" data-page="status" aria-label="Status">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12h4l2.5-6 4.5 12 2.5-6h5.5"/></svg></span>
-    <span>Status</span>
   </button>
-  <button class="nav-item" data-page="settings">
+  <button class="nav-item" data-page="settings" aria-label="Settings">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
-    <span>Settings</span>
   </button>
 </nav>
 
 <aside class="nav-rail" aria-label="Pages">
-  <button class="nav-item active" data-page="library" aria-current="page">
+  <button class="nav-item active" data-page="library" aria-current="page" aria-label="Library">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
-    <span>Library</span>
   </button>
-  <button class="nav-item" data-page="activity">
+  <button class="nav-item" data-page="activity" aria-label="Activity">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6.1"/><path d="M3.5 2.5v4h4"/><path d="M12 7.5V12l3 2"/></svg></span>
-    <span>Activity</span>
   </button>
-  <button class="nav-item" data-page="status">
+  <button class="nav-item" data-page="status" aria-label="Status">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12h4l2.5-6 4.5 12 2.5-6h5.5"/></svg></span>
-    <span>Status</span>
   </button>
-  <button class="nav-item" data-page="settings">
+  <button class="nav-item" data-page="settings" aria-label="Settings">
     <span class="ind"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9.5M17.5 7H20M4 12h1.5M7.5 12H20M4 17h7.5M15.5 17H20"/><circle cx="14.5" cy="7" r="2"/><circle cx="6.5" cy="12" r="2"/><circle cx="12.5" cy="17" r="2"/></svg></span>
-    <span>Settings</span>
   </button>
 </aside>
 
@@ -711,6 +705,16 @@ function renderStatus(data) {
       stMv.textContent = "–";
     }
   }
+  const sr = data.series || {};
+  const stSr = document.getElementById("st-series");
+  if (stSr) {
+    if (sr.total != null && sr.done != null && sr.remaining != null) {
+      stSr.textContent = sr.done + " done / " + sr.remaining + " remaining";
+      stSr.className = "val " + (sr.remaining > 0 ? "run" : "ok");
+    } else {
+      stSr.textContent = "–";
+    }
+  }
   const lp = daemon.last_pass || {};
   const stLp = document.getElementById("st-lastpass");
   stLp.textContent = lp.processed != null
@@ -734,7 +738,7 @@ function renderStatus(data) {
     cEl.innerHTML = "";
   }
 
-  renderGpu(data.gpu || {}, data.llama || {});
+  renderGpu(data.gpu || {}, data.llama || {}, data.models || {});
   const pa = document.getElementById("act-pause");
   const re = document.getElementById("act-resume");
   if (pa && re) {
@@ -753,7 +757,7 @@ function renderStatus(data) {
   }
 }
 
-function renderGpu(gpu, llama) {
+function renderGpu(gpu, llama, models) {
   const el = document.getElementById("gpu-body");
   if (!el) return;
   const g = (gpu.gpus && gpu.gpus[0]) || null;
@@ -775,10 +779,10 @@ function renderGpu(gpu, llama) {
       '<div class="unavail"><span class="chip chip-excluded">GPU unavailable</span>' +
       (gpu.error ? '<span class="muted" style="font:var(--t-bs)">' + esc(gpu.error) + "</span>" : "") + "</div>";
   }
-  renderModel(llama);
+  renderModel(llama, models);
 }
 
-function renderModel(llama) {
+function renderModel(llama, models) {
   const el = document.getElementById("model-body");
   if (!el) return;
   const up = !!llama.up;
@@ -789,6 +793,14 @@ function renderModel(llama) {
     "</div>";
   if (llama.model) {
     html += '<div class="model-name mono">' + esc(llama.model) + "</div>";
+  }
+  if (models && models.asr_backend) {
+    html += '<div class="model-name mono">ASR  ' + esc(models.asr_backend) +
+      (models.asr_model ? " · " + esc(models.asr_model) : "") + "</div>";
+    html += '<div class="model-name mono">VAD  ' + esc(models.vad_model || "") + "</div>";
+    if (models.emo_enabled) {
+      html += '<div class="model-name mono">EMO  ' + esc(models.emo_model || "") + "</div>";
+    }
   }
   el.innerHTML = html;
 }

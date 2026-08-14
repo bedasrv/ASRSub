@@ -1026,12 +1026,37 @@ class ControlAPIv2:
         movies_remaining = daemon.get("movies_remaining")
         if not isinstance(movies_remaining, int):
             movies_remaining = self._movies_remaining_local(movies)
+        series_done = sum(
+            1
+            for k, st in episodes.items()
+            if k.startswith("series:") and st.get("status") == "done"
+        )
+        series_remaining = wanted.get("total", 0)
+        try:
+            env = self._env()
+        except Exception:
+            env = {}
+        asr_backend = env.get("ASR_BACKEND") or "whisper"
+        models = {
+            "asr_backend": asr_backend,
+            "asr_model": env.get("SV_MODEL_ID") or "FunAudioLLM/SenseVoiceSmall",
+            "vad_model": "fsmn-vad" if asr_backend == "sensevoice" else "silero",
+            "emo_enabled": str(env.get("EMO_ENABLED") or "0").lower()
+            in ("1", "true", "yes"),
+            "emo_model": env.get("EMO_MODEL") or "emotion2vec/emotion2vec_plus_large",
+        }
         return 200, {
             "updated_at": _now_iso(),
             "daemon": daemon,
             "state_counts": counts,
             "queue": {"wanted": wanted.get("total", 0), "movies": movies_remaining},
             "movies": {"total": movie_total, "remaining": movies_remaining},
+            "series": {
+                "total": series_done + series_remaining,
+                "done": series_done,
+                "remaining": series_remaining,
+            },
+            "models": models,
             "gpu": gpu,
             "llama": llama,
             "registry": self._registry_block(),
