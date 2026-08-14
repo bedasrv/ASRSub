@@ -1737,9 +1737,9 @@ function syncFilterControls() {
     else setChipState(b, "");
   }
   const seasonSel = document.getElementById("bs-season");
-  if (seasonSel) seasonSel.value = bsDraft.season;
+  if (seasonSel && seasonSel.value !== bsDraft.season) seasonSel.value = bsDraft.season;
   const sortSel = document.getElementById("bs-sort-field");
-  if (sortSel) sortSel.value = bsDraft.sort;
+  if (sortSel && sortSel.value !== bsDraft.sort) sortSel.value = bsDraft.sort;
   const dirBtns = document.querySelectorAll("#bs-sort-dir .bs-seg-btn");
   for (const b of dirBtns) b.classList.toggle("active", b.dataset.dir === bsDraft.sortDir);
   for (const qr of ["queued", "done", "missing"]) {
@@ -1915,7 +1915,6 @@ const bsSeasonSel = document.getElementById("bs-season");
 if (bsSeasonSel) {
   bsSeasonSel.addEventListener("change", function () {
     bsDraft.season = bsSeasonSel.value;
-    syncFilterControls();
     updateApplyLabel();
   });
 }
@@ -1923,7 +1922,6 @@ const bsSortField = document.getElementById("bs-sort-field");
 if (bsSortField) {
   bsSortField.addEventListener("change", function () {
     bsDraft.sort = bsSortField.value;
-    syncFilterControls();
     updateApplyLabel();
   });
 }
