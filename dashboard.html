@@ -312,6 +312,79 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .sel-toggle { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 12px; }
 .sel-toggle svg { flex: none; }
 
+/* Filters trigger */
+.filter-trigger { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 12px; }
+.filter-trigger svg { flex: none; }
+.filter-badge { margin-left: 2px; background: var(--primary); color: var(--on-primary); border-radius: var(--r-full); font-size: 11px; font-weight: 700; padding: 1px 6px; }
+.filter-badge[hidden] { display: none; }
+
+/* ============ Bottom sheet (filter & sort) ============ */
+.bs-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .5);
+  z-index: 900; opacity: 0; transition: opacity .2s ease;
+}
+.bs-overlay.open { opacity: 1; }
+.bs-overlay[hidden] { display: none; }
+.bs-sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; margin: 0 auto; max-width: 420px;
+  max-height: 85vh; display: flex; flex-direction: column;
+  background: var(--surface-container-high);
+  border-radius: 16px 16px 0 0; z-index: 901;
+  transform: translateY(100%); transition: transform .22s ease;
+}
+.bs-sheet.open { transform: translateY(0); }
+.bs-sheet[hidden] { display: none; }
+.bs-handle {
+  width: 36px; height: 4px; border-radius: 2px; background: var(--outline-variant);
+  margin: 8px auto 4px; flex: none;
+}
+.bs-header {
+  display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; flex: none;
+}
+.bs-title { font-size: 16px; font-weight: 600; flex: 1; }
+.bs-icon-btn {
+  width: 36px; height: 36px; border-radius: 50%; border: none;
+  background: transparent; font-size: 20px; line-height: 1; cursor: pointer; color: var(--on-surface-variant);
+}
+.bs-icon-btn:hover { background: var(--surface-variant); }
+.bs-icon-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.bs-text-btn { border: none; background: transparent; color: var(--primary); font-size: 13px; font-weight: 600; cursor: pointer; padding: 4px 6px; }
+.bs-text-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.bs-body { overflow-y: auto; padding: 4px 16px 12px; flex: 1 1 auto; }
+.bs-group { margin: 14px 0; }
+.bs-cat {
+  font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--on-surface-variant); margin-bottom: 8px;
+}
+.bs-seg { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.bs-seg-btn {
+  min-height: 44px; padding: 0 16px; border-radius: var(--r-full);
+  border: 1px solid var(--outline-variant); background: transparent;
+  color: var(--on-surface-variant); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.bs-seg-btn:hover { background: var(--surface-variant); }
+.bs-seg-btn.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.bs-seg-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.bs-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.bs-chip {
+  min-height: 44px; padding: 0 16px; border-radius: var(--r-full);
+  border: 1px solid var(--outline-variant); background: transparent;
+  color: var(--on-surface-variant); font-size: 13px; font-weight: 600; cursor: pointer;
+  display: inline-flex; align-items: center;
+}
+.bs-chip:hover { background: var(--surface-variant); }
+.bs-chip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.bs-chip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.bs-footer {
+  flex: none; padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--outline-variant); background: var(--surface-container-high);
+}
+.bs-apply {
+  width: 100%; min-height: 48px; border: none; border-radius: var(--r-full);
+  background: var(--primary); color: var(--on-primary); font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.bs-apply:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
 /* ============ Library page ============ */
 #sel-bar {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -521,26 +594,14 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           <button type="button" class="search-clear" id="lib-search-clear" aria-label="Clear search" tabindex="-1">×</button>
         </div>
         <span class="search-count" id="lib-search-count"></span>
-        <div class="filter-chips" id="lib-filter-chips" role="group" aria-label="Status filter">
-          <button type="button" class="fchip active" data-status="">All<span class="fchip-count" id="chip-count-all"></span></button>
-          <button type="button" class="fchip" data-status="wanted">Wanted<span class="fchip-count" id="chip-count-wanted"></span></button>
-          <button type="button" class="fchip" data-status="done">Done<span class="fchip-count" id="chip-count-done"></span></button>
-          <button type="button" class="fchip" data-status="error">Error<span class="fchip-count" id="chip-count-error"></span></button>
-          <button type="button" class="fchip" data-status="pending">Pending<span class="fchip-count" id="chip-count-pending"></span></button>
-          <button type="button" class="fchip" data-status="excluded">Excluded<span class="fchip-count" id="chip-count-excluded"></span></button>
-          <button type="button" class="fchip" data-status="queued">Queued<span class="fchip-count" id="chip-count-queued"></span></button>
-          <button type="button" class="fchip" data-status="movie">Movies<span class="fchip-count" id="chip-count-movie"></span></button>
-          <button type="button" class="fchip" data-status="series">Series<span class="fchip-count" id="chip-count-series"></span></button>
-        </div>
+        <button type="button" class="fchip filter-trigger" id="filter-open" aria-haspopup="dialog" aria-expanded="false">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+          Filters<span class="filter-badge" id="filter-badge" hidden></span>
+        </button>
         <button type="button" class="fchip sel-toggle" id="sel-toggle" aria-pressed="false">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
           Select
         </button>
-        <div class="seg" id="scope-seg" role="group" aria-label="Library scope">
-          <button type="button" class="seg-btn active" data-scope="active">Active</button>
-          <button type="button" class="seg-btn" data-scope="all">All</button>
-          <button type="button" class="seg-btn" data-scope="inactive">Inactive</button>
-        </div>
       </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
@@ -680,6 +741,48 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   <button type="button" class="rm-item" data-act="skip">Skip</button>
   <button type="button" class="rm-item rm-danger" data-act="delete">Delete</button>
   <button type="button" class="rm-item" data-act="exclude">Exclude</button>
+</div>
+
+<div class="bs-overlay" id="filter-overlay" hidden></div>
+<div class="bs-sheet" id="filter-sheet" role="dialog" aria-modal="true" aria-label="Filter &amp; Sort" hidden>
+  <div class="bs-handle" id="bs-handle" aria-hidden="true"></div>
+  <div class="bs-header">
+    <button type="button" class="bs-icon-btn" id="bs-close" aria-label="Close filters">×</button>
+    <span class="bs-title">Filter &amp; Sort</span>
+    <button type="button" class="bs-text-btn" id="bs-reset">Reset All</button>
+  </div>
+  <div class="bs-body">
+    <div class="bs-group">
+      <div class="bs-cat">Library Scope</div>
+      <div class="bs-seg" id="bs-scope" role="group" aria-label="Library scope">
+        <button type="button" class="bs-seg-btn" data-scope="active">Active</button>
+        <button type="button" class="bs-seg-btn" data-scope="all">All</button>
+        <button type="button" class="bs-seg-btn" data-scope="inactive">Inactive</button>
+      </div>
+    </div>
+    <div class="bs-group">
+      <div class="bs-cat">Media Type</div>
+      <div class="bs-seg" id="bs-kind" role="group" aria-label="Media type">
+        <button type="button" class="bs-seg-btn" data-kind="">All</button>
+        <button type="button" class="bs-seg-btn" data-kind="movie">Movies</button>
+        <button type="button" class="bs-seg-btn" data-kind="series">Series</button>
+      </div>
+    </div>
+    <div class="bs-group">
+      <div class="bs-cat">Status</div>
+      <div class="bs-chips" id="bs-status" role="group" aria-label="Status">
+        <button type="button" class="bs-chip" data-status="wanted">Wanted<span class="fchip-count" id="chip-count-wanted"></span></button>
+        <button type="button" class="bs-chip" data-status="done">Done<span class="fchip-count" id="chip-count-done"></span></button>
+        <button type="button" class="bs-chip" data-status="error">Error<span class="fchip-count" id="chip-count-error"></span></button>
+        <button type="button" class="bs-chip" data-status="pending">Pending<span class="fchip-count" id="chip-count-pending"></span></button>
+        <button type="button" class="bs-chip" data-status="excluded">Excluded<span class="fchip-count" id="chip-count-excluded"></span></button>
+        <button type="button" class="bs-chip" data-status="queued">Queued<span class="fchip-count" id="chip-count-queued"></span></button>
+      </div>
+    </div>
+  </div>
+  <div class="bs-footer">
+    <button type="button" class="bs-apply" id="bs-apply">Apply Filters</button>
+  </div>
 </div>
 <script>
 const LS_THEME = "asr-dash-theme";
@@ -1124,7 +1227,8 @@ function langChip(l) {
 }
 
 let libQuery = "";
-let libStatus = "";
+let libKind = "";            // "" | "movie" | "series"
+let libStatusSet = new Set(); // subset of wanted/done/error/pending/excluded/queued
 let selMode = false;
 let libVisible = [];
 let libScope = "active";
@@ -1214,20 +1318,15 @@ function relocateEpisodeCodes() {
 
 function libMatches(it, q) {
   const st = itemStatus(it);
-  if (libStatus) {
-    if (libStatus === "queued") {
-      if (!it.pending_action) return false;
-    } else if (libStatus === "wanted") {
-      if (st !== "wanted") return false;
-    } else if (libStatus === "movie") {
-      if (!(it.kind === "movie") || st === "excluded") return false;
-    } else if (libStatus === "series") {
-      if (!(it.kind === "series") || st === "excluded") return false;
-    } else if (libStatus === "excluded") {
-      if (st !== "excluded") return false;
-    } else if (st !== libStatus) {
-      return false;
+  if (libKind && it.kind !== libKind) return false;
+  if (libStatusSet.size) {
+    let ok = false;
+    for (const s of libStatusSet) {
+      if (s === "queued") { if (it.pending_action) { ok = true; break; } }
+      else if (s === "excluded") { if (st === "excluded") { ok = true; break; } }
+      else if (st === s) { ok = true; break; }
     }
+    if (!ok) return false;
   }
   if (q) {
     const hay = [
@@ -1254,7 +1353,7 @@ function libCounts(items) {
 
 function renderChipCounts(items) {
   const c = libCounts(items);
-  for (const st of ["all", "wanted", "done", "error", "pending", "excluded", "queued", "movie", "series"]) {
+  for (const st of ["wanted", "done", "error", "pending", "excluded", "queued"]) {
     const el = document.getElementById("chip-count-" + st);
     if (el) el.textContent = c[st];
   }
@@ -1445,22 +1544,191 @@ if (libSearchClear) {
     if (lastLibrary) renderLibrary(lastLibrary);
   });
 }
-for (const c of document.querySelectorAll("#lib-filter-chips .fchip")) {
-  c.addEventListener("click", function () {
-    libStatus = c.dataset.status || "";
-    for (const x of document.querySelectorAll("#lib-filter-chips .fchip")) x.classList.toggle("active", x === c);
-    if (lastLibrary) renderLibrary(lastLibrary);
+/* ============ Bottom-sheet filters ============ */
+let bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+const filterSheet = document.getElementById("filter-sheet");
+const filterOverlay = document.getElementById("filter-overlay");
+const filterTrigger = document.getElementById("filter-open");
+const bsHandle = document.getElementById("bs-handle");
+
+function syncFilterControls() {
+  const scopeBtns = document.querySelectorAll("#bs-scope .bs-seg-btn");
+  for (const b of scopeBtns) b.classList.toggle("active", b.dataset.scope === bsDraft.scope);
+  const kindBtns = document.querySelectorAll("#bs-kind .bs-seg-btn");
+  for (const b of kindBtns) b.classList.toggle("active", b.dataset.kind === bsDraft.kind);
+  const statusBtns = document.querySelectorAll("#bs-status .bs-chip");
+  for (const b of statusBtns) b.classList.toggle("active", bsDraft.status.has(b.dataset.status));
+}
+
+function bsLiveCount() {
+  if (!lastLibrary) return null;
+  const q = libQuery.trim().toLowerCase();
+  const items = lastLibrary.items || [];
+  const st = itemStatus;
+  const kind = bsDraft.kind, statusSet = bsDraft.status;
+  let n = 0;
+  for (const it of items) {
+    if (kind && it.kind !== kind) continue;
+    if (statusSet.size) {
+      let ok = false;
+      for (const s of statusSet) {
+        if (s === "queued") { if (it.pending_action) { ok = true; break; } }
+        else if (s === "excluded") { if (st(it) === "excluded") { ok = true; break; } }
+        else if (st(it) === s) { ok = true; break; }
+      }
+      if (!ok) continue;
+    }
+    if (q) {
+      const hay = [it.series, it.episode, it.title, itemKey(it), it.sonarr_episode_id,
+        (it.languages || []).map(function (l) { return l.language + " " + (l.prov || l.source || ""); }).join(" ")].join(" ").toLowerCase();
+      if (hay.indexOf(q) < 0) continue;
+    }
+    n++;
+  }
+  return n;
+}
+
+function updateApplyLabel() {
+  const btn = document.getElementById("bs-apply");
+  if (!btn) return;
+  const n = bsLiveCount();
+  if (n === null) { btn.textContent = "Apply Filters"; return; }
+  btn.textContent = n === 1 ? "Apply Filters (1 Item)" : "Apply Filters (" + n + " Items)";
+}
+
+function openFilterSheet() {
+  bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+  syncFilterControls();
+  filterOverlay.hidden = false;
+  filterSheet.hidden = false;
+  requestAnimationFrame(function () {
+    filterOverlay.classList.add("open");
+    filterSheet.classList.add("open");
+  });
+  if (filterTrigger) filterTrigger.setAttribute("aria-expanded", "true");
+  updateApplyLabel();
+  const first = filterSheet.querySelector(".bs-seg-btn, .bs-chip");
+  if (first) first.focus();
+}
+
+function closeFilterSheet(discard) {
+  if (discard) bsDraft = { scope: libScope, kind: libKind, status: new Set(libStatusSet) };
+  filterOverlay.classList.remove("open");
+  filterSheet.classList.remove("open");
+  if (filterTrigger) filterTrigger.setAttribute("aria-expanded", "false");
+  setTimeout(function () {
+    filterOverlay.hidden = true;
+    filterSheet.hidden = true;
+  }, 220);
+}
+
+function updateFilterBadge() {
+  let n = 0;
+  if (libScope !== "active") n++;
+  if (libKind) n++;
+  n += libStatusSet.size;
+  const b = document.getElementById("filter-badge");
+  if (!b) return;
+  if (n > 0) { b.textContent = n; b.hidden = false; }
+  else { b.textContent = ""; b.hidden = true; }
+}
+
+function bsCommitFilters() {
+  const scopeChanged = bsDraft.scope !== libScope;
+  libScope = bsDraft.scope;
+  libKind = bsDraft.kind;
+  libStatusSet = new Set(bsDraft.status);
+  closeFilterSheet(false);
+  updateFilterBadge();
+  if (scopeChanged) pollLibrary();
+  else if (lastLibrary) renderLibrary(lastLibrary);
+}
+
+/* Sheet wiring */
+if (filterTrigger) filterTrigger.addEventListener("click", openFilterSheet);
+if (filterOverlay) filterOverlay.addEventListener("click", function () { closeFilterSheet(true); });
+const bsCloseBtn = document.getElementById("bs-close");
+if (bsCloseBtn) bsCloseBtn.addEventListener("click", function () { closeFilterSheet(true); });
+const bsResetBtn = document.getElementById("bs-reset");
+if (bsResetBtn) {
+  bsResetBtn.addEventListener("click", function () {
+    bsDraft = { scope: "active", kind: "", status: new Set() };
+    syncFilterControls();
+    updateApplyLabel();
   });
 }
-const scopeSeg = document.getElementById("scope-seg");
-if (scopeSeg) {
-  scopeSeg.addEventListener("click", function (ev) {
+const bsApplyBtn = document.getElementById("bs-apply");
+if (bsApplyBtn) bsApplyBtn.addEventListener("click", bsCommitFilters);
+if (filterSheet) {
+  filterSheet.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") closeFilterSheet(true);
+  });
+}
+
+const bsScope = document.getElementById("bs-scope");
+if (bsScope) {
+  bsScope.addEventListener("click", function (ev) {
     const b = ev.target.closest("button[data-scope]");
     if (!b) return;
-    libScope = b.dataset.scope;
-    for (const x of scopeSeg.querySelectorAll("button[data-scope]")) x.classList.toggle("active", x === b);
-    pollLibrary();
+    bsDraft.scope = b.dataset.scope;
+    syncFilterControls();
+    updateApplyLabel();
   });
+}
+const bsKind = document.getElementById("bs-kind");
+if (bsKind) {
+  bsKind.addEventListener("click", function (ev) {
+    const b = ev.target.closest("button[data-kind]");
+    if (!b) return;
+    bsDraft.kind = b.dataset.kind;
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+const bsStatus = document.getElementById("bs-status");
+if (bsStatus) {
+  bsStatus.addEventListener("click", function (ev) {
+    const b = ev.target.closest("button[data-status]");
+    if (!b) return;
+    const s = b.dataset.status;
+    if (bsDraft.status.has(s)) bsDraft.status.delete(s);
+    else bsDraft.status.add(s);
+    syncFilterControls();
+    updateApplyLabel();
+  });
+}
+
+/* Swipe-down dismiss (design guide §3) */
+let bsDragStartY = null;
+function bsDragStart(ev) {
+  const body = filterSheet ? filterSheet.querySelector(".bs-body") : null;
+  if (body && body.scrollTop > 0) return;
+  const pt = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
+  bsDragStartY = pt.clientY;
+}
+function bsDragMove(ev) {
+  if (bsDragStartY === null) return;
+  const pt = ev.touches && ev.touches[0] ? ev.touches[0] : ev;
+  if (pt.clientY - bsDragStartY > 60) {
+    bsDragStartY = null;
+    closeFilterSheet(true);
+  }
+}
+function bsDragEnd() { bsDragStartY = null; }
+if (bsHandle) {
+  bsHandle.addEventListener("pointerdown", bsDragStart);
+  bsHandle.addEventListener("pointermove", bsDragMove);
+  bsHandle.addEventListener("pointerup", bsDragEnd);
+  bsHandle.addEventListener("pointercancel", bsDragEnd);
+}
+if (filterSheet) {
+  filterSheet.addEventListener("pointerdown", function (ev) {
+    const body = filterSheet.querySelector(".bs-body");
+    if (body && body.scrollTop === 0) bsDragStart(ev);
+  });
+  filterSheet.addEventListener("pointermove", bsDragMove);
+  filterSheet.addEventListener("pointerup", bsDragEnd);
+  filterSheet.addEventListener("pointercancel", bsDragEnd);
 }
 const actSearchInput = document.getElementById("act-search-input");
 if (actSearchInput) {
@@ -2089,6 +2357,7 @@ const cfgDiscardBtn = document.getElementById("cfg-discard");
 if (cfgDiscardBtn) cfgDiscardBtn.addEventListener("click", loadControlConfig);
 
 showPage("library");
+updateFilterBadge();
 pollStatus();
 pollProvenance();
 pollLists();
