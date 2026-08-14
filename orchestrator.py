@@ -173,6 +173,7 @@ RETIME_MIN_ANCHOR_FRAC = float(os.environ.get("RETIME_MIN_ANCHOR_FRAC", "0.25"))
 _stop_requested = False
 _paused = False
 _run_once_requested = False
+_current = None  # {"kind","episode_id","series","tag"/"title","lang","stage","since"}
 _last_pass_stats = None
 _started_at = datetime.now(timezone.utc)
 _consecutive_failures = 0
@@ -4005,7 +4006,7 @@ def _order_pass_candidates(wanted_items, movie_items, regen_items, max_eps):
 
 
 def run_pass():
-    global _paused
+    global _paused, _current
     cfg = load_config()
     target_langs = set(cfg["TARGET_LANGS"])
     key = cfg.get("TRANSLATE_API_KEY", "")
@@ -4154,10 +4155,20 @@ def run_pass():
                 t0 = time.time()
                 wav_path = srt_path = ""
                 try:
+                    _current = {
+                        "kind": kind,
+                        "episode_id": ep_id,
+                        "series": series,
+                        "lang": lang,
+                        "stage": "asr",
+                        "since": datetime.now(timezone.utc).isoformat(),
+                    }
                     if item.get("movie"):
                         movie_id = item["radarrId"]
                         title = item.get("movieTitle") or "?"
                         tag = "MOVIE"
+                        if _current:
+                            _current["title"] = title
                         container_path = item["path"]
                         media_path = map_path(container_path)
                         if not os.path.isfile(media_path):
@@ -4235,6 +4246,8 @@ def run_pass():
                                 f"  MOVIE {title} [{ladder['kind']}->{lang}] ladder "
                                 f"source {ladder['source_path']}"
                             )
+                            if _current:
+                                _current["stage"] = "translate"
                             futures.append(
                                 pool.submit(
                                     process_ladder,
@@ -4293,6 +4306,8 @@ def run_pass():
                                 f"  MOVIE [{src}->{lang}] ASR {asr_elapsed:.0f}s, "
                                 f"{len(cues)} cues"
                             )
+                        if _current:
+                            _current["stage"] = "translate"
                         futures.append(
                             pool.submit(
                                 process_after_asr,
@@ -4322,6 +4337,8 @@ def run_pass():
                         if isinstance(season, int) and isinstance(episode_num, int)
                         else f"S{season}E{episode_num}"
                     )
+                    if _current:
+                        _current["tag"] = tag
                     ef = info.get("episodeFile") or {}
                     if not info.get("hasFile") or not ef.get("path"):
                         log(f"skip: {tag} {series} [{lang}] hasFile=false or no path")
@@ -4409,6 +4426,8 @@ def run_pass():
                         log(
                             f"  {tag} {series} [{ladder['kind']}->{lang}] ladder source {ladder['source_path']}"
                         )
+                        if _current:
+                            _current["stage"] = "translate"
                         futures.append(
                             pool.submit(
                                 process_ladder,
@@ -4452,6 +4471,8 @@ def run_pass():
                         log(
                             f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
                         )
+                    if _current:
+                        _current["stage"] = "translate"
                     futures.append(
                         pool.submit(
                             process_after_asr,
@@ -4473,6 +4494,7 @@ def run_pass():
                     )
                 except Exception as exc:
                     failed += 1
+                    _current = None
                     for f in (wav_path, srt_path):
                         if f:
                             try:
@@ -4495,6 +4517,7 @@ def run_pass():
                     )
 
         for fut in as_completed(futures):
+            _current = None
             if fut.result() == "done":
                 done += 1
             else:
@@ -4524,6 +4547,7 @@ def run_pass():
                 movies_remaining = len(movie_candidates(cfg, target_langs))
             except Exception:
                 movies_remaining = None
+    _current = None
     log(
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
         f"wanted_before={wanted_before} wanted_after={wanted_after} "
@@ -4641,6 +4665,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                     "paused": _paused,
                     "run_once_requested": _run_once_requested,
                     "last_pass": _last_pass_stats,
+                    "current": _current or None,
                     "movies_remaining": movies_remaining,
                     "state_counts": self._state_counts(),
                     "consecutive_failures": _consecutive_failures,
