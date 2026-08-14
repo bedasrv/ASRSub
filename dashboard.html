@@ -158,6 +158,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.pending { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .t-pill.excluded, .t-pill.new, .t-pill.neutral, .t-pill.idle { background: var(--surface-variant); color: var(--on-surface-variant); }
 .t-pill.ai, .t-pill.movie { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.t-pill.queued { background: transparent; border: 1px dashed var(--primary); color: var(--primary); }
 .prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
 .prov-external { background: var(--run); color: var(--inverse-on-surface); }
 .prov-asr { background: var(--tertiary-container); color: var(--on-tertiary-container); }
@@ -494,6 +495,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <div class="sec-title">Queue &amp; Progress</div>
         <div id="progress-body"></div>
         <div id="st-lastpass" class="lastpass"></div>
+        <div id="st-pend" class="lastpass"></div>
       </div>
       <div class="stat-card">
         <div class="sec-title">Hardware &amp; Models</div>
@@ -705,6 +707,20 @@ function renderStatus(data) {
   document.getElementById("st-failures").textContent = daemon.consecutive_failures != null ? daemon.consecutive_failures : "–";
   document.getElementById("st-started").textContent = daemon.started_at ? relTime(daemon.started_at) : "–";
   document.getElementById("st-runonce").textContent = daemon.run_once_requested ? "yes" : "no";
+
+  const pend = data.pending_actions || { total: 0 };
+  const pel = document.getElementById("st-pend");
+  if (pel) {
+    if (pend.total > 0) {
+      const parts = [];
+      if (pend.retry) parts.push("retry " + pend.retry);
+      if (pend.delete) parts.push("delete " + pend.delete);
+      if (pend.skip) parts.push("skip " + pend.skip);
+      pel.textContent = "Pending actions: " + pend.total + (parts.length ? " (" + parts.join(" · ") + ")" : "");
+    } else {
+      pel.textContent = "";
+    }
+  }
 
   renderProgress(data);
   renderGpu(data.gpu || {}, data.llama || {}, data.models || {});
@@ -1013,6 +1029,7 @@ function libRowHTML(it) {
     "</div>" +
     '<div class="f-right">' +
     '<div class="fr-line1">' + libKindChip(it) + libStatusCell(it) +
+    (it.pending_action ? '<span class="t-pill queued">queued · ' + esc(it.pending_action) + '</span>' : "") +
     '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for ' + id + '">' + KEBAB_SVG + "</button></div>" +
     (langs ? '<div class="fr-line2">' + langs + "</div>" : "") +
     "</div></div>"
