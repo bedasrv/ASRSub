@@ -153,7 +153,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.done { background: var(--secondary-container); color: var(--on-secondary-container); }
 .t-pill.error { background: var(--error-container); color: var(--on-error-container); }
 .t-pill.pending { background: var(--tertiary-container); color: var(--on-tertiary-container); }
-.t-pill.excluded, .t-pill.new, .t-pill.neutral { background: var(--surface-variant); color: var(--on-surface-variant); }
+.t-pill.excluded, .t-pill.new, .t-pill.neutral, .t-pill.idle { background: var(--surface-variant); color: var(--on-surface-variant); }
 .t-pill.ai, .t-pill.movie { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
 .prov-external { background: var(--run); color: var(--inverse-on-surface); }
@@ -407,6 +407,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
           Select
         </button>
+        <button type="button" class="m3-btn text" id="scope-toggle">Show: Active</button>
       </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
@@ -418,6 +419,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <button class="m3-btn filled" id="batch-retry" data-batch="retry" disabled>Retry</button>
         <button class="m3-btn outlined danger" id="batch-delete" data-batch="delete" disabled>Delete</button>
         <button class="m3-btn tonal" id="batch-exclude" data-batch="exclude" disabled>Exclude</button>
+        <button class="m3-btn tonal" id="batch-unexclude" data-batch="unexclude" disabled>Unexclude</button>
         <button class="m3-btn text" id="sel-clear">Clear</button>
       </div>
       <div id="library-list"><div class="empty">loading…</div></div>
@@ -849,7 +851,7 @@ function selectedIds() {
 function updateSelBar() {
   const n = selectedIds().length;
   document.getElementById("sel-count").textContent = n + " selected";
-  for (const act of ["retry", "delete", "exclude"]) {
+  for (const act of ["retry", "delete", "exclude", "unexclude"]) {
     const b = document.getElementById("batch-" + act);
     if (b) b.disabled = n === 0;
   }
@@ -882,6 +884,7 @@ let libQuery = "";
 let libStatus = "";
 let selMode = false;
 let libVisible = [];
+let libScope = "active";
 
 function setSearchCount(id, n, m) {
   const el = document.getElementById(id);
@@ -890,20 +893,24 @@ function setSearchCount(id, n, m) {
 
 const KEBAB_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
 
-function libStatusCell(it) {
-  if (libIsExcluded(it)) return '<span class="t-pill excluded">excluded</span>';
-  if (it.wanted) return '<span class="t-pill wanted">wanted</span>';
+function itemStatus(it) {
+  if (libIsExcluded(it)) return "excluded";
+  if (it.wanted) return "wanted";
   const sts = (it.languages || []).map(function (l) { return l.status || "wanted"; });
-  if (it.kind === "movie") {
-    if (sts.indexOf("error") >= 0) return '<span class="t-pill error">error</span>';
-    if (sts.indexOf("pending") >= 0) return '<span class="t-pill pending">pending</span>';
-    if (sts.indexOf("done") >= 0) return '<span class="t-pill done">done</span>';
-    return '<span class="t-pill movie">movie</span>';
-  }
-  if (sts.indexOf("error") >= 0) return '<span class="t-pill error">error</span>';
-  if (sts.indexOf("pending") >= 0) return '<span class="t-pill pending">pending</span>';
-  if (sts.indexOf("done") >= 0) return '<span class="t-pill done">done</span>';
-  return '<span class="muted">—</span>';
+  if (sts.indexOf("error") >= 0) return "error";
+  if (sts.indexOf("pending") >= 0) return "pending";
+  if (sts.indexOf("done") >= 0) return "done";
+  return "idle";
+}
+
+function libStatusCell(it) {
+  const st = itemStatus(it);
+  const cls = st === "excluded" ? "excluded" : st === "wanted" ? "wanted" : st === "error" ? "error" : st === "pending" ? "pending" : st === "done" ? "done" : "idle";
+  return '<span class="t-pill ' + cls + '">' + st + "</span>";
+}
+
+function libKindChip(it) {
+  return '<span class="t-pill neutral">' + (it.kind === "movie" ? "MOVIE" : "SERIES") + "</span>";
 }
 
 function libRowHTML(it) {
@@ -918,7 +925,7 @@ function libRowHTML(it) {
     '<div class="f-sub">' + (sub ? sub : '<span class="muted">—</span>') + "</div>" +
     "</div>" +
     '<div class="f-right">' +
-    '<div class="fr-line1">' + libStatusCell(it) +
+    '<div class="fr-line1">' + libKindChip(it) + libStatusCell(it) +
     '<button type="button" class="kebab" data-menu="' + id + '" aria-label="Actions for ' + id + '">' + KEBAB_SVG + "</button></div>" +
     (langs ? '<div class="fr-line2">' + langs + "</div>" : "") +
     "</div></div>"
@@ -926,17 +933,15 @@ function libRowHTML(it) {
 }
 
 function libMatches(it, q) {
-  const ex = libIsExcluded(it);
+  const st = itemStatus(it);
   if (libStatus) {
     if (libStatus === "wanted") {
-      if (!it.wanted || ex) return false;
+      if (st !== "wanted") return false;
     } else if (libStatus === "movie") {
-      if (!(it.kind === "movie") || ex) return false;
+      if (!(it.kind === "movie") || st === "excluded") return false;
     } else if (libStatus === "excluded") {
-      if (!ex) return false;
-    } else if (ex || !(it.languages || []).some(function (l) {
-      return (l.status || "wanted") === libStatus;
-    })) {
+      if (st !== "excluded") return false;
+    } else if (st !== libStatus) {
       return false;
     }
   }
@@ -953,15 +958,10 @@ function libMatches(it, q) {
 function libCounts(items) {
   const c = { all: items.length, wanted: 0, done: 0, error: 0, pending: 0, excluded: 0, movie: 0 };
   for (const it of items) {
-    const ex = libIsExcluded(it);
-    if (ex) { c.excluded++; continue; }
+    const st = itemStatus(it);
+    if (st === "excluded") { c.excluded++; continue; }
+    if (c[st] != null) c[st]++;
     if (it.kind === "movie") c.movie++;
-    if (it.wanted) c.wanted++;
-    const sts = {};
-    for (const l of (it.languages || [])) sts[l.status || "wanted"] = true;
-    if (sts.done) c.done++;
-    if (sts.error) c.error++;
-    if (sts.pending) c.pending++;
   }
   return c;
 }
@@ -1037,7 +1037,7 @@ function itemLangTarget(it) {
 
 async function pollLibrary() {
   try {
-    const lib = await api("/api2/library");
+    const lib = await api("/api2/library" + (libScope === "all" ? "?scope=all" : ""));
     if (lib.status === 404) { libUnavailable("HTTP 404 — endpoint not ready yet"); return; }
     if (lib.status !== 200) { libUnavailable("HTTP " + lib.status); return; }
     const ex = await api("/api2/exclusions");
@@ -1163,6 +1163,14 @@ for (const c of document.querySelectorAll("#lib-filter-chips .fchip")) {
     libStatus = c.dataset.status || "";
     for (const x of document.querySelectorAll("#lib-filter-chips .fchip")) x.classList.toggle("active", x === c);
     if (lastLibrary) renderLibrary(lastLibrary);
+  });
+}
+const scopeToggle = document.getElementById("scope-toggle");
+if (scopeToggle) {
+  scopeToggle.addEventListener("click", function () {
+    libScope = libScope === "all" ? "active" : "all";
+    scopeToggle.textContent = libScope === "all" ? "Show: All" : "Show: Active";
+    pollLibrary();
   });
 }
 const actSearchInput = document.getElementById("act-search-input");
@@ -1358,7 +1366,7 @@ const selClear = document.getElementById("sel-clear");
 if (selClear) {
   selClear.addEventListener("click", function () { selectAll(false); });
 }
-for (const act of ["retry", "delete", "exclude"]) {
+for (const act of ["retry", "delete", "exclude", "unexclude"]) {
   const b = document.getElementById("batch-" + act);
   if (b) b.addEventListener("click", function () { batchAction(act); });
 }
