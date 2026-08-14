@@ -90,6 +90,51 @@ EP_LABEL_RE = re.compile(r"(\d+)x(\d+)")
 # (eng/jpn/ind merge into en/ja/id so provenance rows don't duplicate).
 LANG_NORM = {"eng": "en", "jpn": "ja", "ind": "id", "en": "en", "ja": "ja", "id": "id"}
 
+# Code-default values for keys that only exist as orchestrator module defaults
+# (not in pipeline.env / config.overrides.json). Mirrors orchestrator.py. Used
+# so GET /api2/config exposes every key the Settings UI renders.
+CONFIG_DEFAULTS = {
+    "ALIGN_ENABLED": "true",
+    "ALIGN_MAX_OFFSET_S": "1.5",
+    "ALIGN_MAX_OFFSET_SECONDS": "60",
+    "RETIME_ENABLED": "true",
+    "RETIME_TEXT_THRESHOLD": "0.55",
+    "RETIME_MIN_ANCHOR_FRAC": "0.25",
+    "RETIME_MAX_RATIO": "3.0",
+    "CPS_MERGE_MAX": "20",
+    "CPS_MERGE_MAX_CHARS": "84",
+    "CPS_MERGE_MAX_DUR_MS": "7000",
+    "CPS_MERGE_MAX_GAP_MS": "1000",
+    "LADDER_COOLDOWN_H": "24",
+    "LADDER_MIN_CHARS": "1500",
+    "LADDER_MIN_CJK": "0.6",
+    "LADDER_MIN_CUES": "40",
+    "LADDER_SPAN_TOLERANCE": "0.15",
+    "LADDER_UPGRADE_BUDGET": "4",
+    "LADDER_SKIP_REFINED": "true",
+    "TRANSLATE_CHUNK": "10",
+    "TRANSLATE_CONTEXT_LINES": "2",
+    "TRANSLATE_FALLBACK_MODELS": "",
+    "MAX_TRANSLATE_WORKERS": "1",
+    "AI_MARKER_CUE": "1",
+    "AI_MARKER_CUE_MS": "1500",
+    "SDH_PLACEHOLDERS": '["（歌詞）"]',
+    "WEBHOOK_URLS": "",
+    "WEBHOOK_SECRET": "",
+    "WEBHOOK_EVENTS": "",
+    "HERMES_WEBHOOK_URL": "",
+    "HERMES_WEBHOOK_SECRET": "",
+    "WEBHOOK_PORT": "8085",
+    "STATE_FILE": STATE_FILE,
+    "ACTIONS_FILE": ACTIONS_FILE,
+    "EXCLUSIONS_FILE": EXCLUSIONS_FILE,
+    "REGISTRY_FILE": REGISTRY_FILE,
+    "REFINE_STATE_FILE": REFINE_FILE,
+    "ASR_CACHE_DIR": os.path.join(
+        os.path.expanduser("~"), ".cache", "asr-pipeline", "asr"
+    ),
+}
+
 
 def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -923,7 +968,9 @@ class ControlAPIv2:
         }
 
     def _h_config(self, body, id=None):
-        return 200, self._mask(self._env())
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg.update(self._env())
+        return 200, self._mask(cfg)
 
     def _read_overrides(self):
         try:
