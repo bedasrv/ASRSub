@@ -102,6 +102,10 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   font-size: 13px; font-weight: 600; line-height: 18px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.feed-title {
+  font-size: 12px; font-weight: 600; line-height: 18px;
+  overflow: hidden; white-space: nowrap;
+}
 .f-sub {
   font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 1px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -157,18 +161,27 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .t-pill.ai, .t-pill.movie { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .prov-embedded { background: var(--ok); color: var(--inverse-on-surface); }
 .prov-external { background: var(--run); color: var(--inverse-on-surface); }
+.prov-asr { background: var(--tertiary-container); color: var(--on-tertiary-container); }
 .prov-unknown { background: var(--surface-variant); color: var(--on-surface-variant); }
 .prov-langchip { background: var(--secondary-container); color: var(--on-secondary-container); }
+.t-pill.lang { background: transparent; border: 1px solid var(--outline); color: var(--on-surface-variant); }
+.prov-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.prov-table th { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--on-surface-variant); text-align: left; padding: 4px 8px; }
+.prov-table td { padding: 4px 8px; border-top: 1px solid var(--divider); }
+.prov-table tr.prov-total td { font-weight: 700; border-top: 2px solid var(--outline); }
 
 /* ============ Status page ============ */
 .gpu-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px; }
 .gpu-name { font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gpu-util { font-size: 18px; font-weight: 600; line-height: 22px; color: var(--primary); }
+.gpu-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--on-surface-variant); font-weight: 600; }
 .vram { margin-top: 8px; }
-.vram-bar { height: 8px; background: var(--surface-variant); border-radius: var(--r-full); overflow: hidden; }
-.vram-fill { height: 100%; background: var(--primary); border-radius: var(--r-full); transition: width .4s; }
+.vram-bar, .gpu-core-bar { height: 8px; background: var(--surface-variant); border-radius: var(--r-full); overflow: hidden; }
+.vram-fill, .gpu-core-fill { height: 100%; background: var(--primary); border-radius: var(--r-full); transition: width .4s; }
+.gpu-core-fill.hot { background: var(--run); }
 .vram-txt { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 6px; }
 .model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.model-name { margin-top: 6px; font-size: 12px; color: var(--on-surface-variant); }
 .unavail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .gpu-err { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); margin-top: 8px; word-break: break-word; }
 
@@ -240,6 +253,15 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .fchip-count { margin-left: 5px; font-size: 11px; font-weight: 600; opacity: .7; }
 .fchip.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
 .fchip:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.seg { display: inline-flex; gap: 2px; }
+.seg-btn {
+  height: 22px; padding: 0 10px; border-radius: var(--r-full); border: 1px solid var(--outline-variant);
+  background: transparent; color: var(--on-surface-variant); font-size: 11px; font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.seg-btn:hover { background: var(--surface-variant); }
+.seg-btn.active { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 700; }
+.seg-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 .sel-toggle { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 12px; }
 .sel-toggle svg { flex: none; }
 
@@ -407,7 +429,10 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12l5 5L20 6"/></svg>
           Select
         </button>
-        <button type="button" class="m3-btn text" id="scope-toggle">Show: Active</button>
+        <div class="seg" id="scope-seg" role="group" aria-label="Library scope">
+          <button type="button" class="seg-btn active" data-scope="active">Active</button>
+          <button type="button" class="seg-btn" data-scope="all">All</button>
+        </div>
       </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
@@ -450,7 +475,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
       <div class="ctl-actions">
         <button id="act-wake" class="m3-btn tonal" onclick="ctlAction('wake')">Wake now</button>
         <button id="act-run-once" class="m3-btn tonal" onclick="ctlAction('run-once')">Run once</button>
-        <button id="act-pause" class="m3-btn outlined danger" onclick="ctlAction('pause')">Pause</button>
+        <button id="act-pause" class="m3-btn outlined" onclick="ctlAction('pause')">Pause</button>
         <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
       </div>
       <div class="stats-grid">
@@ -703,7 +728,7 @@ function renderStatus(data) {
   if (sc.total != null) {
     cEl.innerHTML =
       '<span class="pill"><span class="dot up"></span>' + esc(sc.done ?? "?") + " done</span>" +
-      '<span class="pill"><span class="dot down"></span>' + esc(sc.error ?? "?") + " error</span>" +
+      '<span class="pill"><span class="dot ' + ((sc.error || 0) > 0 ? "down" : "up") + '"></span>' + esc(sc.error ?? "?") + " error</span>" +
       '<span class="pill"><span class="dot stopped"></span>' + esc(sc.pending ?? "?") + " pending (" + esc(sc.total) + ")</span>";
   } else {
     cEl.innerHTML = "";
@@ -713,8 +738,18 @@ function renderStatus(data) {
   const pa = document.getElementById("act-pause");
   const re = document.getElementById("act-resume");
   if (pa && re) {
-    pa.disabled = !reachable || !!daemon.paused;
-    re.disabled = !reachable || !daemon.paused;
+    if (!reachable) {
+      pa.style.display = "none";
+      re.style.display = "none";
+    } else if (daemon.paused) {
+      pa.style.display = "none";
+      re.style.display = "";
+      re.className = "m3-btn filled";
+    } else {
+      pa.style.display = "";
+      re.style.display = "none";
+      pa.className = "m3-btn outlined";
+    }
   }
 }
 
@@ -725,11 +760,16 @@ function renderGpu(gpu, llama) {
   if (gpu.available && g) {
     const used = g.memory_used_mb, total = g.memory_total_mb;
     const pct = used != null && total ? Math.round((used / total) * 100) : null;
+    const util = g.util_pct != null ? g.util_pct : null;
+    const utilPct = util != null ? Math.max(0, Math.min(100, util)) : 0;
     el.innerHTML =
-      '<div class="gpu-row"><span class="gpu-name">' + esc(g.name) + "</span>" +
-      '<span class="gpu-util">' + (g.util_pct != null ? esc(g.util_pct) + "%" : "?") + "</span></div>" +
-      '<div class="vram"><div class="vram-bar"><div class="vram-fill" style="width:' + (pct != null ? pct : 0) + '%"></div></div>' +
-      '<div class="vram-txt">VRAM ' + fmtMB(used) + " / " + fmtMB(total) + (pct != null ? " (" + pct + "%)" : "") + "</div></div>";
+      '<div class="gpu-row"><span class="gpu-name">' + esc(g.name) + "</span></div>" +
+      '<div class="vram"><div class="gpu-label">GPU Core</div>' +
+      '<div class="gpu-core-bar" style="margin-top:4px"><div class="gpu-core-fill' + (util != null && util >= 80 ? " hot" : "") + '" style="width:' + utilPct + '%"></div></div>' +
+      '<div class="vram-txt">' + (util != null ? esc(util) + "%" : "?") + "</div></div>" +
+      '<div class="vram"><div class="gpu-label">VRAM</div>' +
+      '<div class="vram-bar" style="margin-top:4px"><div class="vram-fill" style="width:' + (pct != null ? pct : 0) + '%"></div></div>' +
+      '<div class="vram-txt">' + fmtMB(used) + " / " + fmtMB(total) + (pct != null ? " (" + pct + "%)" : "") + "</div></div>";
   } else {
     el.innerHTML =
       '<div class="unavail"><span class="chip chip-excluded">GPU unavailable</span>' +
@@ -742,12 +782,15 @@ function renderModel(llama) {
   const el = document.getElementById("model-body");
   if (!el) return;
   const up = !!llama.up;
-  el.innerHTML =
+  let html =
     '<div class="model-row">' +
     '<span class="pill"><span class="dot ' + (up ? "up" : "down") + '"></span>' +
     "<span>" + (up ? "llama-server up" + (llama.latency_ms != null ? " (" + esc(llama.latency_ms) + "ms)" : "") : "llama-server down") + "</span></span>" +
-    (llama.model ? '<span class="pill mono">' + esc(llama.model) + "</span>" : "") +
     "</div>";
+  if (llama.model) {
+    html += '<div class="model-name mono">' + esc(llama.model) + "</div>";
+  }
+  el.innerHTML = html;
 }
 
 async function pollStatus() {
@@ -764,16 +807,25 @@ async function pollStatus() {
 }
 
 /* ============ Subtitle provenance (status page) ============ */
-function midEllipsis(s, max) {
+function smartEllipsis(s, max) {
   s = s == null ? "" : String(s);
   if (s.length <= max) return esc(s);
+  const m = s.match(/S\d{1,2}E\d{1,2}/i);
+  if (m && m.index + m[0].length <= max) {
+    const head = s.slice(0, m.index + m[0].length);
+    const tailLen = Math.min(6, Math.max(4, max - head.length - 1));
+    return esc(head) + "…" + esc(s.slice(s.length - tailLen));
+  }
   const keep = Math.floor((max - 1) / 2);
   return esc(s.slice(0, keep)) + "…" + esc(s.slice(s.length - keep));
 }
 
 function provKindChip(r) {
   const kind = r.source_kind || r.source || "unknown";
-  const cls = r.source_kind === "embedded" ? "prov-embedded" : r.source_kind === "external" ? "prov-external" : "prov-unknown";
+  let cls = "prov-unknown";
+  if (r.source_kind === "embedded") cls = "prov-embedded";
+  else if (r.source_kind === "external") cls = "prov-external";
+  else if (r.source === "asr") cls = "prov-asr";
   return '<span class="t-pill ' + cls + '">' + esc(kind) + "</span>";
 }
 
@@ -791,10 +843,16 @@ function renderProvenance(data) {
   const byLang = data.by_lang || {};
   const langNames = Object.keys(byLang).sort();
   if (langNames.length) {
-    langHtml = '<div class="pills" style="margin-top:8px">' + langNames.map(function (lg) {
+    let rows = "";
+    let tE = 0, tX = 0, tU = 0, tT = 0;
+    for (const lg of langNames) {
       const e = byLang[lg] || {};
-      return '<span class="chip prov-langchip">' + esc(lg) + ": " + esc(e.embedded ?? 0) + " embedded / " + esc(e.external ?? 0) + " external / " + esc(e.unknown ?? 0) + " unknown</span>";
-    }).join("") + "</div>";
+      const emb = e.embedded ?? 0, ext = e.external ?? 0, unk = e.unknown ?? 0, tot = e.total ?? 0;
+      tE += emb; tX += ext; tU += unk; tT += tot;
+      rows += '<tr><td>' + esc(String(lg).toUpperCase()) + '</td><td>' + esc(emb) + '</td><td>' + esc(ext) + '</td><td>' + esc(unk) + '</td><td>' + esc(tot) + '</td></tr>';
+    }
+    rows += '<tr class="prov-total"><td>TOTAL</td><td>' + esc(tE) + '</td><td>' + esc(tX) + '</td><td>' + esc(tU) + '</td><td>' + esc(tT) + '</td></tr>';
+    langHtml = '<table class="prov-table"><thead><tr><th>Language</th><th>Embedded</th><th>External</th><th>Unknown</th><th>Total</th></tr></thead><tbody>' + rows + '</tbody></table>';
   }
   const recent = data.recent || [];
   let feed = "";
@@ -805,10 +863,10 @@ function renderProvenance(data) {
       const rt = relTime(r.ts);
       return '<div class="f-row">' +
         '<div class="f-left">' +
-        '<div class="f-title" style="font-size:12px" title="' + esc(r.basename || "") + '">' + midEllipsis(r.basename, 64) + "</div>" +
+        '<div class="feed-title" title="' + esc(r.basename || "") + '">' + smartEllipsis(r.basename, 48) + "</div>" +
         "</div>" +
         '<div class="f-right"><div class="fr-line1">' +
-        (r.lang ? '<span class="t-pill prov-langchip">' + esc(r.lang) + "</span>" : "") +
+        (r.lang ? '<span class="t-pill lang">' + esc(r.lang) + "</span>" : "") +
         provKindChip(r) +
         (rt ? '<span class="muted" style="font:var(--t-bs)">' + rt + "</span>" : "") +
         "</div></div></div>";
@@ -1089,7 +1147,7 @@ function actRowHTML(it) {
     "</div>" +
     '<div class="f-right">' +
     '<div class="fr-line1">' + stBadges.join(" ") + "</div>" +
-    (it.language ? '<div class="fr-line2"><span class="lang-badge done">' + esc(it.language) + "</span></div>" : "") +
+    (it.language ? '<div class="fr-line2"><span class="t-pill lang">' + esc(it.language) + "</span></div>" : "") +
     "</div></div>"
   );
 }
@@ -1165,11 +1223,13 @@ for (const c of document.querySelectorAll("#lib-filter-chips .fchip")) {
     if (lastLibrary) renderLibrary(lastLibrary);
   });
 }
-const scopeToggle = document.getElementById("scope-toggle");
-if (scopeToggle) {
-  scopeToggle.addEventListener("click", function () {
-    libScope = libScope === "all" ? "active" : "all";
-    scopeToggle.textContent = libScope === "all" ? "Show: All" : "Show: Active";
+const scopeSeg = document.getElementById("scope-seg");
+if (scopeSeg) {
+  scopeSeg.addEventListener("click", function (ev) {
+    const b = ev.target.closest("button[data-scope]");
+    if (!b) return;
+    libScope = b.dataset.scope;
+    for (const x of scopeSeg.querySelectorAll("button[data-scope]")) x.classList.toggle("active", x === b);
     pollLibrary();
   });
 }
