@@ -546,10 +546,10 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%); z-index: 200;
   display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-radius: 28px;
-  background: color-mix(in srgb, var(--surface-container) 85%, transparent);
-  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  background: color-mix(in srgb, var(--surface-container) 96%, transparent);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
   border: 1px solid color-mix(in srgb, var(--on-surface) 10%, transparent);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .16), 0 2px 8px rgba(0, 0, 0, .12);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .32), 0 2px 10px rgba(0, 0, 0, .2);
 }
 .sel-dock[hidden] { display: none; }
 @keyframes dockIn {
@@ -558,14 +558,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   100% { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 .sel-dock:not([hidden]) { animation: dockIn .28s cubic-bezier(0.175, 0.885, 0.32, 1.125); }
-.dock-count { font-size: 12px; font-weight: 600; color: var(--on-surface-variant); white-space: nowrap; }
-.sel-num { display: inline-block; color: var(--primary); }
-.sel-num.roll { animation: numRoll .18s ease-out; }
-@keyframes numRoll {
-  0% { transform: translateY(70%); opacity: .2; }
-  100% { transform: translateY(0); opacity: 1; }
-}
-.dock-divider { width: 1px; height: 20px; background: color-mix(in srgb, var(--on-surface) 12%, transparent); margin: 0 6px; }
 .dock-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
   min-width: 48px; min-height: 48px; padding: 0 14px; border: none; border-radius: 24px;
@@ -577,7 +569,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .dock-btn.more { min-width: 40px; padding: 0; }
 .dock-btn:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
 .dock-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
-.dock-btn[disabled] { opacity: .3; pointer-events: none; }
+.dock-btn[disabled] { opacity: .58; pointer-events: none; }
 .dock-btn svg { flex: none; }
 .dock-menu {
   position: absolute; bottom: calc(100% + 8px); right: 0; min-width: 180px;
@@ -733,6 +725,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .bottom-nav .nav-item { flex: 1; height: 56px; gap: 1px; }
 .bottom-nav .nav-item .ind { width: 64px; height: 32px; }
 .bottom-nav .nav-item.active .ind { background: var(--secondary-container); }
+body.sel-mode .bottom-nav { display: none; }
 
 .nav-rail { display: none; }
 @media (min-width: 840px) {
@@ -803,8 +796,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
       </div>
       <div id="library-list"><div class="empty">loading…</div></div>
       <div id="sel-dock" class="sel-dock" hidden>
-        <span class="dock-count"><span class="sel-num" id="dock-num">0</span> selected</span>
-        <span class="dock-divider"></span>
         <button type="button" class="dock-btn primary" id="dock-retry" disabled aria-label="Retry selected episodes">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3.5v3.5h-3.5"/></svg>
           Retry
@@ -1490,7 +1481,7 @@ function buzz(pattern) {
   if (navigator.vibrate) navigator.vibrate(pattern);
 }
 
-let dockEl = null, dockRetry = null, dockDelete = null, dockMore = null, dockMenu = null, dockNum = null;
+let dockEl = null, dockRetry = null, dockDelete = null, dockMore = null, dockMenu = null;
 let selHeadCount = null, selHeadAll = null, selCancelBtn = null, libSearchUI = null, libSelUI = null;
 
 function cacheSelEls() {
@@ -1499,7 +1490,6 @@ function cacheSelEls() {
   dockDelete = document.getElementById("dock-delete");
   dockMore = document.getElementById("dock-more");
   dockMenu = document.getElementById("dock-menu");
-  dockNum = document.getElementById("dock-num");
   selHeadCount = document.getElementById("sel-head-count");
   selHeadAll = document.getElementById("sel-head-all");
   selCancelBtn = document.getElementById("sel-cancel");
@@ -1509,6 +1499,7 @@ function cacheSelEls() {
 
 function updateSelBar() {
   const n = selectedIds().length;
+  document.body.classList.toggle("sel-mode", selMode);
   if (dockEl) dockEl.hidden = !selMode;
   if (!selMode) {
     if (libSearchUI) libSearchUI.hidden = false;
@@ -1525,12 +1516,6 @@ function updateSelBar() {
   }
   if (selHeadAll) {
     selHeadAll.textContent = n > 0 && n === libVisible.length ? "Deselect All" : "Select All";
-  }
-  if (dockNum) {
-    dockNum.textContent = n;
-    dockNum.classList.remove("roll");
-    void dockNum.offsetWidth;
-    dockNum.classList.add("roll");
   }
   const any = n > 0;
   if (dockRetry) dockRetry.disabled = !any;
