@@ -1954,8 +1954,18 @@ class ControlAPIv2:
             body={"monitored": mon},
             timeout=10,
         )
-        if pcode != 200:
-            return 502, {"ok": False, "error": f"Sonarr PATCH failed (HTTP {pcode})"}
+        if pcode == 405:
+            # older Sonarr build has no PATCH on /episode; PUT with a partial
+            # body is accepted (202) and behaves the same.
+            pcode, _ = _http(
+                "PUT",
+                url_base + f"/episode/{id}",
+                headers={"X-Api-Key": cfg.get("SONARR_API_KEY", "")},
+                body={"monitored": mon},
+                timeout=10,
+            )
+        if pcode not in (200, 202):
+            return 502, {"ok": False, "error": f"Sonarr update failed (HTTP {pcode})"}
         self._cache.pop(("ep", id), None)
         return 200, {"ok": True, "monitored": mon}
 
