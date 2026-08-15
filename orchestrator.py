@@ -870,6 +870,11 @@ def _movie_sweep(cfg, target_langs):
     data = movies.get("data") or []
     total = movies.get("total", len(data))
     target_langs = set(target_langs)
+    done_keys = {
+        (e.get("kind") or "series", e.get("sonarrEpisodeId"), e.get("language"))
+        for e in load_state()
+        if e.get("status") == "done"
+    }
     candidates = []
     seen = set()
     for m in data:
@@ -887,8 +892,14 @@ def _movie_sweep(cfg, target_langs):
             continue
         stem = os.path.splitext(media_path)[0]
         title = m.get("title") or "?"
+        missing_codes = {
+            ms.get("code2") for ms in (m.get("missing_subtitles") or [])
+        }
         missing = []
         for lang in target_langs:
+            if ("movie", rid, lang) in done_keys and lang not in missing_codes:
+                log(f"movies: skip {title} [{lang}] already done (state)")
+                continue
             registered = registry_get(stem, lang)
             if registered and registered.get("source") in ("asr", "jpn", "eng"):
                 log(
@@ -4548,7 +4559,10 @@ def run_pass():
                     and (kind, ep_id, lang) in done_keys
                     and ep_id not in wanted_now
                 ):
-                    log(f"skip: S?E? {series} [{lang}] already done (state)")
+                    label = item.get("movieTitle") or series
+                    log(
+                        f"skip: {'MOVIE' if kind == 'movie' else 'S' + str(item.get('season')) + 'E' + str(item.get('episode'))} {label} [{lang}] already done (state)"
+                    )
                     skipped += 1
                     continue
                 if consec_errors.get((kind, ep_id, lang), 0) >= 2:

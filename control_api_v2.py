@@ -1089,6 +1089,12 @@ class ControlAPIv2:
                 tl = ",".join(x for x in tl if isinstance(x, str))
             target_langs = {x.strip() for x in str(tl).split(",") if x.strip()}
             root = self.opts.get("NAS_MEDIA_ROOT", "/mnt/nas/share/media").rstrip("/")
+            entries, _latest, _ll = self._state()
+            done_keys = {
+                (e.get("kind") or "series", e.get("sonarrEpisodeId"), e.get("language"))
+                for e in entries
+                if e.get("status") == "done"
+            }
             reg_rows = self._registry()
             reg_by_stem = {}
             for r in reg_rows:
@@ -1112,7 +1118,15 @@ class ControlAPIv2:
                 if not os.path.isfile(mapped):
                     continue
                 stems = [os.path.splitext(mapped)[0]]
+                missing_codes = {
+                    ms.get("code2") for ms in (m.get("missing_subtitles") or [])
+                }
                 for lang in target_langs:
+                    if (
+                        ("movie", m.get("radarrId"), lang) in done_keys
+                        and lang not in missing_codes
+                    ):
+                        continue
                     rec = None
                     for stem in stems:
                         rec = reg_by_stem.get(stem, {}).get(lang)
