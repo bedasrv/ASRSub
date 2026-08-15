@@ -341,6 +341,29 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
 /* ============ Search toolbar ============ */
 .search-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.lib-head {
+  position: sticky; top: 0; z-index: 60;
+  background: var(--surface);
+  margin: -12px -12px 8px; padding: 12px 12px 8px;
+  transition: top .22s cubic-bezier(0.05, 0.7, 0.1, 1.0);
+}
+.lib-head[hidden] { display: none; }
+@media (min-width: 840px) {
+  .lib-head { margin: -16px -16px 8px; padding: 16px 16px 8px; }
+}
+.search-bar.lib-head { top: 0; }
+.search-bar.hid { top: var(--hide-off, -60px); }
+#lib-sel-ui { align-items: center; justify-content: space-between; }
+.lib-sel-cancel {
+  display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 10px;
+  border: none; background: transparent; color: var(--on-surface-variant);
+  font-size: 13px; font-weight: 600; cursor: pointer; border-radius: var(--r-full);
+}
+.lib-sel-cancel:hover { background: var(--surface-variant); }
+.lib-sel-cancel svg { flex: none; }
+.lib-sel-count { font-size: 13px; font-weight: 600; color: var(--on-surface-variant); flex: 1 1 auto; text-align: center; min-width: 0; padding: 0 8px; }
+.lib-sel-count.accent { color: var(--primary); }
+.sel-all { height: 28px; }
 .search-field { position: relative; flex: 1 1 200px; min-width: 160px; }
 .search-field input[type="search"] {
   width: 100%; height: 32px; padding: 0 30px 0 12px; border-radius: var(--r-full);
@@ -518,15 +541,61 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 }
 
 /* ============ Library page ============ */
-#sel-bar {
-  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  position: sticky; top: 0; z-index: 15;
-  padding: 4px 0 6px; margin-bottom: 4px;
-  background: var(--surface); border-bottom: 1px solid var(--outline-variant);
+/* Floating selection Action Dock */
+.sel-dock {
+  position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%); z-index: 200;
+  display: flex; align-items: center; gap: 4px; padding: 8px 12px; border-radius: 28px;
+  background: color-mix(in srgb, var(--surface-container) 85%, transparent);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  border: 1px solid color-mix(in srgb, var(--on-surface) 10%, transparent);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .16), 0 2px 8px rgba(0, 0, 0, .12);
 }
-#sel-bar[hidden] { display: none; }
-.sel-count { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); flex: 1 1 auto; min-width: 84px; }
-#sel-bar .m3-btn { height: 28px; min-width: 0; padding: 0 10px; font-size: 12px; font-weight: 600; border-radius: var(--r-s); flex: none; }
+.sel-dock[hidden] { display: none; }
+@keyframes dockIn {
+  0% { opacity: 0; transform: translateX(-50%) scale(.92) translateY(16px); }
+  60% { opacity: 1; transform: translateX(-50%) scale(1.02) translateY(0); }
+  100% { opacity: 1; transform: translateX(-50%) scale(1); }
+}
+.sel-dock:not([hidden]) { animation: dockIn .28s cubic-bezier(0.175, 0.885, 0.32, 1.125); }
+.dock-count { font-size: 12px; font-weight: 600; color: var(--on-surface-variant); white-space: nowrap; }
+.sel-num { display: inline-block; color: var(--primary); }
+.sel-num.roll { animation: numRoll .18s ease-out; }
+@keyframes numRoll {
+  0% { transform: translateY(70%); opacity: .2; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+.dock-divider { width: 1px; height: 20px; background: color-mix(in srgb, var(--on-surface) 12%, transparent); margin: 0 6px; }
+.dock-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  min-width: 48px; min-height: 48px; padding: 0 14px; border: none; border-radius: 24px;
+  background: transparent; color: var(--on-surface); font-size: 13px; font-weight: 600;
+  cursor: pointer; white-space: nowrap;
+}
+.dock-btn.primary { color: var(--primary); }
+.dock-btn.danger { color: var(--error); margin-left: 8px; }
+.dock-btn.more { min-width: 40px; padding: 0; }
+.dock-btn:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.dock-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.dock-btn[disabled] { opacity: .3; pointer-events: none; }
+.dock-btn svg { flex: none; }
+.dock-menu {
+  position: absolute; bottom: calc(100% + 8px); right: 0; min-width: 180px;
+  border-radius: 12px; background: var(--surface-container-high);
+  border: 1px solid var(--outline); box-shadow: var(--sh2); padding: 4px;
+}
+.dock-menu[hidden] { display: none; }
+.dock-menu button {
+  display: block; width: 100%; text-align: left; padding: 10px 12px;
+  font-size: 13px; font-weight: 500; border: none; border-radius: 8px;
+  background: none; color: var(--on-surface); cursor: pointer;
+}
+.dock-menu button:hover { background: var(--surface-variant); }
+.dock-menu button.danger { color: var(--error); }
+@media (min-width: 840px) {
+  .sel-dock { bottom: 24px; }
+  .dock-btn { min-width: 40px; min-height: 40px; }
+}
 
 .check-wrap { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; cursor: pointer; }
 .m3-check {
@@ -680,21 +749,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   .nav-rail .nav-item.active .ind { background: var(--secondary-container); }
 }
 
-/* ============ FAB ============ */
-.fab {
-  position: fixed; right: 16px; bottom: 80px; z-index: 25;
-  display: flex; align-items: center; gap: 8px;
-  height: 56px; padding: 0 20px; border-radius: var(--r-l); border: none;
-  background: var(--primary-container); color: var(--on-primary-container);
-  box-shadow: var(--sh3); font: 600 14px/20px; cursor: pointer;
-}
-.fab::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; }
-.fab:hover::after { opacity: .08; }
-.fab:active::after { opacity: .12; }
-.fab:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.fab[hidden] { display: none; }
-@media (min-width: 840px) { .fab { bottom: 24px; right: 24px; } }
-
 /* ============ Toasts ============ */
 #toasts {
   position: fixed; left: 0; right: 0; bottom: 80px; z-index: 100; pointer-events: none;
@@ -720,7 +774,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
     <!-- ============ Library ============ -->
     <section class="page active" id="page-library" aria-label="Library">
-      <div class="search-bar">
+      <div class="search-bar lib-head lib-search-ui" id="lib-search-ui">
         <div class="search-field">
           <input type="search" id="lib-search-input" placeholder="Search series, episode, language…" aria-label="Search library">
           <button type="button" class="search-clear" id="lib-search-clear" aria-label="Clear search" tabindex="-1">×</button>
@@ -735,20 +789,38 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
           Select
         </button>
       </div>
+      <div class="search-bar lib-head" id="lib-sel-ui" hidden>
+        <button type="button" class="lib-sel-cancel" id="sel-cancel" aria-label="Cancel selection">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          Cancel
+        </button>
+        <span class="lib-sel-count" id="sel-head-count">0 selected</span>
+        <button type="button" class="fchip sel-all" id="sel-head-all">Select All</button>
+      </div>
       <div id="lib-banner" class="retry-banner" role="alert">
         <span id="lib-banner-msg"></span>
         <button class="m3-btn text" onclick="pollLibrary()">Retry</button>
       </div>
-      <div id="sel-bar" hidden>
-        <span class="sel-count" id="sel-count">0 selected</span>
-        <button class="m3-btn text" id="sel-all-btn">All</button>
-        <button class="m3-btn filled" id="batch-retry" data-batch="retry" disabled>Retry</button>
-        <button class="m3-btn outlined danger" id="batch-delete" data-batch="delete" disabled>Delete</button>
-        <button class="m3-btn tonal" id="batch-exclude" data-batch="exclude" disabled>Exclude</button>
-        <button class="m3-btn tonal" id="batch-unexclude" data-batch="unexclude" disabled>Unexclude</button>
-        <button class="m3-btn text" id="sel-clear">Clear</button>
-      </div>
       <div id="library-list"><div class="empty">loading…</div></div>
+      <div id="sel-dock" class="sel-dock" hidden>
+        <span class="dock-count"><span class="sel-num" id="dock-num">0</span> selected</span>
+        <span class="dock-divider"></span>
+        <button type="button" class="dock-btn primary" id="dock-retry" disabled aria-label="Retry selected episodes">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3.5v3.5h-3.5"/></svg>
+          Retry
+        </button>
+        <button type="button" class="dock-btn danger" id="dock-delete" disabled aria-label="Delete subtitles for selection">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>
+        </button>
+        <button type="button" class="dock-btn more" id="dock-more" disabled aria-label="More bulk actions">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+        </button>
+        <div class="dock-menu" id="dock-menu" hidden>
+          <button type="button" data-dock-act="exclude">Exclude</button>
+          <button type="button" data-dock-act="unexclude">Unexclude</button>
+          <button type="button" data-dock-act="export">Export Metadata</button>
+        </div>
+      </div>
     </section>
 
     <!-- ============ Activity ============ -->
@@ -861,11 +933,6 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
     <span>Settings</span>
   </button>
 </aside>
-
-<button id="fab-retry" class="fab" hidden>
-  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 3.5v3.5h-3.5"/></svg>
-  <span>Retry</span>
-</button>
 
 <div id="toasts"></div>
 <div id="row-menu" class="row-menu" hidden>
@@ -1001,6 +1068,64 @@ function relTime(ts) {
   if (h < 24) return h + "h ago";
   return Math.floor(h / 24) + "d ago";
 }
+
+/* ============ Scroll-aware library header ============ */
+let libHeader = null;
+let lastScrollY = 0;
+let headerTimer = null;
+let headerTicking = false;
+
+function showLibHeader() {
+  if (!libHeader) return;
+  libHeader.classList.remove("hid");
+}
+
+function hideLibHeader() {
+  if (!libHeader) return;
+  libHeader.classList.add("hid");
+}
+
+function libHeaderDecision() {
+  if (currentPage !== "library" || selMode) { showLibHeader(); return; }
+  if (filterSheet && !filterSheet.hidden) { showLibHeader(); return; }
+  const sy = window.scrollY;
+  const dy = sy - lastScrollY;
+  lastScrollY = sy;
+  if (sy <= 0) { showLibHeader(); return; }
+  if (dy < -40) { showLibHeader(); return; }   // rapid upward flick always re-pins
+  if (dy > 12) hideLibHeader();
+  else if (dy < -8) showLibHeader();
+}
+
+function onHeaderScroll() {
+  if (headerTicking) return;
+  headerTicking = true;
+  requestAnimationFrame(function () {
+    libHeaderDecision();
+    headerTicking = false;
+  });
+}
+
+function onPageShown() {
+  lastScrollY = window.scrollY;
+  libHeaderDecision();
+}
+
+function refreshHideOffset() {
+  if (!libHeader) return;
+  const off = -(libHeader.getBoundingClientRect().height + 8);
+  libHeader.style.setProperty("--hide-off", off + "px");
+}
+
+function initLibHeader() {
+  libHeader = document.getElementById("lib-search-ui");
+  refreshHideOffset();
+  window.addEventListener("scroll", onHeaderScroll, { passive: true });
+  window.addEventListener("resize", refreshHideOffset);
+  window.addEventListener("resize", onPageShown);
+  lastScrollY = window.scrollY;
+}
+
 function fmtDur(s) {
   if (s == null) return "";
   const total = Math.round(s);
@@ -1066,7 +1191,7 @@ function showPage(name) {
   if (name === "settings") loadControlConfig();
   if (name === "status") pollStatus();
   if (name === "library") pollLibrary();
-  updateFab();
+  onPageShown();
 }
 for (const b of document.querySelectorAll(".nav-item")) {
   b.addEventListener("click", function () { showPage(b.dataset.page); });
@@ -1361,20 +1486,61 @@ function selectedIds() {
   return Object.keys(selected).filter(function (k) { return selected[k]; });
 }
 
+function buzz(pattern) {
+  if (navigator.vibrate) navigator.vibrate(pattern);
+}
+
+let dockEl = null, dockRetry = null, dockDelete = null, dockMore = null, dockMenu = null, dockNum = null;
+let selHeadCount = null, selHeadAll = null, selCancelBtn = null, libSearchUI = null, libSelUI = null;
+
+function cacheSelEls() {
+  dockEl = document.getElementById("sel-dock");
+  dockRetry = document.getElementById("dock-retry");
+  dockDelete = document.getElementById("dock-delete");
+  dockMore = document.getElementById("dock-more");
+  dockMenu = document.getElementById("dock-menu");
+  dockNum = document.getElementById("dock-num");
+  selHeadCount = document.getElementById("sel-head-count");
+  selHeadAll = document.getElementById("sel-head-all");
+  selCancelBtn = document.getElementById("sel-cancel");
+  libSearchUI = document.getElementById("lib-search-ui");
+  libSelUI = document.getElementById("lib-sel-ui");
+}
+
 function updateSelBar() {
   const n = selectedIds().length;
-  document.getElementById("sel-count").textContent = n + " selected";
-  for (const act of ["retry", "delete", "exclude", "unexclude"]) {
-    const b = document.getElementById("batch-" + act);
-    if (b) b.disabled = n === 0;
+  if (dockEl) dockEl.hidden = !selMode;
+  if (!selMode) {
+    if (libSearchUI) libSearchUI.hidden = false;
+    if (libSelUI) libSelUI.hidden = true;
+    if (dockMenu) dockMenu.hidden = true;
+    showLibHeader();
+    return;
   }
-  const allBtn = document.getElementById("sel-all-btn");
-  if (allBtn) allBtn.textContent = n > 0 && n === libVisible.length ? "None" : "All";
-  updateFab();
+  if (libSearchUI) libSearchUI.hidden = true;
+  if (libSelUI) libSelUI.hidden = false;
+  if (selHeadCount) {
+    selHeadCount.textContent = n + " selected";
+    selHeadCount.classList.toggle("accent", n > 0);
+  }
+  if (selHeadAll) {
+    selHeadAll.textContent = n > 0 && n === libVisible.length ? "Deselect All" : "Select All";
+  }
+  if (dockNum) {
+    dockNum.textContent = n;
+    dockNum.classList.remove("roll");
+    void dockNum.offsetWidth;
+    dockNum.classList.add("roll");
+  }
+  const any = n > 0;
+  if (dockRetry) dockRetry.disabled = !any;
+  if (dockDelete) dockDelete.disabled = !any;
+  if (dockMore) dockMore.disabled = !any;
 }
 
 function toggleSelect(id, on) {
   selected[String(id)] = !!on;
+  buzz(10);
   updateSelBar();
 }
 
@@ -1382,7 +1548,27 @@ function selectAll(on) {
   for (const k of libVisible) selected[k] = on;
   const boxes = document.querySelectorAll("#library-list .m3-check");
   for (const b of boxes) b.checked = on;
+  buzz([10, 50, 10]);
   updateSelBar();
+}
+
+function exitSelMode() {
+  selMode = false;
+  selected = {};
+  closeDockMenu();
+  const st = document.getElementById("sel-toggle");
+  if (st) { st.classList.remove("active"); st.setAttribute("aria-pressed", "false"); }
+  if (lastLibrary) renderLibrary(lastLibrary);
+  updateSelBar();
+}
+
+function closeDockMenu() {
+  if (dockMenu) dockMenu.hidden = true;
+}
+
+function toggleDockMenu() {
+  if (!dockMenu) return;
+  dockMenu.hidden = !dockMenu.hidden;
 }
 
 function langChip(l) {
@@ -1764,18 +1950,15 @@ function renderLibrary(data) {
   for (const k of Object.keys(selected)) {
     if (!libraryItems[k]) delete selected[k];
   }
-  const bar = document.getElementById("sel-bar");
   libVisible = [];
   setSearchCount("lib-search-count", 0, items.length);
   if (!items.length) {
-    bar.hidden = true;
     list.innerHTML = libQuery.trim()
       ? '<div class="empty">no matches for "' + esc(libQuery.trim()) + '"</div>'
       : '<div class="empty">library is empty — nothing wanted right now</div>';
     updateSelBar();
     return;
   }
-  bar.hidden = !selMode;
   const q = libQuery.trim().toLowerCase();
   let filtered = items.filter(function (it) { return libMatches(it, q); });
   filtered = libSorter(filtered);
@@ -2344,12 +2527,19 @@ if (actSearchClear) {
 }
 
 /* ============ Actions ============ */
+function dockBusy(on) {
+  if (dockRetry) dockRetry.disabled = on || selectedIds().length === 0;
+  if (dockDelete) dockDelete.disabled = on || selectedIds().length === 0;
+  if (dockMore) dockMore.disabled = on || selectedIds().length === 0;
+  if (on) closeDockMenu();
+}
+
 async function batchAction(act) {
   let ids = selectedIds();
   if (!ids.length) return;
   if (act === "delete" && !confirm("Delete subtitles for " + ids.length + " selected episode(s)?")) return;
-  const btn = document.getElementById("batch-" + act);
-  btnBusy(btn, true);
+  if (act === "delete") buzz([60, 40, 60]);
+  dockBusy(true);
   let ok = 0, failed = 0, firstErr = "";
   for (const id of ids) {
     try {
@@ -2363,13 +2553,38 @@ async function batchAction(act) {
       }
     } catch (e) { failed++; if (!firstErr) firstErr = e.message; }
   }
-  btnBusy(btn, false);
+  dockBusy(false);
   let msg = act + " batch: " + ok + " ok" + (failed ? ", " + failed + " failed" : "");
   if (firstErr) msg += " — " + esc(firstErr);
   toast(msg, failed ? "err" : "ok");
   if (act === "exclude" || !failed) selectAll(false);
   pollLists();
   pollStatus();
+}
+
+function exportSelected() {
+  const items = selectedIds().map(function (k) { return libraryItems[String(k)]; })
+    .filter(Boolean)
+    .map(function (it) {
+      return {
+        item_key: it.item_key, kind: it.kind, series: it.series, episode: it.episode,
+        title: it.title, season: it.season, episode_number: it.episode_number,
+        sonarr_episode_id: it.sonarr_episode_id, status: itemStatus(it),
+        wanted: it.wanted, excluded: it.excluded, diag: it.diag || null,
+        pending_action: it.pending_action || null,
+        languages: (it.languages || []).map(function (l) {
+          return { language: l.language, status: l.status, prov: l.prov || null, source: l.source || null };
+        }),
+      };
+    });
+  if (!items.length) return;
+  const blob = new Blob([JSON.stringify(items, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "asrsub-selection.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast("exported " + items.length + " item(s)", "ok");
 }
 
 async function episodeAction(act, id, btn, langOverride) {
@@ -2460,10 +2675,6 @@ document.addEventListener("click", function (ev) {
   if (rowMenu.contains(ev.target) || ev.target.closest("button[data-menu]")) return;
   closeRowMenu();
 });
-document.addEventListener("keydown", function (ev) {
-  if (ev.key === "Escape") closeRowMenu();
-});
-
 const selToggle = document.getElementById("sel-toggle");
 if (selToggle) {
   selToggle.addEventListener("click", function () {
@@ -2472,6 +2683,7 @@ if (selToggle) {
     selToggle.setAttribute("aria-pressed", selMode ? "true" : "false");
     if (!selMode) selected = {};
     closeRowMenu();
+    closeDockMenu();
     if (lastLibrary) renderLibrary(lastLibrary);
     updateSelBar();
   });
@@ -2540,33 +2752,41 @@ document.addEventListener("click", function (ev) {
   mbPop.hidden = true;
 });
 document.addEventListener("keydown", function (ev) {
-  if (ev.key === "Escape" && mbPop && !mbPop.hidden) mbPop.hidden = true;
+  if (ev.key !== "Escape") return;
+  if (dockMenu && !dockMenu.hidden) { closeDockMenu(); return; }
+  if (openMenuId) { closeRowMenu(); return; }
+  if (mbPop && !mbPop.hidden) { mbPop.hidden = true; return; }
+  if (selMode) { exitSelMode(); }
 });
 
-const selAllBtn = document.getElementById("sel-all-btn");
-if (selAllBtn) {
-  selAllBtn.addEventListener("click", function () {
+function updateFab() {}
+
+/* Dock wiring */
+cacheSelEls();
+if (dockRetry) dockRetry.addEventListener("click", function () { closeDockMenu(); batchAction("retry"); });
+if (dockDelete) dockDelete.addEventListener("click", function () { closeDockMenu(); batchAction("delete"); });
+if (dockMore) dockMore.addEventListener("click", function (ev) { ev.stopPropagation(); toggleDockMenu(); });
+if (dockMenu) {
+  dockMenu.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-dock-act]");
+    if (!btn) return;
+    const act = btn.dataset.dockAct;
+    closeDockMenu();
+    if (act === "export") exportSelected();
+    else batchAction(act);
+  });
+}
+document.addEventListener("click", function (ev) {
+  if (dockMenu && !dockMenu.hidden && !ev.target.closest("#sel-dock")) dockMenu.hidden = true;
+});
+if (selHeadAll) {
+  selHeadAll.addEventListener("click", function () {
     const n = selectedIds().length;
     if (n > 0 && n === libVisible.length) selectAll(false);
     else selectAll(true);
   });
 }
-const selClear = document.getElementById("sel-clear");
-if (selClear) {
-  selClear.addEventListener("click", function () { selectAll(false); });
-}
-for (const act of ["retry", "delete", "exclude", "unexclude"]) {
-  const b = document.getElementById("batch-" + act);
-  if (b) b.addEventListener("click", function () { batchAction(act); });
-}
-document.getElementById("fab-retry").addEventListener("click", function () {
-  batchAction("retry");
-});
-
-function updateFab() {
-  const fab = document.getElementById("fab-retry");
-  fab.hidden = !(currentPage === "library" && selectedIds().length > 0);
-}
+if (selCancelBtn) selCancelBtn.addEventListener("click", exitSelMode);
 
 async function ctlAction(a) {
   const btn = document.getElementById("act-" + a);
@@ -2997,6 +3217,8 @@ const cfgDiscardBtn = document.getElementById("cfg-discard");
 if (cfgDiscardBtn) cfgDiscardBtn.addEventListener("click", loadControlConfig);
 
 showPage("library");
+initLibHeader();
+cacheSelEls();
 updateFilterBadge();
 pollStatus();
 pollProvenance();
