@@ -19,6 +19,10 @@
   --divider: var(--outline-variant);
   --inverse-surface: #0F172A; --inverse-on-surface: #FFFFFF;
   --ok: #146C2E; --ok-container: #E8F5E9; --run: #B25900; --run-container: #FFF3E0;
+  --mb-gray: #475569;   /* unmonitored — passive slate */
+  --mb-red: #B3261E;    /* no file — crimson (error base) */
+  --mb-green: #047857;  /* subs met — emerald */
+  --mb-amber: #B25900;  /* queued — amber */
   --r-s: 8px; --r-m: 12px; --r-l: 16px; --r-xl: 28px; --r-full: 999px;
   --sh1: 0 1px 2px rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15);
   --sh2: 0 1px 2px rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15);
@@ -41,6 +45,10 @@
     --outline: #334155; --outline-variant: #334155;
     --inverse-surface: #F8FAFC; --inverse-on-surface: #0F172A;
     --ok: #81C995; --ok-container: #1E3A2A; --run: #F9AB00; --run-container: #3B2F1D;
+    --mb-gray: #94A3B8;
+    --mb-red: #F2B8B5;
+    --mb-green: #34D399;
+    --mb-amber: #F9AB00;
   }
 }
 html[data-theme="dark"] {
@@ -55,6 +63,10 @@ html[data-theme="dark"] {
   --outline: #334155; --outline-variant: #334155;
   --inverse-surface: #F8FAFC; --inverse-on-surface: #0F172A;
   --ok: #81C995; --ok-container: #1E3A2A; --run: #F9AB00; --run-container: #3B2F1D;
+  --mb-gray: #94A3B8;
+  --mb-red: #F2B8B5;
+  --mb-green: #34D399;
+  --mb-amber: #F9AB00;
 }
 
 * { box-sizing: border-box; }
@@ -156,6 +168,62 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 .m-queued {
   flex: none; width: 8px; height: 8px; border-radius: 50%;
   border: 1.5px dashed var(--primary);
+}
+.m-badges { display: inline-flex; gap: 4px; flex: 0 0 auto; align-items: center; }
+.mb {
+  display: inline-flex; align-items: center; gap: 3px; height: 18px; max-height: 18px;
+  padding: 1px 6px; font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
+  text-transform: uppercase; line-height: 1; border-radius: 999px;
+  background: color-mix(in srgb, var(--mb-gray) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mb-gray) 20%, transparent);
+  color: var(--mb-gray); flex: 0 0 auto; white-space: nowrap;
+  cursor: pointer; user-select: none;
+}
+.mb.mb-alert { border-radius: 4px; }
+.mb svg { width: 10px; height: 10px; stroke-width: 1.5; }
+.mb.mb-unmonitored { background: color-mix(in srgb, var(--mb-gray) 10%, transparent); border-color: color-mix(in srgb, var(--mb-gray) 20%, transparent); color: var(--mb-gray); }
+.mb.mb-no_file { background: color-mix(in srgb, var(--mb-red) 10%, transparent); border-color: color-mix(in srgb, var(--mb-red) 20%, transparent); color: var(--mb-red); }
+.mb.mb-subs_met { background: color-mix(in srgb, var(--mb-green) 10%, transparent); border-color: color-mix(in srgb, var(--mb-green) 20%, transparent); color: var(--mb-green); }
+.mb.mb-queued { background: color-mix(in srgb, var(--mb-amber) 10%, transparent); border-color: color-mix(in srgb, var(--mb-amber) 20%, transparent); color: var(--mb-amber); }
+.mb-overflow {
+  display: inline-flex; align-items: center; height: 18px; max-height: 18px;
+  padding: 1px 6px; font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
+  text-transform: uppercase; line-height: 1; border-radius: 999px;
+  background: color-mix(in srgb, var(--on-surface-variant) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--on-surface-variant) 20%, transparent);
+  color: var(--on-surface-variant); flex: 0 0 auto; white-space: nowrap;
+  cursor: pointer; user-select: none;
+}
+.mb + .mb { margin-left: 4px; }
+.mb-tip {
+  position: fixed; z-index: 1200; max-width: 280px; padding: 6px 8px;
+  font-size: 11px; line-height: 1.4; border-radius: 6px;
+  background: var(--inverse-surface); color: var(--inverse-on-surface);
+  box-shadow: var(--sh2); pointer-events: none;
+}
+.mb-tip[hidden] { display: none; }
+.mb-pop {
+  position: fixed; z-index: 1200; min-width: 200px; border-radius: 8px;
+  background: var(--surface-container-high); border: 1px solid var(--outline);
+  box-shadow: var(--sh2); padding: 4px;
+}
+.mb-pop[hidden] { display: none; }
+.mb-pop .mbp-title { font-size: 11px; font-weight: 600; padding: 4px 8px; color: var(--on-surface-variant); }
+.mb-pop button {
+  width: 100%; text-align: left; padding: 8px; font-size: 13px;
+  background: none; border: none; border-radius: 6px; cursor: pointer;
+}
+.mb-pop button:hover { background: var(--surface-variant); }
+.mb-pop button.danger { color: var(--error); }
+@media (max-width: 380px) {
+  .mb { width: 18px; height: 18px; padding: 0; justify-content: center; }
+  .mb .mb-label { display: none; }
+}
+@media (max-width: 599px) and (min-width: 381px) {
+  .mb.mb-secondary .mb-label { display: none; }
+}
+@media (min-width: 600px) {
+  .mb .mb-label { display: inline; }
 }
 .f-row.excluded { opacity: .55; }
 .kebab {
@@ -412,6 +480,7 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
 
 /* Quick rules switches */
 .bs-switch-row { display: flex; align-items: center; justify-content: space-between; min-height: 44px; font-size: 13px; font-weight: 500; }
+.bs-count { font-size: 11px; color: var(--on-surface-variant); margin-left: 4px; }
 .bs-switch {
   position: relative; width: 44px; height: 24px; flex: none;
   border: none; border-radius: 12px; background: var(--surface-variant);
@@ -805,6 +874,8 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
   <button type="button" class="rm-item rm-danger" data-act="delete">Delete</button>
   <button type="button" class="rm-item" data-act="exclude">Exclude</button>
 </div>
+<div id="mb-tip" class="mb-tip" hidden></div>
+<div id="mb-pop" class="mb-pop" hidden></div>
 
 <div class="bs-overlay" id="filter-overlay" hidden></div>
 <div class="bs-sheet" id="filter-sheet" role="dialog" aria-modal="true" aria-label="Filter &amp; Sort" hidden>
@@ -862,6 +933,12 @@ main { padding: 12px 12px 112px; max-width: 960px; margin: 0 auto; }
         <button type="button" class="bs-chip" data-status="excluded" data-state=""><span class="bs-st"></span><span class="bs-label">Excluded</span><span class="fchip-count" id="chip-count-excluded"></span></button>
         <button type="button" class="bs-chip" data-status="queued" data-state=""><span class="bs-st"></span><span class="bs-label">Queued</span><span class="fchip-count" id="chip-count-queued"></span></button>
       </div>
+    </div>
+    <div class="bs-group">
+      <div class="bs-cat">Diagnostics</div>
+      <div class="bs-switch-row"><span>Unmonitored <span class="bs-count" id="diag-count-unmonitored"></span></span><button type="button" class="bs-switch" id="qr-diag-unmonitored" role="switch" aria-checked="false" data-diag="unmonitored"><span class="bs-knob"></span></button></div>
+      <div class="bs-switch-row"><span>No Video File <span class="bs-count" id="diag-count-no_file"></span></span><button type="button" class="bs-switch" id="qr-diag-no_file" role="switch" aria-checked="false" data-diag="no_file"><span class="bs-knob"></span></button></div>
+      <div class="bs-switch-row"><span>Subs Satisfied <span class="bs-count" id="diag-count-subs_met"></span></span><button type="button" class="bs-switch" id="qr-diag-subs_met" role="switch" aria-checked="false" data-diag="subs_met"><span class="bs-knob"></span></button></div>
     </div>
     <div class="bs-group">
       <div class="bs-cat">Languages &amp; Subtitles</div>
@@ -1330,6 +1407,7 @@ let libStatusInc = new Set();          // include statuses
 let libStatusExc = new Set();          // exclude statuses (+ 'missing')
 let libLangInc = new Set();            // must have done sub for EVERY (id/ja/en)
 let libLangExc = new Set();            // must NOT have done sub for ANY
+let libDiagInc = new Set();            // diagnostic conditions (unmonitored/no_file/subs_met)
 let libSeason = "";                    // '' = all
 let libSort = "title";                 // title|status|seasep|updated
 let libSortDir = "asc";                // asc|desc
@@ -1354,6 +1432,42 @@ function itemStatus(it) {
   return "idle";
 }
 
+const ICON_UNMON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5 5l14 14"/></svg>';
+const ICON_NOFILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2.5h7a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 10.5v3.5"/><path d="M12 16.5h.01"/></svg>';
+const ICON_SUBS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2 2 0 0 1 6 3.5h12a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-4.5 4v-4H6a2 2 0 0 1-2-2z"/><path d="M9 10.5l2 2 4-4"/></svg>';
+const ICON_QUEUED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>';
+
+const DIAG_META = {
+  unmonitored: { label: "Unmonitored", cls: "", icon: ICON_UNMON, pri: 3 },
+  no_file:     { label: "No File",     cls: "mb-alert", icon: ICON_NOFILE, pri: 1 },
+  subs_met:    { label: "Subs Met",    cls: "", icon: ICON_SUBS,   pri: 4 },
+  queued:      { label: "Queued",      cls: "mb-alert", icon: ICON_QUEUED, pri: 2 },
+};
+
+function diagOf(it) {
+  if (!it || it.kind === "movie") return it && it.diag ? it.diag : null;
+  if (it.diag) return it.diag;
+  return null;
+}
+
+function libBadges(it) {
+  const out = [];
+  if (it.pending_action) out.push({ key: "queued", type: "queued" });
+  const d = it.diag;
+  if (d) out.push({ key: d, type: d });
+  out.sort(function (a, b) { return DIAG_META[a.type].pri - DIAG_META[b.type].pri; });
+  const show = out.slice(0, 2);
+  const extra = out.length - show.length;
+  let html = '<span class="m-badges">';
+  for (const b of show) {
+    const m = DIAG_META[b.type];
+    html += '<span class="mb mb-' + b.type + ' ' + m.cls + '" data-mb="' + b.type + '" data-id="' + itemKey(it) + '" title="" tabindex="0">' + m.icon + '<span class="mb-label">' + m.label + '</span></span>';
+  }
+  if (extra > 0) html += '<span class="mb mb-overflow" data-mb="overflow" data-id="' + itemKey(it) + '" title="' + extra + ' more issue(s)" tabindex="0">+' + extra + '</span>';
+  html += '</span>';
+  return html;
+}
+
 function libStatusCell(it) {
   const st = itemStatus(it);
   if (st === "done") {
@@ -1363,6 +1477,143 @@ function libStatusCell(it) {
     return '<span class="st-cell" title="idle"></span>';
   }
   return '<span class="st-cell" title="' + st + '"><span class="st-dot ' + st + '"></span></span>';
+}
+
+/* Micro-badge tooltip + popover (delegated on #library-list) */
+const mbTip = document.getElementById("mb-tip");
+const mbPop = document.getElementById("mb-pop");
+let mbTipTimer = null;
+let mbCurrentBadge = null;
+
+function hideMbChrome() {
+  if (mbTipTimer) { clearTimeout(mbTipTimer); mbTipTimer = null; }
+  if (mbTip) mbTip.hidden = true;
+  if (mbPop) mbPop.hidden = true;
+  mbCurrentBadge = null;
+}
+
+function mbBadgeInfo(badge) {
+  const type = badge.getAttribute("data-mb");
+  const id = badge.getAttribute("data-id");
+  const it = libraryItems ? libraryItems[id] : null;
+  return { type, id, it };
+}
+
+function mbBadgeTitle(info) {
+  const t = info.type;
+  if (t === "unmonitored") return "Sonarr: episode is not monitored — the pipeline skips it.";
+  if (t === "no_file") return "Disk Check: Sonarr reports hasFile=false. Waiting for a release grab.";
+  if (t === "subs_met") {
+    let s = "Satisfied: Bazarr reports all target subtitle languages present (embedded/external tracks).";
+    const it = info.it || {};
+    if (it.emb_langs && it.emb_langs.length) s += " Embedded: " + it.emb_langs.map(function (x) { return String(x).toUpperCase(); }).join(", ") + ".";
+    if (it.ext_langs && it.ext_langs.length) s += " External: " + it.ext_langs.map(function (x) { return String(x).toUpperCase(); }).join(", ") + ".";
+    return s;
+  }
+  if (t === "queued") return "Queued action: " + ((info.it && info.it.pending_action) || "retry") + " — will run when the daemon resumes.";
+  if (t === "overflow") return "+ more diagnostic condition(s) — tap for details.";
+  return "";
+}
+
+function showMbTip(badge) {
+  const info = mbBadgeInfo(badge);
+  if (!mbTip) return;
+  mbTip.textContent = mbBadgeTitle(info);
+  mbTip.hidden = false;
+  const rect = badge.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - mbTip.offsetWidth / 2;
+  let top = rect.bottom + 6;
+  if (left < 4) left = 4;
+  if (left + mbTip.offsetWidth > window.innerWidth - 4) left = window.innerWidth - mbTip.offsetWidth - 4;
+  if (top + mbTip.offsetHeight > window.innerHeight - 4) top = rect.top - mbTip.offsetHeight - 6;
+  mbTip.style.left = left + "px";
+  mbTip.style.top = top + "px";
+}
+
+function mbPopHTML(info) {
+  const t = info.type;
+  const it = info.it || {};
+  const id = info.id;
+  let html = "";
+  if (t === "overflow") {
+    html += '<div class="mbp-title">More Issues</div>';
+    const extraTypes = [];
+    if (it.pending_action) extraTypes.push("Queued");
+    if (it.diag) extraTypes.push(DIAG_META[it.diag] ? DIAG_META[it.diag].label : it.diag);
+    for (const lbl of extraTypes) html += '<div class="mbp-title">' + esc(lbl) + "</div>";
+    return html;
+  }
+  const m = DIAG_META[t] || { label: t };
+  html += '<div class="mbp-title">' + esc(m.label) + "</div>";
+  if (t === "unmonitored") {
+    html += '<button type="button" data-mb-act="monitor" data-id="' + id + '" data-val="true">Enable Monitoring</button>';
+    html += '<button type="button" data-mb-act="monitor" data-id="' + id + '" data-val="false">Disable Monitoring</button>';
+  } else if (t === "no_file") {
+    html += '<button type="button" data-mb-act="search" data-id="' + id + '">Trigger Sonarr Manual Search</button>';
+    html += '<div class="mbp-title">Starts a Sonarr episode search; only works when monitored.</div>';
+  } else if (t === "subs_met") {
+    if (it.emb_langs && it.emb_langs.length) html += '<div class="mbp-title">Embedded: ' + esc(it.emb_langs.map(function (x) { return String(x).toUpperCase(); }).join(", ")) + "</div>";
+    if (it.ext_langs && it.ext_langs.length) html += '<div class="mbp-title">External: ' + esc(it.ext_langs.map(function (x) { return String(x).toUpperCase(); }).join(", ")) + "</div>";
+    html += '<div class="mbp-title">Bazarr counts these as present — regenerate via ⋮ menu → Retry if you want pipeline subs.</div>';
+  } else if (t === "queued") {
+    html += '<div class="mbp-title">Queued: ' + esc(it.pending_action || "retry") + ' (runs when daemon resumes). No cancel endpoint.</div>';
+  }
+  return html;
+}
+
+function positionMbPop(badge) {
+  if (!mbPop) return;
+  const rect = badge.getBoundingClientRect();
+  let left = rect.left;
+  let top = rect.bottom + 6;
+  if (left + mbPop.offsetWidth > window.innerWidth - 4) left = window.innerWidth - mbPop.offsetWidth - 4;
+  if (left < 4) left = 4;
+  if (top + mbPop.offsetHeight > window.innerHeight - 4) top = rect.top - mbPop.offsetHeight - 6;
+  mbPop.style.left = left + "px";
+  mbPop.style.top = top + "px";
+}
+
+function showMbPop(badge) {
+  const info = mbBadgeInfo(badge);
+  if (mbTip) mbTip.hidden = true;
+  if (!mbPop) return;
+  mbPop.innerHTML = mbPopHTML(info);
+  mbPop.hidden = false;
+  positionMbPop(badge);
+  mbCurrentBadge = badge;
+}
+
+function mbEpId(info) {
+  const raw = info.id || "";
+  const m = /^(?:e|m):(\d+)$/.exec(raw);
+  return m ? m[1] : raw.replace(/^[a-z]:/, "");
+}
+
+async function mbAction(act, id, val) {
+  try {
+    const ep = mbEpId({ id: id });
+    let body = "{}";
+    let path = "/api2/episode/" + ep + "/" + act;
+    if (act === "monitor") {
+      body = JSON.stringify({ monitored: val === "true" || val === true });
+    }
+    const { status, data } = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body,
+    });
+    if (status === 200 && !(data && data.ok === false)) {
+      toast(act === "monitor"
+        ? "episode " + ep + ": monitoring " + (val === "true" || val === true ? "enabled" : "disabled")
+        : "episode " + ep + ": Sonarr search triggered", "ok");
+      hideMbChrome();
+      pollLists();
+    } else {
+      toast("episode " + ep + ": " + act + " failed — " + esc((data && data.error) || status), "err");
+    }
+  } catch (e) {
+    toast("episode " + id + ": " + act + " failed — " + e.message, "err");
+  }
 }
 
 const ICON_MOVIE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="5.5" width="19" height="14" rx="2"/><path d="M2.5 9.5h19"/><path d="M7 5.5 4.5 9M11 5.5 8.5 9M15 5.5 12.5 9"/></svg>';
@@ -1379,9 +1630,6 @@ function libRowHTML(it) {
   const st = itemStatus(it);
   const rowCls = st === "excluded" ? "f-row excluded" : "f-row";
   const titleAttr = it.kind === "series" && it.title ? ' title="' + esc(it.title) + '"' : "";
-  const queuedDot = it.pending_action
-    ? '<span class="m-queued" title="queued: ' + esc(it.pending_action) + '"></span>'
-    : "";
   return (
     '<div class="' + rowCls + '">' +
     (selMode ? '<label class="check-wrap"><input type="checkbox" class="m3-check" data-check="' + id + '"' + (selected[id] ? " checked" : "") + "></label>" : "") +
@@ -1390,7 +1638,7 @@ function libRowHTML(it) {
     '<div class="m-line1">' +
     '<span class="m-title"' + titleAttr + '>' + (it.series ? esc(it.series) : '<span class="muted">unknown series</span>') + "</span>" +
     (it.episode && it.episode !== "MOVIE" ? '<span class="m-ep">' + esc(it.episode) + "</span>" : "") +
-    queuedDot +
+    libBadges(it) +
     "</div>" +
     (langs ? '<div class="m-line2">' + langs + "</div>" : "") +
     "</div>" +
@@ -1436,6 +1684,9 @@ function libMatches(it, q) {
     let ok = false;
     for (const s of libStatusInc) if (statusHit(it, s)) { ok = true; break; }
     if (!ok) return false;
+  }
+  if (libDiagInc.size) {
+    if (!it.diag || !libDiagInc.has(it.diag)) return false;
   }
   for (const L of libLangExc) if (langDone(it, L)) return false;      // must NOT have done sub for ANY
   for (const L of libLangInc) if (!langDone(it, L)) return false;     // must have done sub for EVERY
@@ -1497,6 +1748,7 @@ function libSorter(items) {
 }
 
 function renderLibrary(data) {
+  hideMbChrome();
   lastLibrary = data;
   const list = document.getElementById("library-list");
   const banner = document.getElementById("lib-banner");
@@ -1561,7 +1813,7 @@ function itemLangTarget(it) {
 
 async function pollLibrary() {
   try {
-    const lib = await api(libScope === "active" ? "/api2/library" : "/api2/library?scope=" + libScope);
+    const lib = await api("/api2/library" + (libScope === "active" ? "" : "?scope=" + libScope + "&diag=1"));
     if (lib.status === 404) { libUnavailable("HTTP 404 — endpoint not ready yet"); return; }
     if (lib.status !== 200) { libUnavailable("HTTP " + lib.status); return; }
     const ex = await api("/api2/exclusions");
@@ -1687,6 +1939,7 @@ let bsDraft = {
   scope: libScope, kind: libKind,
   statusInc: new Set(), statusExc: new Set(),
   langInc: new Set(), langExc: new Set(),
+  diagInc: new Set(),
   season: libSeason, sort: libSort, sortDir: libSortDir,
 };
 const filterSheet = document.getElementById("filter-sheet");
@@ -1751,6 +2004,35 @@ function syncFilterControls() {
     sw.classList.toggle("on", on);
     sw.setAttribute("aria-checked", on ? "true" : "false");
   }
+  for (const d of ["unmonitored", "no_file", "subs_met"]) {
+    const sw = document.getElementById("qr-diag-" + d);
+    if (!sw) continue;
+    const on = bsDraft.diagInc.has(d);
+    sw.classList.toggle("on", on);
+    sw.setAttribute("aria-checked", on ? "true" : "false");
+  }
+}
+
+function buildDiagCounts() {
+  const counts = { unmonitored: 0, no_file: 0, subs_met: 0 };
+  for (const it of (lastLibrary && lastLibrary.items) || []) {
+    if (counts[it.diag] != null) counts[it.diag]++;
+  }
+  for (const d of ["unmonitored", "no_file", "subs_met"]) {
+    const el = document.getElementById("diag-count-" + d);
+    if (el) el.textContent = counts[d] > 0 ? String(counts[d]) : "";
+  }
+}
+
+function toggleDiag(d) {
+  const sw = document.getElementById("qr-diag-" + d);
+  if (!sw) return;
+  const on = sw.classList.toggle("on");
+  sw.setAttribute("aria-checked", on ? "true" : "false");
+  if (on) bsDraft.diagInc.add(d);
+  else bsDraft.diagInc.delete(d);
+  syncFilterControls();
+  updateApplyLabel();
 }
 
 function bsDraftFilterHit(it) {
@@ -1760,6 +2042,9 @@ function bsDraftFilterHit(it) {
     let ok = false;
     for (const s of bsDraft.statusInc) if (statusHit(it, s)) { ok = true; break; }
     if (!ok) return false;
+  }
+  if (bsDraft.diagInc.size) {
+    if (!it.diag || !bsDraft.diagInc.has(it.diag)) return false;
   }
   for (const L of bsDraft.langExc) if (langDone(it, L)) return false;
   for (const L of bsDraft.langInc) if (!langDone(it, L)) return false;
@@ -1796,10 +2081,12 @@ function updateApplyLabel() {
 
 function openFilterSheet() {
   buildSeasonOptions();
+  buildDiagCounts();
   bsDraft = {
     scope: libScope, kind: libKind,
     statusInc: new Set(libStatusInc), statusExc: new Set(libStatusExc),
     langInc: new Set(libLangInc), langExc: new Set(libLangExc),
+    diagInc: new Set(libDiagInc),
     season: libSeason, sort: libSort, sortDir: libSortDir,
   };
   syncFilterControls();
@@ -1821,6 +2108,7 @@ function closeFilterSheet(discard) {
       scope: libScope, kind: libKind,
       statusInc: new Set(libStatusInc), statusExc: new Set(libStatusExc),
       langInc: new Set(libLangInc), langExc: new Set(libLangExc),
+      diagInc: new Set(libDiagInc),
       season: libSeason, sort: libSort, sortDir: libSortDir,
     };
   }
@@ -1841,6 +2129,7 @@ function updateFilterBadge() {
   n += libStatusExc.size;
   n += libLangInc.size;
   n += libLangExc.size;
+  n += libDiagInc.size;
   if (libSeason !== "") n++;
   const b = document.getElementById("filter-badge");
   if (!b) return;
@@ -1856,6 +2145,7 @@ function bsCommitFilters() {
   libStatusExc = new Set(bsDraft.statusExc);
   libLangInc = new Set(bsDraft.langInc);
   libLangExc = new Set(bsDraft.langExc);
+  libDiagInc = new Set(bsDraft.diagInc);
   libSeason = bsDraft.season;
   libSort = bsDraft.sort;
   libSortDir = bsDraft.sortDir;
@@ -1877,6 +2167,7 @@ if (bsResetBtn) {
       scope: "active", kind: "",
       statusInc: new Set(), statusExc: new Set(),
       langInc: new Set(), langExc: new Set(),
+      diagInc: new Set(),
       season: "", sort: "title", sortDir: "asc",
     };
     syncFilterControls();
@@ -1991,6 +2282,10 @@ function toggleQuickRule(qr) {
 for (const qr of ["queued", "done", "missing"]) {
   const sw = document.getElementById("qr-" + qr);
   if (sw) sw.addEventListener("click", function () { toggleQuickRule(qr); });
+}
+for (const d of ["unmonitored", "no_file", "subs_met"]) {
+  const sw = document.getElementById("qr-diag-" + d);
+  if (sw) sw.addEventListener("click", function () { toggleDiag(d); });
 }
 
 /* Swipe-down dismiss (design guide §3) */
@@ -2183,6 +2478,13 @@ if (selToggle) {
 }
 
 document.getElementById("library-list").addEventListener("click", function (ev) {
+  const mb = ev.target.closest(".mb[data-mb]");
+  if (mb) {
+    ev.stopPropagation();
+    closeRowMenu();
+    showMbPop(mb);
+    return;
+  }
   const kb = ev.target.closest("button[data-menu]");
   if (kb) {
     ev.stopPropagation();
@@ -2196,6 +2498,49 @@ document.getElementById("library-list").addEventListener("change", function (ev)
   const cb = ev.target.closest("input[data-check]");
   if (!cb) return;
   toggleSelect(cb.dataset.check, cb.checked);
+});
+
+const libraryListEl = document.getElementById("library-list");
+libraryListEl.addEventListener("mouseover", function (ev) {
+  const mb = ev.target.closest(".mb[data-mb]");
+  if (!mb) return;
+  if (mbTipTimer) clearTimeout(mbTipTimer);
+  mbTipTimer = setTimeout(function () { showMbTip(mb); }, 200);
+});
+libraryListEl.addEventListener("mouseout", function (ev) {
+  const mb = ev.target.closest(".mb[data-mb]");
+  const rel = ev.relatedTarget;
+  if (mb && rel && mb.contains(rel)) return;
+  if (mbTipTimer) { clearTimeout(mbTipTimer); mbTipTimer = null; }
+  if (mbTip) mbTip.hidden = true;
+});
+libraryListEl.addEventListener("focusin", function (ev) {
+  const mb = ev.target.closest(".mb[data-mb]");
+  if (!mb) return;
+  if (mbTipTimer) clearTimeout(mbTipTimer);
+  mbTipTimer = setTimeout(function () { showMbTip(mb); }, 200);
+});
+libraryListEl.addEventListener("focusout", function (ev) {
+  const mb = ev.target.closest(".mb[data-mb]");
+  const rel = ev.relatedTarget;
+  if (mb && rel && mb.contains(rel)) return;
+  if (mbTipTimer) { clearTimeout(mbTipTimer); mbTipTimer = null; }
+  if (mbTip) mbTip.hidden = true;
+});
+if (mbPop) {
+  mbPop.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("button[data-mb-act]");
+    if (!btn) return;
+    mbAction(btn.dataset.mbAct, btn.dataset.id, btn.dataset.val);
+  });
+}
+document.addEventListener("click", function (ev) {
+  if (!mbPop || mbPop.hidden) return;
+  if (ev.target.closest(".mb[data-mb]") || ev.target.closest("#mb-pop")) return;
+  mbPop.hidden = true;
+});
+document.addEventListener("keydown", function (ev) {
+  if (ev.key === "Escape" && mbPop && !mbPop.hidden) mbPop.hidden = true;
 });
 
 const selAllBtn = document.getElementById("sel-all-btn");
