@@ -280,6 +280,30 @@ def api2_episode_unexclude(ep_id: str, body: dict = None):
     )
 
 
+@app.post(
+    "/api2/episode/{id}/monitor",
+    tags=["control"],
+    summary="Set Sonarr episode monitored flag",
+    dependencies=[require_key],
+)
+def api2_monitor(id: int, body: dict = None):
+    return _resp(
+        *api2.handle("POST", f"/api2/episode/{id}/monitor", body or {}, token=_token())
+    )
+
+
+@app.post(
+    "/api2/episode/{id}/search",
+    tags=["control"],
+    summary="Trigger Sonarr EpisodeSearch command",
+    dependencies=[require_key],
+)
+def api2_search(id: int, body: dict = None):
+    return _resp(
+        *api2.handle("POST", f"/api2/episode/{id}/search", body or {}, token=_token())
+    )
+
+
 @app.get(
     "/api2/exclusions",
     tags=["telemetry"],
