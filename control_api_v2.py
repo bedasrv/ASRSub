@@ -314,6 +314,8 @@ class ControlAPIv2:
             self._h_delete,
             self._h_exclude,
             self._h_unexclude,
+            self._h_monitor,
+            self._h_search,
             self._h_pause,
             self._h_resume,
             self._h_run_once,
@@ -334,6 +336,8 @@ class ControlAPIv2:
             "/api2/episode/{id}/delete": self._h_delete,
             "/api2/episode/{id}/exclude": self._h_exclude,
             "/api2/episode/{id}/unexclude": self._h_unexclude,
+            "/api2/episode/{id}/monitor": self._h_monitor,
+            "/api2/episode/{id}/search": self._h_search,
             "/api2/pause": self._h_pause,
             "/api2/resume": self._h_resume,
             "/api2/run-once": self._h_run_once,
@@ -742,6 +746,42 @@ class ControlAPIv2:
 
         return self._cached("bazarr.movies", 30, _fn)
 
+    def _bazarr_episode_subs(self, eid):
+        """Bazarr episode subtitle info (instance A only): returns
+        (emb_langs, ext_langs) sorted lists of code2, or (None, None) on any
+        failure. Cached 600s so repeat scope=all renders stay cheap."""
+        def _fn():
+            cfg = self._env()
+            url_base = cfg.get("BAZARR_URL", "").rstrip("/")
+            if not url_base:
+                return None, None
+            code, data = _http(
+                "GET",
+                url_base + f"/episodes?episodeid[]={eid}",
+                headers={"X-API-KEY": cfg.get("BAZARR_API_KEY", "")},
+                timeout=10,
+            )
+            if code != 200 or not isinstance(data, dict):
+                return None, None
+            subs = []
+            entries = data.get("data")
+            if isinstance(entries, list) and entries and isinstance(entries[0], dict):
+                subs = entries[0].get("subtitles") or []
+            emb, ext = set(), set()
+            for s in subs:
+                if not isinstance(s, dict):
+                    continue
+                code2 = s.get("code2")
+                if not code2:
+                    continue
+                if s.get("embedded_track_id") is not None:
+                    emb.add(code2)
+                elif s.get("path"):
+                    ext.add(code2)
+            return sorted(emb), sorted(ext)
+
+        return self._cached(("bazep", eid), 600, _fn)
+
     def _bazarr_history(self):
         def _fn():
             cfg = self._env()
@@ -801,6 +841,25 @@ class ControlAPIv2:
 
         return self._cached("sonarr.series", 300, _fn)
 
+    @staticmethod
+    def _diag(it):
+        """Why a library item is idle: None when active/owned (excluded,
+        wanted, or has per-language state), else 'unmonitored' / 'no_file' /
+        'subs_met' (design: Missing File > Unmonitored > Satisfied, but an
+        unmonitored episode is reported first since Sonarr treats it as
+        inactive regardless of file state)."""
+        if it.get("excluded"):
+            return None
+        if it.get("wanted"):
+            return None
+        if it.get("languages") or []:
+            return None
+        if it.get("monitored") is False:
+            return "unmonitored"
+        if it.get("has_file") is False:
+            return "no_file"
+        return "subs_met"
+
     def _ep_detail(self, ep_id):
         cached = self._cache.get(("ep", ep_id))
         now = time.time()
@@ -815,6 +874,8 @@ class ControlAPIv2:
             "episode_number": None,
             "quality": None,
             "media": None,
+            "monitored": True,
+            "has_file": False,
         }
         code, data = _sonarr_ep_lookup(self._env(), ep_id)
         if code == 200 and data:
@@ -837,6 +898,8 @@ class ControlAPIv2:
                     "audio_codec": mi.get("audioCodec"),
                     "resolution": mi.get("resolution"),
                 },
+                "monitored": data.get("monitored", True),
+                "has_file": bool(ef),
             }
         self._cache[("ep", ep_id)] = (now, det)
         return det
@@ -1399,6 +1462,8 @@ class ControlAPIv2:
                             "episode_number": e.get("episodeNumber"),
                             "title": e.get("title"),
                             "path": ef.get("path"),
+                            "monitored": e.get("monitored", True),
+                            "has_file": bool(e.get("hasFile", False)),
                         }
             return out
         except Exception:
@@ -1415,8 +1480,11 @@ class ControlAPIv2:
         ONLY idle items (not wanted, not excluded, no languages) — series
         episodes and movies that have never been touched."""
         scope = "active"
+        diag_enrich = False
         if isinstance(body, dict):
             scope = str(body.get("scope") or "active")
+            dq = body.get("diag")
+            diag_enrich = str(dq).lower() in ("1", "true", "yes", "on") if dq is not None else False
         wanted_json = self._bazarr_wanted()
         _entries, latest, latest_by_lang = self._state()
         wanted_data = wanted_json.get("data", []) or []
@@ -1478,6 +1546,8 @@ class ControlAPIv2:
                     "path": em.get("path"),
                     "quality": None,
                     "media": None,
+                    "monitored": em.get("monitored", True),
+                    "has_file": em.get("has_file", True),
                 }
         detail_ids = [eid for eid in ep_ids if eid not in wanted_by_id and eid not in details]
         if reg_rows:
@@ -1553,6 +1623,8 @@ class ControlAPIv2:
                 continue  # ghost: episode deleted from Sonarr, not wanted
             det = details.get(eid) or {}
             stem_cands = self._registry_stems(det.get("path"))
+            mon = w.get("monitored", True) if w is not None else det.get("monitored", True)
+            hf = True if w is not None else det.get("has_file", True)
             items.append(
                 {
                     "item_key": f"e:{eid}",
@@ -1563,6 +1635,8 @@ class ControlAPIv2:
                     "title": title,
                     "season": season,
                     "episode_number": epnum,
+                    "monitored": mon,
+                    "has_file": hf,
                     "wanted": eid in wanted_by_id,
                     "excluded": eid in excluded_ids,
                     "languages": self._lang_entries(langs, eid, stem_cands, reg_by_stem),
@@ -1610,6 +1684,8 @@ class ControlAPIv2:
                     "season": None,
                     "episode_number": None,
                     "path": path,
+                    "monitored": True,
+                    "has_file": True,
                     "wanted": movie_wanted,
                     "excluded": rid in excluded_movies,
                     "languages": self._lang_entries(movie_langs, rid, stem_cands, reg_by_stem),
@@ -1636,6 +1712,20 @@ class ControlAPIv2:
                 pending_map[key] = t
         for it in items:
             it["pending_action"] = pending_map.get(it.get("item_key"))
+            it["diag"] = self._diag(it)
+        if diag_enrich and scope in ("all", "inactive"):
+            subs_met = [
+                it for it in items
+                if it.get("diag") == "subs_met" and it.get("kind") == "series"
+            ]
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                for it, (emb, ext) in zip(subs_met, ex.map(self._bazarr_episode_subs, [it["sonarr_episode_id"] for it in subs_met])):
+                    if emb is None and ext is None:
+                        it["emb_langs"] = []
+                        it["ext_langs"] = []
+                    else:
+                        it["emb_langs"] = emb
+                        it["ext_langs"] = ext
         items.sort(
             key=lambda it: (
                 1 if it.get("kind") == "movie" else 0,
@@ -1844,6 +1934,55 @@ class ControlAPIv2:
             finally:
                 self._unlock_exclusions(lock_fd)
         return 200, {"ok": True, "removed": before - len(recs)}
+
+    def _h_monitor(self, body, id=None, kind="series"):
+        """PATCH a Sonarr episode's monitored flag. id = sonarr episode id."""
+        if kind == "movie":
+            return 400, {"ok": False, "error": "monitor action not available for movies"}
+        if not isinstance(body, dict) or "monitored" not in body:
+            return 400, {"ok": False, "error": "monitored flag required"}
+        mon = bool(body.get("monitored"))
+        cfg = self._env()
+        code, data = _sonarr_ep_lookup(cfg, id)
+        if code == 404 or not data:
+            return 404, {"ok": False, "error": "episode not found"}
+        url_base = cfg.get("SONARR_URL", "").rstrip("/")
+        pcode, _ = _http(
+            "PATCH",
+            url_base + f"/episode/{id}",
+            headers={"X-Api-Key": cfg.get("SONARR_API_KEY", "")},
+            body={"monitored": mon},
+            timeout=10,
+        )
+        if pcode != 200:
+            return 502, {"ok": False, "error": f"Sonarr PATCH failed (HTTP {pcode})"}
+        self._cache.pop(("ep", id), None)
+        return 200, {"ok": True, "monitored": mon}
+
+    def _h_search(self, body, id=None, kind="series"):
+        """Trigger a Sonarr EpisodeSearch command. id = sonarr episode id."""
+        if kind == "movie":
+            return 400, {"ok": False, "error": "search action not available for movies"}
+        cfg = self._env()
+        code, data = _sonarr_ep_lookup(cfg, id)
+        if code == 404 or not data:
+            return 404, {"ok": False, "error": "episode not found"}
+        if data.get("monitored") is False:
+            return 409, {"ok": False, "error": "episode not monitored; enable monitoring first"}
+        url_base = cfg.get("SONARR_URL", "").rstrip("/")
+        ccode, cdata = _http(
+            "POST",
+            url_base + "/command",
+            headers={"X-Api-Key": cfg.get("SONARR_API_KEY", "")},
+            body={"name": "EpisodeSearch", "episodeIds": [id]},
+            timeout=15,
+        )
+        if ccode != 201 and ccode != 200:
+            return 502, {"ok": False, "error": f"Sonarr command failed (HTTP {ccode})"}
+        cmd_id = None
+        if isinstance(cdata, dict):
+            cmd_id = cdata.get("id")
+        return 200, {"ok": True, "commandId": cmd_id}
 
     def _daemon_action(self, path):
         code, data = self._daemon("POST", path)
