@@ -1,0 +1,6 @@
+# Lightweight dependencies needed by the deterministic CI checks.
+# Runtime GPU/model dependencies stay in requirements.txt and are exercised by
+# the Docker build rather than installed on the CPU-only GitHub runner.
+requests==2.34.2
+fastapi>=0.115.0,<1
+uvicorn>=0.30.0,<1

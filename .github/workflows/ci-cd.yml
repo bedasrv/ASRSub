@@ -1,0 +1,174 @@
+name: CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the image to GHCR (manual runs default to build-only)
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asrsub-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/asrsub
+
+jobs:
+  test:
+    name: Python checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install CI dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-ci.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q orchestrator.py control_api_v2.py dashboard.py refine_subs.py pipeline
+
+      - name: Import application surfaces
+        run: |
+          python -c 'import control_api_v2, dashboard, orchestrator, pipeline.sensevoice; print("application imports: OK")'
+
+      - name: Run deterministic dry tests
+        run: python pipeline/dry_tests.py
+
+  image:
+    name: Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    env:
+      PUBLISH_IMAGE: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag and source commit
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git fetch origin main --no-tags
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          import sys
+
+          tag = os.environ["RELEASE_TAG"]
+          component = r"(?:0|[1-9]\d*)"
+          identifier = r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+          semver = re.compile(
+              rf"^v{component}\.{component}\.{component}"
+              rf"(?:-{identifier}(?:\.{identifier})*)?"
+              rf"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+          )
+          if not semver.fullmatch(tag):
+              sys.exit(f"{tag!r} is not a valid vMAJOR.MINOR.PATCH SemVer tag")
+
+          commit = os.environ["RELEASE_SHA"]
+          result = subprocess.run(
+              ["git", "merge-base", "--is-ancestor", commit, "origin/main"],
+              check=False,
+          )
+          if result.returncode != 0:
+              sys.exit(f"release tag {tag} does not point at a commit contained in main")
+
+          print(f"validated release {tag} at {commit}")
+          PY
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: env.PUBLISH_IMAGE == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate image metadata and tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+          flavor: |
+            latest=auto
+
+      - name: Build and publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ env.PUBLISH_IMAGE == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=asrsub
+          cache-to: ${{ env.PUBLISH_IMAGE == 'true' && 'type=gha,mode=max,scope=asrsub' || '' }}
+          provenance: ${{ env.PUBLISH_IMAGE == 'true' && 'mode=max' || 'false' }}
+          sbom: ${{ env.PUBLISH_IMAGE == 'true' && 'true' || 'false' }}
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - test
+      - image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          args=("release" "create" "$RELEASE_TAG" "--repo" "$GITHUB_REPOSITORY" "--verify-tag" "--generate-notes")
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            args+=("--prerelease")
+          fi
+          gh "${args[@]}"

@@ -1,10 +1,15 @@
 name: asrsub
 
+# Defaults preserve local development. Set ASRSUB_IMAGE and ASRSUB_VERSION to
+# deploy a pinned image from GHCR, for example:
+# ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub ASRSUB_VERSION=1.2.3 docker compose up -d
+x-asrsub-image: &asrsub-image "${ASRSUB_IMAGE:-asrsub}:${ASRSUB_VERSION:-latest}"
+
 services:
   orchestrator:
     build:
       context: .
-    image: asrsub:latest
+    image: *asrsub-image
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -19,7 +24,7 @@ services:
     command: [python, orchestrator.py]
 
   dashboard:
-    image: asrsub:latest
+    image: *asrsub-image
     runtime: nvidia
     network_mode: host
     environment:
