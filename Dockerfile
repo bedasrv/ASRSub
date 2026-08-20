@@ -12,4 +12,4 @@ RUN groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub
 
 COPY --chown=asrsub:asrsub . /app
 USER asrsub
-CMD [python, orchestrator.py]
+CMD ["python", "orchestrator.py"]
