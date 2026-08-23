@@ -122,7 +122,7 @@ query($search: String, $id: Int) {
     characters(page: 1, perPage: 25, sort: ROLE) {
       edges {
         role
-        node { name { full native } }
+        node { name { full native alternative } }
       }
     }
   }
@@ -138,7 +138,7 @@ query($search: String, $format: MediaFormat) {
     characters(page: 1, perPage: 25, sort: ROLE) {
       edges {
         role
-        node { name { full native } }
+        node { name { full native alternative } }
       }
     }
   }
@@ -225,14 +225,21 @@ def split_segments(reading):
 
 
 def build_pairs(characters):
-    """characters: [{role, full, native}...]; returns [(ja, en), ...]
-    capped at MAX_PAIRS_PER_SERIES, MAIN characters first."""
+    """characters: [{role, full, native, alternative}...]; returns
+    [(ja, en, aliases), ...] capped at MAX_PAIRS_PER_SERIES, MAIN first.
+
+    aliases: AniList alternative spellings that are NOT already represented
+    by the ja reading or en value themselves (case-folded check)."""
     ranked = sorted(
         characters,
         key=lambda c: (ROLE_PRIORITY.get(c.get("role"), 9)),
     )
     pairs = []
     seen = set()
+
+    def _norm_alias(a):
+        return (a or "").strip().lower()
+
     for c in ranked:
         native = (c.get("native") or "").strip()
         full = (c.get("full") or "").strip()
@@ -251,19 +258,36 @@ def build_pairs(characters):
             short = segments[0]  # foreign names: first ・ segment
         else:
             short = segments[-1] if segments else reading  # kanji: given name
+        # alias pool from AniList alternative[] minus forms we already carry
+        covered = {
+            _norm_alias(reading),
+            _norm_alias(short),
+            _norm_alias(first),
+            _norm_alias(full),
+            _norm_alias(native),
+        }
+        aliases_out = []
+        for a in c.get("alternative") or []:
+            na = (a or "").strip()
+            if not na or _norm_alias(na) in covered:
+                continue
+            if any(_norm_alias(x) == _norm_alias(na) for x in aliases_out):
+                continue
+            aliases_out.append(na)
+            covered.add(_norm_alias(na))
         cand = [
-            (reading, first),
-            (reading, full),
-            (short, first),
+            (reading, first, aliases_out),
+            (reading, full, []),
+            (short, first, []),
         ]
-        for ja, en in cand:
+        for ja, en, aliases in cand:
             if not ja or not en:
                 continue
             dup = (ja, en) in seen
             seen.add((ja, en))
             if dup:
                 continue
-            pairs.append((ja, en))
+            pairs.append((ja, en, aliases))
             if len(pairs) >= MAX_PAIRS_PER_SERIES:
                 return pairs
     return pairs
@@ -309,8 +333,12 @@ def merge_pairs(glossary, title, pairs):
     """Returns (key, added, existing_count, skipped_full) — v2 aware.
 
     Ensures glossary[key] is a v2 dict {"entries": [...]}, migrating a legacy
-    flat-map series in place if needed. New entries are v2-shaped with
-    aliases=[], kind="character", note="".
+    flat-map series in place if needed. pairs items are (ja, en) or
+    (ja, en, aliases). New entries are v2-shaped with kind="character".
+    Aliases carried by a pair are BACKFILLED onto the matching existing
+    entry (by ja or en) instead of being dropped — this counts toward
+    `added` even when the series is at the row cap, so alias enrichment
+    works on full series without touching production name rows.
     """
     key = find_existing_key(glossary, title) or title
     raw = glossary.get(key)
@@ -338,15 +366,37 @@ def merge_pairs(glossary, title, pairs):
     entries = glossary[key]["entries"]
     existing_count = len(entries)
     skipped_full = existing_count >= MAX_PAIRS_PER_SERIES
+
+    def _nx(x):
+        return (x or "").strip().lower()
+
+    by_ja = {_nx(e.get("ja")): e for e in entries}
+    by_en = {_nx(e.get("en")): e for e in entries}
+
     seen = {(e.get("ja"), e.get("en")) for e in entries}
     added = 0
-    for ja, en in pairs:
-        if len(entries) >= MAX_PAIRS_PER_SERIES:
-            break
+    for item in pairs:
+        ja, en, aliases = (item if len(item) == 3 else (item[0], item[1], []))
+        target = by_ja.get(_nx(ja)) or by_en.get(_nx(en))
+        if target is not None:
+            have = {_nx(target.get("ja")), _nx(target.get("en"))}
+            have |= {_nx(a) for a in (target.get("aliases") or [])}
+            fresh = [
+                a for a in (aliases or [])
+                if a and _nx(a) not in have
+            ]
+            if fresh:
+                target.setdefault("aliases", [])
+                target["aliases"].extend(fresh)
+                added += len(fresh)
         if (ja, en) in seen:
             continue
-        entries.append({"ja": str(ja), "en": str(en), "aliases": [], "kind": "character", "note": ""})
+        if len(entries) >= MAX_PAIRS_PER_SERIES:
+            break
+        entries.append({"ja": str(ja), "en": str(en), "aliases": [str(a) for a in (aliases or [])], "kind": "character", "note": ""})
         seen.add((ja, en))
+        by_ja[_nx(ja)] = entries[-1]
+        by_en[_nx(en)] = entries[-1]
         added += 1
     return key, added, existing_count, skipped_full
 
@@ -425,6 +475,14 @@ def cache_lookup(cache, title):
         fresh = age_days < CACHE_TTL_DAYS
     except (KeyError, TypeError, ValueError):
         fresh = False
+    if fresh:
+        # entries fetched before alias capture lack the alternative field;
+        # treat them as stale so one refetch backfills it
+        chars = entry.get("characters") or []
+        if not chars or not all(
+            isinstance(c, dict) and "alternative" in c for c in chars
+        ):
+            fresh = False
     return entry, fresh
 
 
@@ -501,6 +559,9 @@ def fetch_characters(media):
                 "role": (edge or {}).get("role"),
                 "full": name.get("full"),
                 "native": name.get("native"),
+                "alternative": [
+                    a for a in (name.get("alternative") or []) if a
+                ],
             }
         )
     return chars
@@ -533,13 +594,24 @@ def resolve_characters(cache, title, is_movie=False):
 
 def process_title(cache, glossary, title, is_movie=False):
     """Fetch (cache-first) + merge one title; returns a summary line dict."""
-    # glossary-as-cache: series already at the ref cap -> no API call at all
+    # glossary-as-cache: series already at the ref cap -> no API call at all,
+    # UNLESS its entries still lack aliases (alias enrichment needs one fetch)
     key = find_existing_key(glossary, title) or title
-    entries = glossary.get(key) or {}
-    if len(entries) >= MAX_PAIRS_PER_SERIES:
+    series = glossary.get(key)
+    entries_now = []
+    if isinstance(series, dict) and isinstance(series.get("entries"), list):
+        entries_now = series["entries"]
+    elif isinstance(series, dict):
+        entries_now = [
+            {"ja": k, "en": v} for k, v in series.items()
+            if k != "entries" and isinstance(v, str)
+        ]
+    if len(entries_now) >= MAX_PAIRS_PER_SERIES and all(
+        not (e.get("aliases") if isinstance(e, dict) else None) for e in entries_now
+    ):
         return {
             "title": title,
-            "warn": f"glossary already full ({len(entries)} refs); skipped",
+            "warn": f"glossary already full ({len(entries_now)} refs); skipped",
             "ok": False,
         }
     chars, src = resolve_characters(cache, title, is_movie=is_movie)
@@ -547,21 +619,41 @@ def process_title(cache, glossary, title, is_movie=False):
         return {"title": title, "warn": src, "ok": False}
     print(f"[cache] {'hit' if src == 'cache' else 'miss'} {title}")
     pairs = build_pairs(chars)
+    aliases_before = sum(
+        len(e.get("aliases") or []) for e in entries_now if isinstance(e, dict)
+    )
     key, added, existing_count, skipped_full = merge_pairs(glossary, title, pairs)
-    if skipped_full:
+    series_after = glossary.get(key)
+    entries_after = []
+    if isinstance(series_after, dict) and isinstance(series_after.get("entries"), list):
+        entries_after = series_after["entries"]
+    elif isinstance(series_after, dict):
+        entries_after = [
+            {"ja": k2, "en": v} for k2, v in series_after.items()
+            if k2 != "entries" and isinstance(v, str)
+        ]
+    aliases_after = sum(
+        len(e.get("aliases") or []) for e in entries_after if isinstance(e, dict)
+    )
+    changed = (
+        len(entries_after) != len(entries_now)
+        or aliases_after != aliases_before
+    )
+    media_title = (cache.get(cache_key(title), {}) or {}).get("title_romaji") or "?"
+    if skipped_full and not changed:
         return {
             "title": title,
-            "anilist": (cache.get(cache_key(title), {}) or {}).get("title_romaji") or "?",
+            "anilist": media_title,
             "warn": f"series already at {existing_count} refs; nothing added",
             "ok": False,
         }
-    media_title = (cache.get(cache_key(title), {}) or {}).get("title_romaji") or "?"
     return {
         "title": title,
         "anilist": media_title,
         "key": key,
         "existing": existing_count,
         "added": added,
+        "aliases_added": aliases_after - aliases_before,
         "candidates": len(pairs),
         "ok": True,
     }
@@ -652,6 +744,7 @@ def upgrade_glossary_v2(path):
 def main():
     ap = argparse.ArgumentParser(description="AniList glossary fetcher")
     ap.add_argument("--series", metavar="TITLE", help="fetch one title (used verbatim as glossary key)")
+    ap.add_argument("--movie", action="store_true", help="with --series: treat the title as a movie (MOVIE-format AniList search first)")
     ap.add_argument("--all", action="store_true", help="fetch every Sonarr/Radarr title missing from the glossary")
     ap.add_argument("--glossary", default=GLOSSARY_FILE, help="glossary.json path")
     ap.add_argument("--upgrade-v2", action="store_true", help="convert glossary.json to schema v2 in place (writes .bak-v1, no network fetch)")
@@ -672,7 +765,7 @@ def main():
 
     summaries = []
     if args.series:
-        summaries.append(process_title(cache, glossary, args.series, is_movie=False))
+        summaries.append(process_title(cache, glossary, args.series, is_movie=args.movie))
     else:
         try:
             titles = []
