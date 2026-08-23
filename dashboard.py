@@ -83,7 +83,7 @@ def _status_example():
         "queue": {"wanted": 10, "movies": 12},
         "state_counts": {"done": 50, "error": 0, "pending": 0, "total": 50},
         "series": {"total": 60, "done": 50, "remaining": 10},
-        "models": {"asr_backend": "sensevoice", "asr_model": "FunAudioLLM/SenseVoiceSmall"},
+        "models": {"asr_backend": "whisper", "asr_model": "large-v3-turbo", "vad_model": "silero"},
         "current": None,
     }
 

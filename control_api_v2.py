@@ -1202,10 +1202,16 @@ class ControlAPIv2:
         except Exception:
             env = {}
         asr_backend = env.get("ASR_BACKEND") or "whisper"
+        if asr_backend == "sensevoice":
+            asr_model = env.get("SV_MODEL_ID") or "FunAudioLLM/SenseVoiceSmall"
+            vad_model = "fsmn-vad"
+        else:
+            asr_model = env.get("WHISPER_MODEL") or "large-v3-turbo"
+            vad_model = "silero"
         models = {
             "asr_backend": asr_backend,
-            "asr_model": env.get("SV_MODEL_ID") or "FunAudioLLM/SenseVoiceSmall",
-            "vad_model": "fsmn-vad" if asr_backend == "sensevoice" else "silero",
+            "asr_model": asr_model,
+            "vad_model": vad_model,
             "emo_enabled": str(env.get("EMO_ENABLED") or "0").lower()
             in ("1", "true", "yes"),
             "emo_model": env.get("EMO_MODEL") or "emotion2vec/emotion2vec_plus_large",
