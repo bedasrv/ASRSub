@@ -160,7 +160,78 @@ RETIME_MIN_ANCHOR_FRAC = float(os.environ.get("RETIME_MIN_ANCHOR_FRAC", "0.25"))
 _stop_requested = False
 _paused = False
 _run_once_requested = False
-_current = None  # {"kind","episode_id","series","tag"/"title","lang","stage","since"}
+
+# ---------- job queue registry ----------
+#
+# Thread-safe registry of submitted jobs. One writer discipline:
+# every mutation below happens under _queue_lock. Entries carry an
+# explicit "idx" handle (monotonic per clear) so helpers can resolve
+# them even after older terminal entries are pruned from the head;
+# never address entries by list position outside these helpers.
+
+_QUEUE_MAX = 20
+_queue: list = []
+_queue_lock = threading.Lock()
+_queue_next_idx = 0
+
+
+def _queue_enqueue(desc):
+    """Append a job descriptor as queued; returns its stable idx handle."""
+    global _queue_next_idx
+    with _queue_lock:
+        while len(_queue) >= _QUEUE_MAX and _queue and _queue[0]["state"] in (
+            "done",
+            "error",
+        ):
+            _queue.pop(0)  # drop oldest finished entry to stay bounded
+        idx = _queue_next_idx
+        _queue_next_idx += 1
+        # Active jobs may exceed _QUEUE_MAX temporarily; /status slices
+        # the payload, so the wire shape stays bounded regardless.
+        _queue.append(dict(desc, state="queued", idx=idx))
+    return idx
+
+
+def _queue_find(idx):
+    """Return the live entry with this idx handle (call under lock)."""
+    for entry in _queue:
+        if entry["idx"] == idx:
+            return entry
+    return None
+
+
+def _queue_set_running(idx):
+    with _queue_lock:
+        entry = _queue_find(idx)
+        if entry is not None:
+            entry["state"] = "running"
+            entry["since"] = datetime.now(timezone.utc).isoformat()
+            return dict(entry)
+    return None
+
+
+def _queue_finish(idx, ok):
+    """Mark terminal outcome and remove the entry (finished jobs vanish)."""
+    with _queue_lock:
+        entry = _queue_find(idx)
+        if entry is not None:
+            entry["state"] = "done" if ok else "error"
+            _queue.remove(entry)
+
+
+def _queue_snapshot():
+    with _queue_lock:
+        return [dict(entry) for entry in _queue]
+
+
+def _queue_clear():
+    global _queue_next_idx
+    with _queue_lock:
+        _queue.clear()
+        _queue_next_idx = 0
+
+
+_current = None  # ONLY mutated by _tracked's runner below
 _last_pass_stats = None
 _started_at = datetime.now(timezone.utc)
 _consecutive_failures = 0
