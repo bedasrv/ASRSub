@@ -39,6 +39,20 @@ class TestJobRegistry(unittest.TestCase):
         s[0]["title"] = "mutated"
         self.assertEqual(_queue_snapshot()[0]["title"], "A")
 
+    def test_tracked_flips_current_on_run_only(self):
+        import orchestrator
+
+        def work():
+            self.assertIsNotNone(orchestrator._current)  # running now
+            self.assertEqual(orchestrator._current["lang"], "ja")
+            return "done"
+
+        desc = {"kind": "movie", "title": "T", "lang": "ja", "stage": "translate"}
+        fut = orchestrator._tracked(desc, work)
+        # before scheduling nothing ran; after result _current is None
+        self.assertEqual(fut.result(), "done")
+        self.assertIsNone(orchestrator._current)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -232,6 +232,69 @@ def _queue_clear():
 
 
 _current = None  # ONLY mutated by _tracked's runner below
+
+
+class _TrackedCall:
+    """Zero-arg callable for pool.submit(_tracked(desc, fn, ...)).
+
+    Also exposes .result(): if the job was never handed to an executor,
+    the first .result() runs it inline; otherwise it blocks until the
+    executor finishes and mirrors Future.result() semantics (return
+    value or raise, verbatim from the wrapped function).
+    """
+
+    def __init__(self, run):
+        self._run = run
+        self._lock = threading.Lock()
+        self._done = False
+        self._outcome = None
+        self._exc = None
+
+    def __call__(self):
+        with self._lock:  # execute exactly once, even under both paths
+            if not self._done:
+                try:
+                    self._outcome = self._run()
+                except BaseException as exc:
+                    self._exc = exc
+                    raise
+                finally:
+                    self._done = True
+        if self._exc is not None:
+            raise self._exc
+        return self._outcome
+
+    def result(self, timeout=None):
+        # timeout is accepted for Future compatibility; execution is
+        # either already finished or happens now (inline).
+        return self.__call__()
+
+
+def _tracked(desc, fn, *args, **kwargs):
+    """Wrap a submitted job: manage queue entry + _current lifecycle.
+
+    Usage (Task 3 wiring): futures.append(pool.submit(_tracked(desc, fn, ...))).
+    The wrapper is the ONLY writer of module-global _current: it flips to
+    the job's descriptor at actual execution start (not scan time) and
+    back to None when the job exits, success or failure.
+    """
+    idx = _queue_enqueue(desc)
+
+    def _run():
+        global _current
+        _current = _queue_set_running(idx) or dict(desc, state="running")
+        ok = False
+        try:
+            rc = fn(*args, **kwargs)
+            ok = True
+            return rc
+        finally:
+            _current = None
+            _queue_finish(idx, ok=ok)
+
+    return _TrackedCall(_run)
+
+
 _last_pass_stats = None
 _started_at = datetime.now(timezone.utc)
 _consecutive_failures = 0
