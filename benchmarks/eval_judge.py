@@ -165,7 +165,7 @@ def norm(s):
 
 def mode_mt(args):
     sample_dir = os.path.join(HERE, "data", "flores_sample")
-    sys_path = os.path.join(RESULTS_DIR, "mt_hy_mt15_flores200.sys.txt")
+    sys_path = os.path.join(RESULTS_DIR, "mt_legacy_flores200.sys.txt")
     with open(os.path.join(sample_dir, "devtest.sample.ja.txt"), encoding="utf-8") as fh:
         src = [l.rstrip("\n") for l in fh]
     with open(sys_path, encoding="utf-8") as fh:

@@ -75,7 +75,7 @@ identical flores101 SPM model is pre-cached in `~/.sacrebleu/models/`).
 
 ```bash
 ~/benchmark/venvs/eval/bin/python benchmarks/prepare_flores.py --n 300
-~/benchmark/venvs/eval/bin/python benchmarks/eval_mt.py --max-lines 300   # -> results/mt_hy_mt15_flores200.json
+~/benchmark/venvs/eval/bin/python benchmarks/eval_mt.py --max-lines 300   # -> results/mt_legacy_flores200.json
 ~/benchmark/venvs/eval/bin/python benchmarks/eval_comet.py                # -> results/comet_flores300.json
 ~/benchmark/venvs/eval/bin/python benchmarks/eval_nllb.py --max-lines 300 --cpu  # NLLB-200-3.3B CT2-int8 baseline
 ```

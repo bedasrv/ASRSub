@@ -17,7 +17,7 @@ RESULTS_DIR = os.path.join(HERE, "results")
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cpu", action="store_true", help="force CPU scoring")
-    ap.add_argument("--sys", default=os.path.join(RESULTS_DIR, "mt_hy_mt15_flores200.sys.txt"),
+    ap.add_argument("--sys", default=os.path.join(RESULTS_DIR, "mt_legacy_flores200.sys.txt"),
                     help="hypothesis file (one line per source line)")
     ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "comet_flores300.json"))
     args = ap.parse_args()

@@ -67,7 +67,7 @@ def clean(text: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-lines", type=int, default=300)
-    ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "mt_hy_mt15_flores200.json"))
+    ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "mt_legacy_flores200.json"))
     args = ap.parse_args()
 
     with open(os.path.join(SAMPLE_DIR, "devtest.sample.ja.txt"), encoding="utf-8") as fh:
@@ -81,7 +81,7 @@ def main():
 
     sys_out = []
     t0 = time.time()
-    sys_path = os.path.join(RESULTS_DIR, "mt_hy_mt15_flores200.sys.txt")
+    sys_path = os.path.join(RESULTS_DIR, "mt_legacy_flores200.sys.txt")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     for i, line in enumerate(src):
         hyp = post_chat(line)
