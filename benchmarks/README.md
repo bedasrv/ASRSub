@@ -62,27 +62,25 @@ Results (200 utterances each; `results/asr_<name>.json`):
 
 Source: FLORES-200 devtest `jpn_Jpan` → `ind_Latn` (1012 lines; official
 archive `dl.fbaipublicfiles.com/nllb/flores200_dataset.tar.gz`). Deterministic
-300-line sample (seed 42). Translation via local HY-MT1.5-7B
-(`http://127.0.0.1:8011/v1`, `HY-MT1.5-7B-Q4_K_M.gguf`, temp 0.1).
-
-**Caveat (documented):** HY-MT merges consecutive short lines when they are
-sent in one numbered chunk, breaking 1:1 line pairing for BLEU. Every source
-line is therefore sent as a **single-line request** (slower, but clean pairs).
-Hyp/ref length ratio 1.16 confirms the model's verbosity, not merging.
+300-line sample (seed 42). Current procedure: translate with the local Gemma model
+(`http://127.0.0.1:8011/v1`, `/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf`, temp 0.1) using the JSON-array
+contract (`source_language`, `target_language`, `lines`). The evaluator sends
+one source line per request to keep 1:1 line pairing for BLEU. Historical
+HY-MT results remain labeled below.
 
 spBLEU = `sacrebleu` with `-tok flores200` (the flores200 SPM URL is dead; the
 identical flores101 SPM model is pre-cached in `~/.sacrebleu/models/`).
 
 ```bash
 ~/benchmark/venvs/eval/bin/python benchmarks/prepare_flores.py --n 300
-~/benchmark/venvs/eval/bin/python benchmarks/eval_mt.py --max-lines 300   # -> results/mt_hy_mt15_flores200.json
+~/benchmark/venvs/eval/bin/python benchmarks/eval_mt.py --max-lines 300   # -> results/mt_gemma_flores200.json
 ~/benchmark/venvs/eval/bin/python benchmarks/eval_comet.py                # -> results/comet_flores300.json
 ~/benchmark/venvs/eval/bin/python benchmarks/eval_nllb.py --max-lines 300 --cpu  # NLLB-200-3.3B CT2-int8 baseline
 ```
 
 | model | spBLEU | COMET (wmt22-comet-da) |
 |---|---|---|
-| HY-MT1.5-7B Q4_K_M (local) | **19.89** | **0.8848** |
+| HY-MT1.5-7B Q4_K_M (local, historical) | **19.89** | **0.8848** |
 | NLLB-200-3.3B (CT2 int8, local baseline) | **25.44** | **0.8783** |
 
 Notes:

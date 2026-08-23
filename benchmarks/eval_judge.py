@@ -11,7 +11,7 @@ Two modes:
 Judge backend: TRANSLATE_API_KEY from ~/.config/asr-pipeline/pipeline.env
 (never printed) via https://api.opencode.ai/zen/v1/chat/completions (deepseek
 gateway); falls back to https://opencode.ai/zen/go/v1, then to the local
-llama-server :8011 (HY-MT1.5-7B) if the API is unreachable.
+llama-server :8011 using the current Gemma model if the API is unreachable.
 """
 
 import argparse
@@ -29,7 +29,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.expanduser("~/.config/asr-pipeline/pipeline.env")
 RESULTS_DIR = os.path.join(HERE, "results")
 LOCAL_BASE = "http://127.0.0.1:8011/v1"
-LOCAL_MODEL = "HY-MT1.5-7B-Q4_K_M.gguf"
+LOCAL_MODEL = "/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf"
 
 # task-specified endpoint first, then the verified working zen route
 ZEN_URLS = [

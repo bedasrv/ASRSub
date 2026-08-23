@@ -37,11 +37,13 @@ import orchestrator as o
 import control_api_v2 as api2
 import refine_subs
 
+_REAL_POST_CHAT = o.post_chat  # original before monkeypatches
+
 
 def build_cfg():
     return {
         "TRANSLATE_BASE": "http://127.0.0.1:8011/v1",
-        "TRANSLATE_MODEL": "HY-MT1.5-7B-Q4_K_M.gguf",
+        "TRANSLATE_MODEL": o.GEMMA_MODEL,
         "SDH_PLACEHOLDERS": list(o.DEFAULT_SDH_PLACEHOLDERS),
     }
 
@@ -54,19 +56,45 @@ def fake_id_lines(n):
     return [f"Ini kalimat uji nomor {i}." for i in range(n)]
 
 
+def test_gemma_json_prompt_parser():
+    system, user = o._gemma_prompt(
+        ["これは一行です。", "次の行です。"],
+        "Indonesian",
+        refs="アーシア翻译成Asia",
+        context_lines=["Sebelumnya."],
+        emotions=["tense", ""],
+    )
+    payload = json.loads(user)
+    assert payload == {
+        "source_language": "Japanese",
+        "target_language": "Indonesian",
+        "lines": ["これは一行です。", "次の行です。"],
+    }, payload
+    assert "Indonesian" in system
+    assert "アーシア翻译成Asia" in system
+    assert "Sebelumnya." in system
+    assert "1: tense" in system
+    assert o._parse_local_response('["Satu", "Dua"]', 2) == {1: "Satu", 2: "Dua"}
+    assert o._parse_local_response('["Satu"]', 2) == {1: "Satu"}
+    assert o._parse_local_response('["Satu", "Dua", "Tiga"]', 2) == {1: "Satu", 2: "Dua"}
+    assert o._parse_local_response("not json", 2) is None
+    assert o._parse_local_response("[]", 2) is None
+    print("PASS gemma_json_prompt_parser")
+
+
 def test_merge_10_to_7():
-    """Model returns 7 <sn> entries for 10 lines; tail completion must fill
+    """Model returns 7 JSON entries for 10 lines; tail completion must fill
     the remaining 3 via a separate call, producing 10 groups."""
     calls = []
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
+        n_lines = len(json.loads(messages[1]["content"])["lines"])
         calls.append(n_lines)
         if n_lines == 10:
-            return "<target><sn>Satu.</sn><sn>Dua.</sn><sn>Tiga.</sn><sn>Empat.</sn><sn>Lima.</sn><sn>Enam.</sn><sn>Tujuh.</sn></target>"
+            return json.dumps(["Satu.", "Dua.", "Tiga.", "Empat.", "Lima.", "Enam.", "Tujuh."])
         if n_lines == 3:
-            return "<target><sn>Delapan.</sn><sn>Sembilan.</sn><sn>Sepuluh.</sn></target>"
-        return "<target><sn>Per baris.</sn></target>"
+            return json.dumps(["Delapan.", "Sembilan.", "Sepuluh."])
+        return json.dumps(["Per baris."])
 
     o.post_chat = fake_post_chat
     lines = fake_ja_lines(10)
@@ -85,17 +113,13 @@ def test_echo_then_recover():
              "delapan", "sembilan", "sepuluh"]
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
+        n_lines = len(json.loads(messages[1]["content"])["lines"])
         attempts["n"] += 1
         if n_lines == 10 and attempts["n"] <= 2:
-            return "<target>" + "".join(
-                f"<sn>テストの台詞です。{i}</sn>" for i in range(1, 11)
-            ) + "</target>"
+            return json.dumps([f"テストの台詞です。{i}" for i in range(1, 11)])
         if n_lines == 10:
-            return "<target>" + "".join(
-                f"<sn>Kalimat {words[i - 1]}.</sn>" for i in range(1, 11)
-            ) + "</target>"
-        return "<target><sn>Per baris.</sn></target>"
+            return json.dumps([f"Kalimat {words[i - 1]}." for i in range(1, 11)])
+        return json.dumps(["Per baris."])
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(10), "Indonesian", "k")
@@ -109,12 +133,12 @@ def test_tail_completion_only():
     """Entries + completion merge: 7 entries + 3-line tail; completion may
     return fewer than asked (model merges), groups still aligned per entry."""
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
+        n_lines = len(json.loads(messages[1]["content"])["lines"])
         if n_lines == 10:
-            return "<target><sn>A.</sn><sn>B.</sn><sn>C.</sn><sn>D.</sn><sn>E.</sn><sn>F.</sn><sn>G.</sn></target>"
+            return json.dumps(["A.", "B.", "C.", "D.", "E.", "F.", "G."])
         if n_lines == 3:
-            return "<target><sn>H.</sn><sn>I.</sn><sn>J.</sn></target>"
-        return "<target><sn>X.</sn></target>"
+            return json.dumps(["H.", "I.", "J."])
+        return json.dumps(["X."])
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(10), "Indonesian", "k")
@@ -127,12 +151,10 @@ def test_per_line_fallback():
     """Chunk always echoes; per-line fallback runs and emits empty text on
     persistent failure (mirrors one_shot 1-empty-cue tolerance)."""
     def fake_post_chat(cfg, messages, model, key, local=False):
-        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
+        n_lines = len(json.loads(messages[1]["content"])["lines"])
         if n_lines >= 2:
-            return "<target>" + "".join(
-                f"<sn>エコー{i}</sn>" for i in range(1, 6)
-            ) + "</target>"
-        return "<target><sn>エコー</sn></target>"
+            return json.dumps([f"エコー{i}" for i in range(1, 6)])
+        return json.dumps(["エコー"])
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(5), "Indonesian", "k")
@@ -143,24 +165,27 @@ def test_per_line_fallback():
 
 
 def test_glossary_refs_flow():
-    """terminology block flows into the system prompt of every chunk/tail/fallback call."""
+    """knowledge block flows into the system prompt of every chunk/tail/fallback call."""
     seen = []
 
     def fake_post_chat(cfg, messages, model, key, local=False):
         seen.append(messages[0]["content"])
-        n_lines = len(re.findall(r"<sn>", messages[1]["content"]))
+        n_lines = len(json.loads(messages[1]["content"])["lines"])
         if n_lines == 10:
-            return "<target><sn>Satu.</sn><sn>Dua.</sn><sn>Tiga.</sn><sn>Empat.</sn><sn>Lima.</sn><sn>Enam.</sn><sn>Tujuh.</sn></target>"
+            return json.dumps(["Satu.", "Dua.", "Tiga.", "Empat.", "Lima.", "Enam.", "Tujuh."])
         if n_lines == 3:
-            return "<target><sn>Delapan.</sn><sn>Sembilan.</sn><sn>Sepuluh.</sn></target>"
-        return "<target><sn>Satu.</sn></target>"
+            return json.dumps(["Delapan.", "Sembilan.", "Sepuluh."])
+        return json.dumps(["Satu."])
 
     o.post_chat = fake_post_chat
-    refs = "アーシア翻译成Asia；イッセー翻译成Issei"
+    # knowledge-style block (must contain => and official guidance, not REF)
+    refs = "KNOWLEDGE \u2014 official names for this series. When a Japanese form below appears (including aliases), translate it as its official English name:\n- \u30a2\u30fc\u30b7\u30a2 => Asia (character)\n- \u30a4\u30c3\u30bb\u30fc => Issei (character)"
     groups = o._translate_merge_aware(build_cfg(), fake_ja_lines(10), "Indonesian", "k", refs=refs)
     assert len(groups) == 10
     for s in seen:
-        assert "参考下面的翻译：\n" + refs in s, s[:80]
+        assert refs in s, s[:120]
+        assert "=>" in s and "KNOWLEDGE" in s
+        assert "REF:" not in s
     print("PASS glossary_refs_flow")
 
 
@@ -584,14 +609,12 @@ def test_jellyfin_refresh():
 
 
 def test_translate_overcount_clamped():
-    """Model returns MORE <sn> entries than the chunk (12 for 10):
+    """Model returns MORE JSON entries than the chunk (12 for 10):
     entries with k > n must be dropped so exactly n groups are produced and
     cue assembly (cues[s]) never overruns the chunk."""
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        return "<target>" + "".join(
-            f"<sn>Baris nomor {i}.</sn>" for i in range(1, 13)
-        ) + "</target>"
+        return json.dumps([f"Baris nomor {i}." for i in range(1, 13)])
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(
@@ -760,19 +783,13 @@ def test_actions_truncate_preserves_appended():
 
 
 def test_translate_stray_prose_ignored():
-    """Model wraps <target> in stray prose and returns MORE <sn> entries
+    """Model wraps JSON in stray prose and returns MORE JSON entries
     than the chunk (12 for 10): prose outside the tags is ignored and
     entries with k > n are dropped, so exactly n groups are produced and
     cue assembly never overruns the chunk."""
 
     def fake_post_chat(cfg, messages, model, key, local=False):
-        return (
-            "Berikut terjemahannya: "
-            + "<target>"
-            + "".join(f"<sn>Baris nomor {i}.</sn>" for i in range(1, 13))
-            + "</target>"
-            + " Selesai."
-        )
+        return "Berikut terjemahannya: " + json.dumps([f"Baris nomor {i}." for i in range(1, 13)]) + " Selesai."
 
     o.post_chat = fake_post_chat
     groups = o._translate_merge_aware(
@@ -3477,9 +3494,12 @@ def test_movie_candidates():
     side_stem = os.path.splitext(paths["Side.mkv"])[0]
     open(side_stem + ".id.srt", "w").close()
     saved_reg = o.REGISTRY_FILE
+    saved_state = o.STATE_FILE
     saved_log = o.log
     saved_get = o.get_movies
     logs = []
+    o.STATE_FILE = os.path.join(d, "state.jsonl")
+    open(o.STATE_FILE, "w").close()
     o.REGISTRY_FILE = os.path.join(d, "registry.jsonl")
     with open(o.REGISTRY_FILE, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"stem": reg_stem, "lang": "id", "source": "asr"}) + "\n")
@@ -3509,6 +3529,7 @@ def test_movie_candidates():
         assert any("ERROR fetching movies list" in l for l in logs), logs
     finally:
         o.REGISTRY_FILE = saved_reg
+        o.STATE_FILE = saved_state
         o.log = saved_log
         o.get_movies = saved_get
     print("PASS movie_candidates")
@@ -4379,6 +4400,208 @@ def test_recover_fileless_movies():
     finally:
         o.STATE_FILE, o.REGISTRY_FILE, o.get_movies = saved
     print("PASS recover_fileless_movies")
+
+
+def test_post_chat_local_params():
+    """post_chat local payload must be exactly temperature 0.1, top_k 40, top_p 0.9, repeat_penalty 1.10, max_tokens 8192."""
+    captured = {}
+
+    class FakeResp:
+        def __init__(self):
+            self.status_code = 200
+            self.text = ""
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+        def raise_for_status(self):
+            pass
+
+    saved_requests = o.requests
+    saved_post = o.post_chat
+    class FakeRequests:
+        @staticmethod
+        def post(url, headers=None, json=None, timeout=None):
+            captured["payload"] = json
+            return FakeResp()
+    o.requests = FakeRequests
+    o.post_chat = _REAL_POST_CHAT
+    try:
+        cfg = build_cfg()
+        payload = o.post_chat(cfg, [{"role": "user", "content": "hi"}], "model", "key", local=True)
+        p = captured.get("payload")
+        assert p is not None, "post_chat did not call requests.post"
+        assert p["temperature"] == 0.1, p
+        assert p["top_k"] == 40, p
+        assert p["top_p"] == 0.9, p
+        assert p["repeat_penalty"] == 1.10, p
+        assert p["max_tokens"] == 8192, p
+        # cloud branch must remain untouched (checked byte-identical via else payload)
+        # verify else branch still has thinking effort max
+        captured.clear()
+        o.post_chat(cfg, [{"role": "user", "content": "hi"}], "model", "key", local=False)
+        p2 = captured.get("payload")
+        assert p2["temperature"] == 0.3, p2
+        assert p2["thinking"] == {"type": "enabled", "effort": "max"}, p2
+    finally:
+        o.requests = saved_requests
+        o.post_chat = saved_post
+    print("PASS post_chat_local_params")
+
+
+def test_glossary_v2_roundtrip():
+    """Load a v2-shaped fixture, assert knowledge_entries and knowledge_block."""
+    import tempfile
+    from pipeline import glossary as g
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "glossary.json")
+    fixture = {
+        "My Series": {
+            "entries": [
+                {"ja": "イッセー", "en": "Issei Hyoudou", "aliases": ["イッセイ"], "kind": "character", "note": ""},
+                {"ja": "リアス", "en": "Rias Gremory", "aliases": [], "kind": "character", "note": ""},
+                {"ja": "京都", "en": "Kyoto", "aliases": ["キョウト"], "kind": "place", "note": "main"},
+            ]
+        }
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(fixture, fh, ensure_ascii=False)
+    saved = g.GLOSSARY_FILE
+    g.GLOSSARY_FILE = path
+    g.reset_cache()
+    try:
+        entries = g.knowledge_entries("My Series")
+        assert len(entries) == 3, entries
+        assert entries[0]["ja"] == "イッセー" and entries[0]["en"] == "Issei Hyoudou", entries[0]
+        assert entries[0]["aliases"] == ["イッセイ"], entries[0]
+        assert entries[2]["kind"] == "place", entries[2]
+        block = g.knowledge_block("My Series")
+        assert "Issei Hyoudou" in block and "イッセー" in block, block
+        assert "=>" in block, block
+        assert "REF:" not in block, block
+        assert "official" in block.lower(), block
+    finally:
+        g.GLOSSARY_FILE = saved
+        g.reset_cache()
+    print("PASS glossary_v2_roundtrip")
+
+
+def test_glossary_v1_migration():
+    """Legacy flat-map fixture migrates in memory to entries with note v1-migrated."""
+    import tempfile
+    from pipeline import glossary as g
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "glossary.json")
+    fixture = {
+        "My Series": {"イッセー": "Issei", "アーシア": "Asia"},
+        "Other": {"entries": [{"ja": "テスト", "en": "Test", "aliases": [], "kind": "term", "note": ""}]}
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(fixture, fh, ensure_ascii=False)
+    saved = g.GLOSSARY_FILE
+    g.GLOSSARY_FILE = path
+    g.reset_cache()
+    try:
+        entries = g.knowledge_entries("My Series")
+        assert len(entries) == 2, entries
+        for e in entries:
+            assert e["note"] == "v1-migrated", e
+            assert e["kind"] == "character", e
+            assert e["aliases"] == [], e
+        # file must not have been rewritten implicitly
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        assert "entries" not in raw["My Series"], "glossary.json must not be rewritten implicitly"
+        assert raw["My Series"]["イッセー"] == "Issei"
+    finally:
+        g.GLOSSARY_FILE = saved
+        g.reset_cache()
+    print("PASS glossary_v1_migration")
+
+
+def test_knowledge_block_rendering():
+    """knowledge_block contains official-en guidance line, contains =>, and does NOT contain REF:"""
+    import tempfile
+    from pipeline import glossary as g
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "glossary.json")
+    fixture = {
+        "My Series": {
+            "entries": [
+                {"ja": "イッセー", "en": "Issei Hyoudou", "aliases": ["イッセイ"], "kind": "character", "note": ""},
+            ]
+        }
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(fixture, fh, ensure_ascii=False)
+    saved = g.GLOSSARY_FILE
+    g.GLOSSARY_FILE = path
+    g.reset_cache()
+    try:
+        block = g.knowledge_block("My Series")
+        assert "official" in block.lower(), block
+        assert "=>" in block, block
+        assert "REF:" not in block, block
+        assert "KNOWLEDGE" in block, block
+        # alias rendering
+        assert "イッセイ" in block, block
+        assert "character" in block, block
+        # empty case
+        empty = g.knowledge_block("No Such Series")
+        assert empty == "", empty
+    finally:
+        g.GLOSSARY_FILE = saved
+        g.reset_cache()
+    print("PASS knowledge_block_rendering")
+
+
+def test_cast_resolution_match_and_fallback():
+    """Matching picks subset; <3 matches returns full list."""
+    import tempfile
+    from pipeline import glossary as g
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "glossary.json")
+    fixture = {
+        "My Series": {
+            "entries": [
+                {"ja": "イッセー", "en": "Issei Hyoudou", "aliases": ["Issei"], "kind": "character", "note": ""},
+                {"ja": "リアス", "en": "Rias Gremory", "aliases": ["Rias"], "kind": "character", "note": ""},
+                {"ja": "アーシア", "en": "Asia Argento", "aliases": [], "kind": "character", "note": ""},
+                {"ja": "京都", "en": "Kyoto", "aliases": [], "kind": "place", "note": ""},
+                {"ja": "学園", "en": "Academy", "aliases": [], "kind": "place", "note": ""},
+            ]
+        }
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(fixture, fh, ensure_ascii=False)
+    saved = g.GLOSSARY_FILE
+    g.GLOSSARY_FILE = path
+    g.reset_cache()
+    try:
+        # matching picks subset when >=3 entries have surface forms in cues
+        cues = ["イッセーが来た", "リアスと話した", "京都で会った", "今日は晴れ"]
+        matched = g.matched_entries("My Series", cues)
+        assert len(matched) == 3, matched
+        names = {e["en"] for e in matched}
+        assert "Issei Hyoudou" in names and "Rias Gremory" in names and "Kyoto" in names, names
+        # alias case-insensitive match (Issei alias lowercasing)
+        cues2 = ["issei ga kita", "rias to hanashita", "kyoto de atta"]
+        matched2 = g.matched_entries("My Series", cues2)
+        assert len(matched2) == 3, matched2
+        # fallback: fewer than 3 matches -> full list
+        cues_few = ["イッセーだけ"]
+        fallback = g.matched_entries("My Series", cues_few)
+        assert len(fallback) == 5, fallback
+        # empty cues -> full list
+        fallback2 = g.matched_entries("My Series", [])
+        assert len(fallback2) == 5, fallback2
+        # block for cues respects same fallback
+        block_few = g.knowledge_block_for_cues("My Series", cues_few)
+        assert "Issei Hyoudou" in block_few and "Academy" in block_few, block_few
+        block_match = g.knowledge_block_for_cues("My Series", cues)
+        assert "Academy" not in block_match, block_match
+    finally:
+        g.GLOSSARY_FILE = saved
+        g.reset_cache()
+    print("PASS cast_resolution_match_and_fallback")
 
 
 if __name__ == "__main__":

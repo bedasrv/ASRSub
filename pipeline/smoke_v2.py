@@ -153,7 +153,7 @@ def main(argv):
         texts = [c["text"] for c in cues]
         cfg = {
             "TRANSLATE_BASE": "http://127.0.0.1:8011/v1",
-            "TRANSLATE_MODEL": "HY-MT1.5-7B-Q4_K_M.gguf",
+            "TRANSLATE_MODEL": "/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf",
             "SDH_PLACEHOLDERS": list(o.DEFAULT_SDH_PLACEHOLDERS),
         }
         key = "smoke"

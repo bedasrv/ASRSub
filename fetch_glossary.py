@@ -8,7 +8,7 @@ translation terminology without manual hardcoding.
 Pipeline contract (pipeline/glossary.py): glossary.json maps
     {"Series Title": {"アーシア": "Asia", ...}}
 keys are KANA readings (ASR/SenseVoice never outputs kanji), values are
-English/romaji names. terminology_block() emits at most 15 refs per series.
+English/romaji names. knowledge_block() renders official-name entries for the series.
 
 Name mapping rules (per character, MAIN first):
   - ja_key:  native name if it is pure katakana/hiragana (foreign-origin
@@ -306,18 +306,47 @@ def load_glossary(path):
 
 
 def merge_pairs(glossary, title, pairs):
-    """Returns (key, added, existing_count, skipped_full)."""
+    """Returns (key, added, existing_count, skipped_full) — v2 aware.
+
+    Ensures glossary[key] is a v2 dict {"entries": [...]}, migrating a legacy
+    flat-map series in place if needed. New entries are v2-shaped with
+    aliases=[], kind="character", note="".
+    """
     key = find_existing_key(glossary, title) or title
-    entries = glossary.setdefault(key, {})
+    raw = glossary.get(key)
+    if raw is None:
+        glossary[key] = {"entries": []}
+    elif isinstance(raw, dict) and "entries" in raw and isinstance(raw["entries"], list):
+        # already v2 — keep reference
+        pass
+    elif isinstance(raw, dict):
+        # legacy flat map -> migrate in place to v2
+        migrated = []
+        unknown = {}
+        for ja, en in raw.items():
+            if ja == "entries":
+                continue
+            if not isinstance(en, str) or not ja:
+                unknown[ja] = en
+                continue
+            migrated.append({"ja": str(ja), "en": str(en), "aliases": [], "kind": "character", "note": "v1-migrated"})
+        glossary[key] = {"entries": migrated}
+        for k, v in unknown.items():
+            glossary[key][k] = v
+    else:
+        glossary[key] = {"entries": []}
+    entries = glossary[key]["entries"]
     existing_count = len(entries)
-    added = 0
     skipped_full = existing_count >= MAX_PAIRS_PER_SERIES
+    seen = {(e.get("ja"), e.get("en")) for e in entries}
+    added = 0
     for ja, en in pairs:
         if len(entries) >= MAX_PAIRS_PER_SERIES:
             break
-        if ja in entries:
+        if (ja, en) in seen:
             continue
-        entries[ja] = en
+        entries.append({"ja": str(ja), "en": str(en), "aliases": [], "kind": "character", "note": ""})
+        seen.add((ja, en))
         added += 1
     return key, added, existing_count, skipped_full
 
@@ -546,6 +575,77 @@ def write_glossary(glossary, path):
     os.replace(tmp, path)
 
 
+def upgrade_glossary_v2(path):
+    """Convert an existing glossary.json to schema v2 in place.
+
+    Writes a backup ``path.bak-v1`` first. Migrated entries get note
+    ``v1-migrated``. Unknown top-level and per-series keys are preserved.
+    Already-v2 series are left intact (normalized). Never performs network
+    fetches.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        print(f"upgrade: {path} not found, nothing to do")
+        return 0
+    except (OSError, ValueError) as e:
+        print(f"upgrade: cannot read {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict):
+        print(f"upgrade: {path} is not a JSON object", file=sys.stderr)
+        sys.exit(1)
+    # backup
+    bak = path + ".bak-v1"
+    try:
+        with open(bak, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+    except OSError as e:
+        print(f"upgrade: cannot write backup {bak}: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"upgrade: wrote backup {bak}")
+    new_data = {}
+    for series, raw in data.items():
+        if not isinstance(raw, dict):
+            new_data[series] = raw
+            continue
+        if "entries" in raw and isinstance(raw["entries"], list):
+            # already v2 — normalize entries, preserve unknown per-series keys
+            unknown = {k: v for k, v in raw.items() if k != "entries"}
+            entries = []
+            for e in raw["entries"]:
+                if not isinstance(e, dict) or not e.get("ja") or not e.get("en"):
+                    continue
+                entries.append({
+                    "ja": str(e.get("ja")),
+                    "en": str(e.get("en")),
+                    "aliases": list(e.get("aliases") or []) if isinstance(e.get("aliases"), list) else ([str(e.get("aliases"))] if e.get("aliases") else []),
+                    "kind": e.get("kind") if e.get("kind") in ("character", "place", "term") else "character",
+                    "note": str(e.get("note") or ""),
+                })
+            new_data[series] = {"entries": entries}
+            for k, v in unknown.items():
+                new_data[series][k] = v
+        else:
+            # legacy flat map -> v2
+            entries = []
+            unknown = {}
+            for ja, en in raw.items():
+                if ja == "entries":
+                    continue
+                if not isinstance(en, str) or not ja:
+                    unknown[ja] = en
+                    continue
+                entries.append({"ja": str(ja), "en": str(en), "aliases": [], "kind": "character", "note": "v1-migrated"})
+            new_data[series] = {"entries": entries}
+            for k, v in unknown.items():
+                new_data[series][k] = v
+    write_glossary(new_data, path)
+    print(f"upgrade: wrote v2 {path} ({len(new_data)} series)")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -554,11 +654,16 @@ def main():
     ap.add_argument("--series", metavar="TITLE", help="fetch one title (used verbatim as glossary key)")
     ap.add_argument("--all", action="store_true", help="fetch every Sonarr/Radarr title missing from the glossary")
     ap.add_argument("--glossary", default=GLOSSARY_FILE, help="glossary.json path")
+    ap.add_argument("--upgrade-v2", action="store_true", help="convert glossary.json to schema v2 in place (writes .bak-v1, no network fetch)")
     args = ap.parse_args()
+    if args.upgrade_v2:
+        if args.series or args.all:
+            ap.error("--upgrade-v2 cannot be combined with --series or --all")
+        sys.exit(upgrade_glossary_v2(args.glossary))
     if args.series and args.all:
         ap.error("use either --series or --all, not both")
     if not args.series and not args.all:
-        ap.error("nothing to do: pass --series TITLE or --all")
+        ap.error("nothing to do: pass --series TITLE or --all or --upgrade-v2")
 
     glossary = load_glossary(args.glossary)
     print(f"glossary: {args.glossary} ({len(glossary)} series loaded)")

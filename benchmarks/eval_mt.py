@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """MT quality eval: translate FLORES-200 devtest sample (jpn_Jpan -> ind_Latn)
-with the local HY-MT1.5-7B (OpenAI-compatible llama-server :8011), score with
+with the local Gemma model (OpenAI-compatible llama-server :8011) using its
+JSON-array translation contract, then score with
 sacrebleu spBLEU (flores200 tokenizer).
 
-Caveat: the model tends to merge consecutive short lines into one output line,
-so every source line is sent as a single-line request (slower but keeps the
-1:1 line pairing needed for BLEU).
+The evaluator sends one source line per request to keep 1:1 line pairing
+for BLEU; current Gemma merge behavior is not asserted here without a measurement.
 
 Usage:
   ~/benchmark/venvs/eval/bin/python benchmarks/eval_mt.py
@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SAMPLE_DIR = os.path.join(HERE, "data", "flores_sample")
 RESULTS_DIR = os.path.join(HERE, "results")
 BASE = "http://127.0.0.1:8011/v1"
-MODEL = "HY-MT1.5-7B-Q4_K_M.gguf"
+MODEL = "/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf"
 NUM_RETRIES = 4
 
 
@@ -33,9 +33,13 @@ def post_chat(line: str, timeout=240):
         "model": MODEL,
         "messages": [
             {"role": "system",
-             "content": "Translate the following Japanese sentence into natural Indonesian. "
-                        "Reply with only the translation, no extra text, no numbering."},
-            {"role": "user", "content": line},
+             "content": "Translate the source line into natural Indonesian. Reply ONLY with "
+                        "a JSON array of translated strings, preserving count and order."},
+            {"role": "user", "content": json.dumps({
+                "source_language": "Japanese",
+                "target_language": "Indonesian",
+                "lines": [line],
+            }, ensure_ascii=False)},
         ],
         "temperature": 0.1,
         "max_tokens": 512,
@@ -50,7 +54,11 @@ def post_chat(line: str, timeout=240):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
             text = data["choices"][0]["message"]["content"].strip()
-            return text
+            i, j = text.find("["), text.rfind("]")
+            values = json.loads(text[i : j + 1]) if i >= 0 and j > i else None
+            if not isinstance(values, list) or not values:
+                raise ValueError("translation response is not a non-empty JSON array")
+            return str(values[0])
         except Exception as e:
             wait = 5 * (attempt + 1)
             print(f"  retry {attempt + 1} after error {e!r}, sleeping {wait}s")
@@ -67,7 +75,7 @@ def clean(text: str) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-lines", type=int, default=300)
-    ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "mt_hy_mt15_flores200.json"))
+    ap.add_argument("--out", default=os.path.join(RESULTS_DIR, "mt_gemma_flores200.json"))
     args = ap.parse_args()
 
     with open(os.path.join(SAMPLE_DIR, "devtest.sample.ja.txt"), encoding="utf-8") as fh:

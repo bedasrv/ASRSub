@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-video subtitle quality test: ASR -> HY-MT1.5 7B merge-aware translate -> SRT.
+"""Single-video subtitle quality test: ASR -> local Gemma merge-aware translate -> SRT.
 
 The ASR backend follows the ASR_BACKEND env via orchestrator.asr_cues
 dispatch: faster-whisper (pipeline/asr.py) by default, SenseVoice
@@ -149,13 +149,16 @@ def main(argv):
         guarded, _foreign = o.guard_foreign_lines(sanitized)
         cfg = {
             "TRANSLATE_BASE": "http://127.0.0.1:8011/v1",
-            "TRANSLATE_MODEL": "HY-MT1.5-7B-Q4_K_M.gguf",
+            "TRANSLATE_MODEL": "/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf",
             "SDH_PLACEHOLDERS": list(o.DEFAULT_SDH_PLACEHOLDERS),
         }
         lang_name = o.LANG_NAMES.get(args.lang, args.lang)
-        refs = o.pipeline_glossary.terminology_block(args.series) if args.series else ""
+        # KNOWLEDGE block: stable prefix per episode, cast-resolved (scan full
+        # cue text once, fallback to full list when <3 match). Cached in local
+        # variable `knowledge` and reused identically across all chunks.
+        knowledge = o.pipeline_glossary.knowledge_block_for_cues(args.series, sanitized) if args.series else ""
         groups = o._translate_merge_aware(
-            cfg, guarded, lang_name, "oneshot", refs=refs,
+            cfg, guarded, lang_name, "oneshot", refs=knowledge,
             emotions=([c.get("emotion") for c in cues] if o.EMO_ENABLED else None),
         )
         cues_out = []
