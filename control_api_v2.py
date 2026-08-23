@@ -647,6 +647,7 @@ class ControlAPIv2:
                 "consecutive_failures": None,
                 "started_at": None,
                 "state_counts": None,
+                "queue": None,
             }
         return {
             "reachable": True,
@@ -659,6 +660,7 @@ class ControlAPIv2:
             "consecutive_failures": data.get("consecutive_failures"),
             "started_at": data.get("started_at"),
             "state_counts": data.get("state_counts"),
+            "queue": data.get("queue"),
         }
 
     def _gpu(self):
@@ -1220,6 +1222,7 @@ class ControlAPIv2:
             "daemon": daemon,
             "state_counts": counts,
             "queue": {"wanted": wanted.get("total", 0), "movies": movies_remaining},
+            "job_queue": daemon.get("queue"),
             "movies": {"total": movie_total, "remaining": movies_remaining},
             "series": {
                 "total": series_done + series_remaining,
