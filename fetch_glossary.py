@@ -497,10 +497,12 @@ def anilist_search_str(title):
     return title.replace("\u00d7", "x")
 
 
-def fetch_media(title, is_movie=False):
+def fetch_media(title, is_movie=False, search=None):
     """Search AniList; returns media dict or None. Exact romaji/english
-    match preferred; falls back to the first result with a warning."""
-    search = anilist_search_str(title)
+    match preferred; falls back to the first result with a warning.
+    search overrides the query string (title stays the glossary/cache key);
+    useful when the library title differs from any AniList title."""
+    search = anilist_search_str(search or title)
     results = []
     warn = None
     if is_movie:
@@ -567,7 +569,7 @@ def fetch_characters(media):
     return chars
 
 
-def resolve_characters(cache, title, is_movie=False):
+def resolve_characters(cache, title, is_movie=False, search=None):
     """Returns (chars, source): chars from the disk cache when fresh,
     otherwise from AniList (and cached on success). source is 'cache' or
     'api'; on failure returns (None, reason-string)."""
@@ -576,7 +578,7 @@ def resolve_characters(cache, title, is_movie=False):
         return entry["characters"], "cache"
     if entry:
         print(f"[cache] stale {title} (refreshing)")
-    media, warn = fetch_media(title, is_movie=is_movie)
+    media, warn = fetch_media(title, is_movie=is_movie, search=search)
     if media is None:
         return None, warn
     chars = fetch_characters(media)
@@ -592,7 +594,7 @@ def resolve_characters(cache, title, is_movie=False):
     return chars, "api"
 
 
-def process_title(cache, glossary, title, is_movie=False):
+def process_title(cache, glossary, title, is_movie=False, search=None):
     """Fetch (cache-first) + merge one title; returns a summary line dict."""
     # glossary-as-cache: series already at the ref cap -> no API call at all,
     # UNLESS its entries still lack aliases (alias enrichment needs one fetch)
@@ -607,14 +609,14 @@ def process_title(cache, glossary, title, is_movie=False):
             if k != "entries" and isinstance(v, str)
         ]
     if len(entries_now) >= MAX_PAIRS_PER_SERIES and all(
-        not (e.get("aliases") if isinstance(e, dict) else None) for e in entries_now
+        (e.get("aliases") if isinstance(e, dict) else None) for e in entries_now
     ):
         return {
             "title": title,
             "warn": f"glossary already full ({len(entries_now)} refs); skipped",
             "ok": False,
         }
-    chars, src = resolve_characters(cache, title, is_movie=is_movie)
+    chars, src = resolve_characters(cache, title, is_movie=is_movie, search=search)
     if src != "cache" and src != "api":
         return {"title": title, "warn": src, "ok": False}
     print(f"[cache] {'hit' if src == 'cache' else 'miss'} {title}")
@@ -745,6 +747,7 @@ def main():
     ap = argparse.ArgumentParser(description="AniList glossary fetcher")
     ap.add_argument("--series", metavar="TITLE", help="fetch one title (used verbatim as glossary key)")
     ap.add_argument("--movie", action="store_true", help="with --series: treat the title as a movie (MOVIE-format AniList search first)")
+    ap.add_argument("--search", metavar="TEXT", help="with --series: override the AniList search string (glossary/cache still key on TITLE)")
     ap.add_argument("--all", action="store_true", help="fetch every Sonarr/Radarr title missing from the glossary")
     ap.add_argument("--glossary", default=GLOSSARY_FILE, help="glossary.json path")
     ap.add_argument("--upgrade-v2", action="store_true", help="convert glossary.json to schema v2 in place (writes .bak-v1, no network fetch)")
@@ -765,7 +768,10 @@ def main():
 
     summaries = []
     if args.series:
-        summaries.append(process_title(cache, glossary, args.series, is_movie=args.movie))
+        summaries.append(process_title(
+            cache, glossary, args.series, is_movie=args.movie,
+            search=(args.search.strip() or None) if args.search else None,
+        ))
     else:
         try:
             titles = []
