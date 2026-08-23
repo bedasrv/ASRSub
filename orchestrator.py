@@ -231,6 +231,15 @@ def _queue_clear():
         _queue_next_idx = 0
 
 
+def _queue_summary():
+    snap = _queue_snapshot()
+    return {
+        "items": snap[:20],
+        "queued_total": sum(1 for j in snap if j["state"] == "queued"),
+        "running": bool(any(j["state"] == "running" for j in snap)),
+    }
+
+
 _current = None  # ONLY mutated by _tracked's runner below
 
 
@@ -5182,6 +5191,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                     "run_once_requested": _run_once_requested,
                     "last_pass": _last_pass_stats,
                     "current": _current or None,
+                    "queue": _queue_summary(),
                     "movies_remaining": movies_remaining,
                     "state_counts": self._state_counts(),
                     "consecutive_failures": _consecutive_failures,

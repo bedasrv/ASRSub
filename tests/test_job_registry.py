@@ -59,6 +59,35 @@ class TestJobRegistry(unittest.TestCase):
         self.assertNotIn("_current =", src.replace('current": _current', ""),
                          "run_pass must not assign _current directly")
 
+    def test_queue_summary_counts(self):
+        from orchestrator import _queue_summary
+        _queue_clear()
+        _queue_enqueue({"kind": "movie", "title": "A", "lang": "ja"})
+        _queue_enqueue({"kind": "series", "title": "B", "lang": "id"})
+        s = _queue_summary()
+        self.assertEqual(s["queued_total"], 2)
+        self.assertEqual(len(s["items"]), 2)
+
+    def test_queue_summary_running_flag(self):
+        from orchestrator import _queue_summary
+        _queue_clear()
+        _queue_enqueue({"kind": "movie", "title": "A", "lang": "ja"})
+        _queue_set_running(0)
+        s = _queue_summary()
+        self.assertTrue(s["running"])
+        self.assertEqual(s["queued_total"], 0)
+
+    def test_tracked_propagates_exception_and_clears(self):
+        import orchestrator
+        def bad():
+            raise RuntimeError("boom")
+        desc = {"kind": "movie", "title": "T", "lang": "ja", "stage": "translate"}
+        fut = orchestrator._tracked(desc, bad)
+        with self.assertRaises(RuntimeError):
+            fut.result()
+        self.assertIsNone(orchestrator._current)
+        self.assertEqual(orchestrator._queue_snapshot(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
