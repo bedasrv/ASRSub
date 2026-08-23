@@ -836,7 +836,7 @@ body.sel-mode .bottom-nav { display: none; }
         <div class="status-meta">
           <span class="muted">Uptime: <span id="st-uptime">–</span></span>
           <span class="muted">Queue: <span id="st-queue">–</span></span>
-          <span class="muted">Now: <span id="st-current">–</span></span>
+          <span class="muted">Now: <span id="st-current">–</span><span id="st-queued" class="t-pill queued"></span></span>
         </div>
         <div class="ctl-actions">
           <button id="act-resume" class="m3-btn filled" onclick="ctlAction('resume')">Resume</button>
@@ -1215,6 +1215,18 @@ function renderStatus(data) {
     } else {
       curEl.textContent = "–";
       curEl.classList.remove("live");
+    }
+  }
+  const jq = (data.daemon && data.daemon.job_queue) || null;
+  const queued = (jq && jq.items || []).filter(j => j.state === "queued");
+  const qEl = document.getElementById("st-queued");
+  if (qEl) {
+    if (queued.length > 0) {
+      qEl.textContent = ` · ${queued.length} queued`;
+      qEl.title = queued.map(j => `${j.title || j.series} [${j.lang}]`).join("\n");
+    } else {
+      qEl.textContent = "";
+      qEl.title = "";
     }
   }
 
