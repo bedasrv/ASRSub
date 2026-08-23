@@ -4047,6 +4047,7 @@ def process_after_asr(
                 ep_id,
                 prior_cache,
                 series_title=series,
+                skip_guard=(decision.get("asr_lang") == "en"),
             )
             if groups is None:
                 raise RuntimeError("translation failed")
