@@ -4709,20 +4709,10 @@ def run_pass():
                 t0 = time.time()
                 wav_path = srt_path = ""
                 try:
-                    _current = {
-                        "kind": kind,
-                        "episode_id": ep_id,
-                        "series": series,
-                        "lang": lang,
-                        "stage": "asr",
-                        "since": datetime.now(timezone.utc).isoformat(),
-                    }
                     if item.get("movie"):
                         movie_id = item["radarrId"]
                         title = item.get("movieTitle") or "?"
                         tag = "MOVIE"
-                        if _current:
-                            _current["title"] = title
                         container_path = item["path"]
                         media_path = map_path(container_path)
                         if not os.path.isfile(media_path):
@@ -4800,22 +4790,15 @@ def run_pass():
                                 f"  MOVIE {title} [{ladder['kind']}->{lang}] ladder "
                                 f"source {ladder['source_path']}"
                             )
-                            if _current:
-                                _current["stage"] = "translate"
+                            desc = {
+                                "kind": kind, "episode_id": ep_id, "series": series,
+                                "title": item.get("movieTitle") if item.get("movie") else None,
+                                "tag": tag if item.get("movie") else None,
+                                "lang": lang,
+                                "stage": "translate" if item.get("movie") else "asr",
+                            }
                             futures.append(
-                                pool.submit(
-                                    process_ladder,
-                                    cfg,
-                                    key,
-                                    movie_id,
-                                    lang,
-                                    title,
-                                    tag,
-                                    ladder,
-                                    info,
-                                    prior_cache=prior_cache,
-                                    movie_id=movie_id,
-                                )
+                                pool.submit(_tracked(desc, process_ladder, cfg, key, movie_id, lang, title, tag, ladder, info, prior_cache=prior_cache, movie_id=movie_id))
                             )
                             continue
                         wav_path = os.path.join(
@@ -4860,27 +4843,15 @@ def run_pass():
                                 f"  MOVIE [{src}->{lang}] ASR {asr_elapsed:.0f}s, "
                                 f"{len(cues)} cues"
                             )
-                        if _current:
-                            _current["stage"] = "translate"
+                        desc = {
+                            "kind": kind, "episode_id": ep_id, "series": series,
+                            "title": item.get("movieTitle") if item.get("movie") else None,
+                            "tag": tag if item.get("movie") else None,
+                            "lang": lang,
+                            "stage": "translate" if item.get("movie") else "asr",
+                        }
                         futures.append(
-                            pool.submit(
-                                process_after_asr,
-                                cfg,
-                                key,
-                                movie_id,
-                                lang,
-                                title,
-                                tag,
-                                src,
-                                t0,
-                                cues,
-                                decision,
-                                info,
-                                wav_path,
-                                srt_path,
-                                prior_cache=prior_cache,
-                                movie_id=movie_id,
-                            )
+                            pool.submit(_tracked(desc, process_after_asr, cfg, key, movie_id, lang, title, tag, src, t0, cues, decision, info, wav_path, srt_path, prior_cache=prior_cache, movie_id=movie_id))
                         )
                         continue
                     info = get_episode(cfg, ep_id)
@@ -4891,8 +4862,6 @@ def run_pass():
                         if isinstance(season, int) and isinstance(episode_num, int)
                         else f"S{season}E{episode_num}"
                     )
-                    if _current:
-                        _current["tag"] = tag
                     ef = info.get("episodeFile") or {}
                     if not info.get("hasFile") or not ef.get("path"):
                         log(f"skip: {tag} {series} [{lang}] hasFile=false or no path")
@@ -4980,21 +4949,15 @@ def run_pass():
                         log(
                             f"  {tag} {series} [{ladder['kind']}->{lang}] ladder source {ladder['source_path']}"
                         )
-                        if _current:
-                            _current["stage"] = "translate"
+                        desc = {
+                            "kind": kind, "episode_id": ep_id, "series": series,
+                            "title": item.get("movieTitle") if item.get("movie") else None,
+                            "tag": tag if item.get("movie") else None,
+                            "lang": lang,
+                            "stage": "translate" if item.get("movie") else "asr",
+                        }
                         futures.append(
-                            pool.submit(
-                                process_ladder,
-                                cfg,
-                                key,
-                                ep_id,
-                                lang,
-                                series,
-                                tag,
-                                ladder,
-                                info,
-                                prior_cache=prior_cache,
-                            )
+                            pool.submit(_tracked(desc, process_ladder, cfg, key, ep_id, lang, series, tag, ladder, info, prior_cache=prior_cache))
                         )
                         continue
 
@@ -5025,30 +4988,18 @@ def run_pass():
                         log(
                             f"  {tag} [{src}->{lang}] ASR {asr_elapsed:.0f}s, {len(cues)} cues"
                         )
-                    if _current:
-                        _current["stage"] = "translate"
+                    desc = {
+                        "kind": kind, "episode_id": ep_id, "series": series,
+                        "title": item.get("movieTitle") if item.get("movie") else None,
+                        "tag": tag if item.get("movie") else None,
+                        "lang": lang,
+                        "stage": "translate" if item.get("movie") else "asr",
+                    }
                     futures.append(
-                        pool.submit(
-                            process_after_asr,
-                            cfg,
-                            key,
-                            ep_id,
-                            lang,
-                            series,
-                            tag,
-                            src,
-                            t0,
-                            cues,
-                            decision,
-                            info,
-                            wav_path,
-                            srt_path,
-                            prior_cache=prior_cache,
-                        )
+                        pool.submit(_tracked(desc, process_after_asr, cfg, key, ep_id, lang, series, tag, src, t0, cues, decision, info, wav_path, srt_path, prior_cache=prior_cache))
                     )
                 except Exception as exc:
                     failed += 1
-                    _current = None
                     for f in (wav_path, srt_path):
                         if f:
                             try:
@@ -5071,7 +5022,6 @@ def run_pass():
                     )
 
         for fut in as_completed(futures):
-            _current = None
             if fut.result() == "done":
                 done += 1
             else:
@@ -5101,7 +5051,6 @@ def run_pass():
                 movies_remaining = len(movie_candidates(cfg, target_langs))
             except Exception:
                 movies_remaining = None
-    _current = None
     log(
         f"pass summary: processed={processed} done={done} skipped={skipped} failed={failed} "
         f"wanted_before={wanted_before} wanted_after={wanted_after} "

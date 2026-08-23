@@ -53,6 +53,12 @@ class TestJobRegistry(unittest.TestCase):
         self.assertEqual(fut.result(), "done")
         self.assertIsNone(orchestrator._current)
 
+    def test_no_direct_current_writes_in_run_pass(self):
+        import inspect, orchestrator
+        src = inspect.getsource(orchestrator.run_pass)
+        self.assertNotIn("_current =", src.replace('current": _current', ""),
+                         "run_pass must not assign _current directly")
+
 
 if __name__ == "__main__":
     unittest.main()
