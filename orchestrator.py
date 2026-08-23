@@ -2994,8 +2994,9 @@ def _local_chunk(cfg, chunk, lang_name, key, refs=None, context_lines=None,
 def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None,
                    context_lines=None, emotions=None):
     """Up to 3 attempts per chunk; corrective retry on echo OR wrong-script
-    output (target-script guard). Returns clean parsed dict or None (all
-    attempts empty/echo/wrong-script/network-fail)."""
+    output (target-script guard). Echo probe is skipped for Japanese targets
+    (correct output always contains kana/kanji). Returns clean parsed dict or
+    None (all attempts empty/echo/wrong-script/network-fail)."""
     n = len(chunk)
     for _ in range(3):
         parsed = _local_chunk(cfg, chunk, lang_name, key, refs=refs,
@@ -3004,6 +3005,8 @@ def _attempt_chunk(cfg, chunk, lang_name, key, echo_probe=11, refs=None,
             continue
         if any(_wrong_script(t, lang_name) for t in parsed.values()):
             continue
+        if lang_name == "Japanese":
+            return parsed
         echo = False
         for k in range(1, min(echo_probe, n) + 1):
             t = parsed.get(k)
