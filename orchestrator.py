@@ -40,6 +40,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from pipeline import asr as pipeline_asr
 from pipeline import glossary as pipeline_glossary
+import jimaku_api
 
 _LOG_LOCK = threading.Lock()
 _LOG_RING = collections.deque(maxlen=25)
@@ -129,6 +130,16 @@ LADDER_COOLDOWN_H = int(os.environ.get("LADDER_COOLDOWN_H", "24"))
 LADDER_JIMAKU_HUNT_BUDGET = int(os.environ.get("LADDER_JIMAKU_HUNT_BUDGET", "15"))
 LADDER_JIMAKU_HUNT_BUDGET_MOVIES = int(
     os.environ.get("LADDER_JIMAKU_HUNT_BUDGET_MOVIES", "10")
+)
+# Direct Jimaku REST access (jimaku_api.py): a jpn ladder rung + hunt fast
+# path that skips Bazarr's provider search entirely (raw-key Authorization
+# header, anilist_id entry search, per-episode file listing). Kill-switch
+# only — JIMAKU_API_KEY (pipeline.env, RAW, no Bearer prefix) is the one
+# required secret; everything else is measured defaults in jimaku_api.py.
+JIMAKU_DIRECT_ENABLED = os.environ.get("JIMAKU_DIRECT_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
 )
 LADDER_SKIP_REFINED = os.environ.get("LADDER_SKIP_REFINED", "true").lower() in (
     "1",
@@ -455,6 +466,9 @@ def _ladder_cfg(cfg):
             "LADDER_JIMAKU_HUNT_BUDGET_MOVIES", LADDER_JIMAKU_HUNT_BUDGET_MOVIES
         ),
         "skip_refined": _gb("LADDER_SKIP_REFINED", LADDER_SKIP_REFINED),
+        "jimaku_direct_enabled": _gb(
+            "JIMAKU_DIRECT_ENABLED", JIMAKU_DIRECT_ENABLED
+        ),
         "min_cues": _gi("LADDER_MIN_CUES", LADDER_MIN_CUES),
         "min_chars": _gi("LADDER_MIN_CHARS", LADDER_MIN_CHARS),
         "min_cjk": _gf("LADDER_MIN_CJK", LADDER_MIN_CJK),
@@ -1961,6 +1975,284 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
     return _ret(None, "searched" if searched else None)
 
 
+def _convert_ass_to_srt(sub_path, tmp_dir):
+    """ffmpeg .ass/.ssa -> srt conversion for Jimaku fansub downloads: the
+    adequacy gate parses SRT only, so an .ass candidate must be converted
+    BEFORE gating (same ffmpeg recipe as retime_external_subtitle's internal
+    conversion; kept separate so the battle-tested retime path stays
+    untouched). Returns the converted path or None (logged); the caller owns
+    cleanup of both input and output."""
+    token = f"{os.getpid()}_{int(time.time() * 1000)}"
+    conv = os.path.join(tmp_dir or "/tmp", f"jimaku_{token}_in.srt")
+    try:
+        pp = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                sub_path,
+                "-c:s",
+                "srt",
+                "-f",
+                "srt",
+                conv,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+        ok = (
+            pp.returncode == 0
+            and os.path.isfile(conv)
+            and os.path.getsize(conv) > 0
+        )
+    except Exception as exc:
+        ok = False
+        log(f"WARNING: ladder: jimaku direct: ffmpeg .ass/.ssa -> srt failed for {sub_path}: {exc}")
+    if not ok:
+        _silent_remove(conv)
+        return None
+    return conv
+
+
+# Ladder-side dedup: stems whose direct Jimaku rung was already attempted in
+# this daemon lifetime (mirrors _BAZARR_JPN_TRIED / _ADOPT_TRIED). The hunt
+# bypasses it via force=True — its own per-item backoff governs retry cadence.
+_JIMAKU_DIRECT_TRIED = set()
+_JIMAKU_KEY_WARNED = False
+
+
+def jimaku_direct_candidate(
+    cfg, media_path, series_title, season, episode, tmp_dir,
+    ep_id=None, return_meta=False, force=False,
+):
+    """Direct Jimaku REST candidate for one series episode (jimaku_api.py;
+    skips Bazarr's provider search entirely — verified live: raw-key
+    Authorization header, anilist_id entry search, per-episode file listing,
+    authenticated downloads).
+
+    Flow: resolve the series' AniList id (anilist_cache.json-first, shared
+    with fetch_glossary.py) -> entries/search?anilist_id= -> pick entry
+    (exact anilist match first, else first) -> entries/{id}/files?episode=N
+    -> rank candidates (release-tag/plain-S01E01 .srt preferred, fansub
+    .ass/.srt next, CHS/CHT bilinguals demoted when a JPN-only file exists)
+    -> download the best one into tmp_dir -> adequacy gate (.ass/.ssa
+    pre-converted via ffmpeg) -> ASR-anchored re-timing gate (skipped when
+    _sidecar_trusted) -> ON SUCCESS copy the aligned result to {stem}.jpn.srt
+    next to the video exactly like a Bazarr landing — registry, translations
+    for en/id and the upgrade pass adopt it unchanged — and register it as
+    trusted 'external' (the landed content IS the gate-approved output).
+
+    Max ~3 Jimaku calls per attempt (search + files + download) with a tiny
+    client pacing sleep between them, far below the 25 req/min limit. Jimaku
+    429 propagates as fall-through-with-log (meta 'rate_limited'), never
+    crashes the pass. Series episodes only: needs series_title and an int
+    episode (movies stay on the Bazarr-only path).
+
+    Returns the ladder hit dict (same shape as _external_hit: kind/
+    source_path/source_hash/cues/duration_s/tmp[/align_stats]) or None.
+    With return_meta=True returns (hit_or_None, meta) where meta explains a
+    miss: None (not applicable/dedup), 'disabled', 'missing_key',
+    'invalid_args', 'no_anilist', 'no_entry', 'no_files', 'convert_failed',
+    'gate_rejected', 'retime_rejected', 'download_failed', 'rate_limited',
+    'error', or 'hit'. The ladder dedups attempts per stem per daemon
+    lifetime (_JIMAKU_DIRECT_TRIED); the hunt passes force=True to retry
+    every hunt pass (its own backoff governs cadence). Never raises."""
+    lc = _ladder_cfg(cfg)
+
+    def _ret(hit, meta):
+        return (hit, meta) if return_meta else hit
+
+    global _JIMAKU_KEY_WARNED
+    if not lc.get("jimaku_direct_enabled"):
+        return _ret(None, "disabled")
+    stem = os.path.splitext(media_path)[0]
+    if not force:
+        if stem in _JIMAKU_DIRECT_TRIED:
+            return _ret(None, None)
+        _JIMAKU_DIRECT_TRIED.add(stem)
+    if not series_title or not isinstance(episode, int) or episode <= 0:
+        return _ret(None, "invalid_args")
+    api_key = str(
+        cfg.get("JIMAKU_API_KEY") or os.environ.get("JIMAKU_API_KEY") or ""
+    ).strip()
+    if not api_key:
+        if not _JIMAKU_KEY_WARNED:
+            _JIMAKU_KEY_WARNED = True
+            log(
+                "WARNING: ladder: jimaku direct: JIMAKU_API_KEY not configured "
+                "(pipeline.env); direct Jimaku access disabled"
+            )
+        return _ret(None, "missing_key")
+
+    temps = []
+
+    def _cleanup():
+        for p in temps:
+            _silent_remove(p)
+
+    tag = f"S{season:02d}E{episode:02d}" if isinstance(season, int) else f"E{episode}"
+    try:
+        anilist_id = jimaku_api.resolve_anilist_id(cfg, series_title, log=log)
+        if not anilist_id:
+            log(
+                f"ladder: jimaku direct: no AniList id for '{series_title}' "
+                f"{tag} (ep {ep_id})"
+            )
+            return _ret(None, "no_anilist")
+        client = jimaku_api.JimakuClient(api_key=api_key)
+        try:
+            entries = client.search_by_anilist(anilist_id)
+        except jimaku_api.JimakuRateLimited as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: entry search rate limited "
+                f"{tag} (ep {ep_id}): {exc}"
+            )
+            return _ret(None, "rate_limited")
+        except jimaku_api.JimakuError as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: entry search failed for "
+                f"anilist {anilist_id} {tag} (ep {ep_id}): {exc}"
+            )
+            return _ret(None, "error")
+        entry = jimaku_api.pick_entry(entries, anilist_id)
+        if entry is None:
+            log(
+                f"ladder: jimaku direct: no Jimaku entry for anilist "
+                f"{anilist_id} '{series_title}' {tag} (ep {ep_id})"
+            )
+            return _ret(None, "no_entry")
+        try:
+            entry_id = int(entry.get("id"))
+        except (TypeError, ValueError):
+            log(
+                f"WARNING: ladder: jimaku direct: entry without usable id for "
+                f"anilist {anilist_id}: {entry}"
+            )
+            return _ret(None, "error")
+        try:
+            files = client.list_files(entry_id, episode=episode)
+        except jimaku_api.JimakuRateLimited as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: file list rate limited "
+                f"{tag} (entry {entry_id}, ep {ep_id}): {exc}"
+            )
+            return _ret(None, "rate_limited")
+        except jimaku_api.JimakuError as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: file list failed for entry "
+                f"{entry_id} {tag} (ep {ep_id}): {exc}"
+            )
+            return _ret(None, "error")
+        ranked = jimaku_api.rank_files(files)
+        if not ranked:
+            log(
+                f"ladder: jimaku direct: no usable subtitle files for entry "
+                f"{entry_id} {tag} (ep {ep_id})"
+            )
+            return _ret(None, "no_files")
+        best = ranked[0]
+        url = best.get("url")
+        name = os.path.basename(str(best.get("name") or url or "sub"))
+        # keep tmp filenames filesystem-safe without touching the original
+        safe_name = re.sub(r"[^A-Za-z0-9._\-\[\]() ]+", "_", name)[:150] or "sub.srt"
+        dest = os.path.join(tmp_dir or "/tmp", f"jimaku_{entry_id}_{safe_name}")
+        try:
+            client.download(url, dest)
+        except jimaku_api.JimakuRateLimited as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: download rate limited "
+                f"{tag} (ep {ep_id}): {exc}"
+            )
+            return _ret(None, "rate_limited")
+        except (jimaku_api.JimakuError, OSError) as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: download failed for "
+                f"{os.path.basename(str(name))} (ep {ep_id}): {exc}"
+            )
+            return _ret(None, "download_failed")
+        temps.append(dest)
+        work = dest
+        if os.path.splitext(work)[1].lower() in (".ass", ".ssa"):
+            conv = _convert_ass_to_srt(work, tmp_dir)
+            if conv is None:
+                _cleanup()
+                return _ret(None, "convert_failed")
+            temps.append(conv)
+            work = conv
+        duration = media_duration_s(media_path)
+        verdict = assess_source_file(cfg, work, "jpn", duration)
+        if not verdict["ok"]:
+            log(
+                f"WARNING: ladder: jimaku direct: {os.path.basename(work)} "
+                f"rejected by adequacy gate ({verdict['reason']}) {tag} (ep {ep_id})"
+            )
+            _cleanup()
+            return _ret(None, "gate_rejected")
+        trusted = _sidecar_trusted(stem, "jpn", media_path, dest)
+        stats = None
+        aligned = verdict
+        final = work
+        if lc["retime_enabled"] and not trusted:
+            retimed, stats = retime_external_subtitle(
+                work, media_path, cfg, tmp_dir, sub_lang="jpn"
+            )
+            if retimed is None:
+                log(
+                    f"WARNING: ladder: jimaku direct: {os.path.basename(work)} "
+                    f"rejected: retime gate failed (method={stats.get('method')}) "
+                    f"{tag} (ep {ep_id})"
+                )
+                _cleanup()
+                return _ret(None, "retime_rejected")
+            temps.append(retimed)
+            verdict_a = assess_source_file(cfg, retimed, "jpn", duration)
+            if not verdict_a["ok"]:
+                log(
+                    f"WARNING: ladder: jimaku direct: retimed {os.path.basename(work)} "
+                    f"rejected by adequacy gate ({verdict_a['reason']}) {tag} (ep {ep_id})"
+                )
+                _cleanup()
+                return _ret(None, "gate_rejected")
+            aligned = verdict_a
+            final = retimed
+        sidecar = stem + ".jpn.srt"
+        try:
+            shutil.copyfile(final, sidecar)
+        except OSError as exc:
+            log(
+                f"WARNING: ladder: jimaku direct: cannot land {sidecar}: {exc}"
+            )
+            _cleanup()
+            return _ret(None, "error")
+        _register_external_sidecar(
+            stem, "jpn", media_path, sidecar, aligned["source_hash"], ep_id, stats
+        )
+        _cleanup()
+        hit = {
+            "kind": "jpn",
+            "source_path": sidecar,
+            "source_hash": aligned["source_hash"],
+            "cues": aligned["cues"],
+            "duration_s": duration,
+            "tmp": False,
+        }
+        if stats:
+            hit["align_stats"] = stats
+        log(
+            f"ladder: jimaku direct: landed {os.path.basename(sidecar)} from "
+            f"jimaku entry {entry_id} {tag} (ep {ep_id})"
+        )
+        return _ret(hit, "hit")
+    except Exception as exc:
+        _cleanup()
+        log(f"WARNING: ladder: jimaku direct: unexpected failure {tag} (ep {ep_id}): {exc}")
+        return _ret(None, "error")
+
+
 def _silent_remove(path):
     if not path:
         return
@@ -2595,16 +2887,22 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
     return out, stats
 
 
-def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, series_id=None):
+def detect_ladder_source(
+    cfg, media_path, target_lang, tmp_dir, ep_id=None, series_id=None,
+    series_title=None, season=None, episode=None,
+):
     """Pull-based source ladder for one wanted (episode, target_lang) row.
     Order: jpn (external sidecar {stem}.jpn.srt / {stem}.ja.srt / their
     .jpn.hi/.ja.hi HI variants -> embedded
-    jpn stream -> Bazarr jpn) -> eng (external {stem}.eng.srt -> embedded eng
-    stream) -> asr. Every jpn/eng candidate must pass the adequacy gates.
-    External sidecars additionally pass the ASR-anchored re-timing gate
-    unless the registry marks them source_kind 'embedded' (aligned by
-    construction): a rejected retime falls through to the next rung. Never
-    raises; returns {"kind": "jpn"|"eng"|"asr", "source_path",
+    jpn stream -> Bazarr jpn -> DIRECT Jimaku REST) -> eng (external
+    {stem}.eng.srt -> embedded eng stream) -> asr. The direct Jimaku rung
+    (JIMAKU_DIRECT_ENABLED, series episodes only: needs series_title +
+    episode; see jimaku_direct_candidate) lands {stem}.jpn.srt like a Bazarr
+    download when everything else missed. Every jpn/eng candidate must pass
+    the adequacy gates. External sidecars additionally pass the ASR-anchored
+    re-timing gate unless the registry marks them source_kind 'embedded'
+    (aligned by construction): a rejected retime falls through to the next
+    rung. Never raises; returns {"kind": "jpn"|"eng"|"asr", "source_path",
     "source_hash", "cues", "duration_s", "tmp", "align_tmp",
     "align_stats"}. kind 'asr' = caller falls back to the existing ASR
     path."""
@@ -2704,6 +3002,12 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
     cand = bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir)
     if cand:
         hit = _external_hit(cand, "jpn")
+        if hit:
+            return hit
+    if lc.get("jimaku_direct_enabled"):
+        hit = jimaku_direct_candidate(
+            cfg, media_path, series_title, season, episode, tmp_dir, ep_id=ep_id
+        )
         if hit:
             return hit
 
@@ -4793,6 +5097,9 @@ def run_upgrades(cfg, key, prior_cache=None):
             cfg.get("TMP_DIR", "/tmp"),
             ep_id,
             info.get("seriesId") or info.get("sonarrSeriesId"),
+            series_title=info.get("seriesTitle") or info.get("title"),
+            season=info.get("seasonNumber"),
+            episode=info.get("episodeNumber"),
         )
         if ladder["kind"] != "jpn":
             continue
@@ -4936,6 +5243,14 @@ def run_jimaku_hunt(cfg, prior_cache=None):
     return_meta=True); a fresh download lands as a plain {stem}.jpn.srt
     sidecar — no re-timing/registration here, the normal ladder + upgrade pass
     adopts it on subsequent passes.
+    Series items try the DIRECT Jimaku path first (jimaku_direct_candidate,
+    JIMAKU_DIRECT_ENABLED): resolve + list_files for that episode without
+    Bazarr; a fresh {stem}.jpn.srt landing counts as landed and SKIPS the
+    Bazarr search for that item. Only when the direct path cannot run or
+    finds nothing does the flow fall through to bazarr_jpn_candidate below.
+    Movies stay on the Bazarr-only path. A Jimaku 429 on the direct path
+    aborts the rest of the pass exactly like a Bazarr 429 (no attempt
+    counted).
     Guards: per-item exponential backoff on jimaku_hunt_last_ts /
     jimaku_hunt_attempts (30m, 1h, 2h, 4h, 8h, 16h, 24h cap), per-pass budget
     (LADDER_JIMAKU_HUNT_BUDGET, shared with movies; LADDER_JIMAKU_HUNT_BUDGET_MOVIES
@@ -5083,6 +5398,44 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                 continue
             series_id = info.get("seriesId") or info.get("sonarrSeriesId")
             key = (ep_id, series_id)
+            # DIRECT Jimaku fast path: resolve + list_files for THIS episode
+            # without Bazarr's provider lag. A fresh {stem}.jpn.srt landing
+            # counts as landed and skips the Bazarr search entirely; any miss
+            # falls through to the providers flow below.
+            if lc.get("jimaku_direct_enabled"):
+                try:
+                    dhit, dmeta = jimaku_direct_candidate(
+                        cfg,
+                        media_path,
+                        info.get("seriesTitle") or info.get("title"),
+                        info.get("seasonNumber"),
+                        info.get("episodeNumber"),
+                        cfg.get("TMP_DIR", "/tmp"),
+                        ep_id=ep_id,
+                        return_meta=True,
+                        force=True,
+                    )
+                except Exception as exc:
+                    log(f"WARNING: jimaku hunt: direct path failed for ep {ep_id}: {exc}")
+                    dhit, dmeta = None, None
+                if dmeta == "hit":
+                    searched += 1
+                    _BAZARR_JPN_CACHE.pop(key, None)
+                    landed += 1
+                    log(
+                        f"jimaku hunt: ep {ep_id}: direct Jimaku landing "
+                        f"{dhit['source_path']} (Bazarr skipped)"
+                    )
+                    if searched < lc["jimaku_hunt_budget"]:
+                        time.sleep(2.5)
+                    continue
+                if dmeta == "rate_limited":
+                    log(
+                        f"WARNING: jimaku hunt: aborting remaining hunt due to 429 "
+                        f"(direct, ep {ep_id})"
+                    )
+                    abort_429 = True
+                    break
             # Force a fresh attempt even when this episode's one-shot lookup was
             # already consumed earlier in the daemon lifetime (_BAZARR_JPN_TRIED):
             # searching again is exactly what this sweep is for.
@@ -5667,6 +6020,9 @@ def run_pass():
                         cfg["TMP_DIR"],
                         ep_id,
                         info.get("seriesId") or info.get("sonarrSeriesId"),
+                        series_title=series,
+                        season=info.get("seasonNumber"),
+                        episode=info.get("episodeNumber"),
                     )
                     if ladder["kind"] != "asr":
                         log(

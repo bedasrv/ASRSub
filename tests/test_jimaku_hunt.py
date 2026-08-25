@@ -706,5 +706,124 @@ class TestBazarrJpnCandidateProvidersFlow(unittest.TestCase):
             self.assertTrue(any("WARNING" in msg and "500" in msg for msg in o._LOG_RING))
 
 
+class TestJimakuHuntDirectPath(JimakuHuntTestBase):
+    """run_jimaku_hunt tries jimaku_direct_candidate before Bazarr for series
+    items: a fresh landing counts as searched+landed and SKIPS Bazarr; any
+    other meta (incl. rate_limited -> abort) follows the existing flow."""
+
+    def _episode(self):
+        return {
+            "hasFile": True,
+            "episodeFile": {"path": self.video},
+            "seriesId": 9,
+            "seriesTitle": "Jaadugar: A Witch in Mongolia",
+            "seasonNumber": 1,
+            "episodeNumber": 3,
+        }
+
+    def _hunt(self, direct, cand=None, cfg_extra=None):
+        if cand is None:
+            def cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+                return (None, "searched")
+        bazarr_calls = []
+        direct_calls = []
+
+        def wrapped_direct(cfg, media_path, series_title, season, episode, tmp_dir, ep_id=None, return_meta=False, force=False):
+            direct_calls.append(
+                {"series_title": series_title, "season": season,
+                 "episode": episode, "ep_id": ep_id,
+                 "return_meta": return_meta, "force": force}
+            )
+            return direct(cfg, media_path, series_title, season, episode, tmp_dir,
+                          ep_id=ep_id, return_meta=return_meta, force=force)
+
+        def wrapped_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            bazarr_calls.append(ep_id)
+            return cand(cfg, ep_id, series_id, media_path, tmp_dir,
+                        return_meta=return_meta, allow_existing=allow_existing)
+
+        self.cfg.update(cfg_extra or {})
+        patches = [
+            patch.object(o, "REGISTRY_FILE", self.registry),
+            patch.object(o, "get_movies", return_value={"data": [], "total": 0}),
+            patch.object(o, "jimaku_direct_candidate", side_effect=wrapped_direct),
+            patch.object(o, "bazarr_jpn_candidate", side_effect=wrapped_cand),
+            patch.object(o, "get_episode", return_value=self._episode()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            res = o.run_jimaku_hunt(self.cfg, None)
+        finally:
+            for p in patches:
+                p.stop()
+        return res, direct_calls, bazarr_calls
+
+    def _row(self, ep=77):
+        _write_row(self.registry, stem="/t/a", lang="ja", source="asr",
+                   episode_id=ep, updated_ts=OLD)
+
+    def test_direct_hit_lands_and_skips_bazarr(self):
+        self._row()
+        hit = {"kind": "jpn", "source_path": self.video[:-4] + ".jpn.srt",
+               "source_hash": "h" * 64, "cues": [], "duration_s": 1.0, "tmp": False}
+
+        def direct(cfg, media_path, series_title, season, episode, tmp_dir,
+                   ep_id=None, return_meta=False, force=False):
+            return (hit, "hit")
+
+        res, direct_calls, bazarr_calls = self._hunt(direct)
+        self.assertEqual(bazarr_calls, [])
+        self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 1})
+        dc = direct_calls[0]
+        self.assertTrue(dc["force"] and dc["return_meta"])
+        self.assertEqual(dc["series_title"], "Jaadugar: A Witch in Mongolia")
+        self.assertEqual(dc["season"], 1)
+        self.assertEqual(dc["episode"], 3)
+        self.assertEqual(dc["ep_id"], 77)
+
+    def test_direct_miss_falls_through_to_bazarr(self):
+        self._row()
+
+        def direct(cfg, media_path, series_title, season, episode, tmp_dir,
+                   ep_id=None, return_meta=False, force=False):
+            return (None, "no_entry")
+
+        res, _, bazarr_calls = self._hunt(direct)
+        self.assertEqual(bazarr_calls, [77])
+        self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
+
+    def test_direct_rate_limited_aborts_without_bazarr_or_attempt(self):
+        self._row()
+        now = datetime.now(timezone.utc)
+
+        def direct(cfg, media_path, series_title, season, episode, tmp_dir,
+                   ep_id=None, return_meta=False, force=False):
+            return (None, "rate_limited")
+
+        res, _, bazarr_calls = self._hunt(direct)
+        self.assertEqual(bazarr_calls, [])
+        # aborted BEFORE counting a search and WITHOUT recording an attempt
+        self.assertEqual(res, {"checked": 1, "searched": 0, "landed": 0})
+        rows = [json.loads(l) for l in open(self.registry)]
+        row = next(r for r in rows if r.get("episode_id") == 77)
+        self.assertIsNone(row.get("jimaku_hunt_last_ts"))
+        self.assertIsNone(row.get("jimaku_hunt_attempts"))
+        self.assertTrue(now is not None)
+
+    def test_direct_disabled_never_called_bazarr_used(self):
+        self._row()
+
+        def direct(*a, **k):
+            raise AssertionError("direct path must not run when disabled")
+
+        res, direct_calls, bazarr_calls = self._hunt(
+            direct, cfg_extra={"JIMAKU_DIRECT_ENABLED": "false"}
+        )
+        self.assertEqual(direct_calls, [])
+        self.assertEqual(bazarr_calls, [77])
+        self.assertEqual(res["searched"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
