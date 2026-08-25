@@ -269,14 +269,32 @@ class TestBazarrJpnCandidateMeta(unittest.TestCase):
         o._BAZARR_JPN_CACHE.clear()
         o._BAZARR_JPN_TRIED.clear()
 
+    def _providers_get(self, candidates):
+        """Helper: GET mock that returns existing-empty for /episodes and providers candidates."""
+        def fake_get(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                m = MagicMock(status_code=200, text=json.dumps({"data": candidates}))
+                m.json = lambda: {"data": candidates}
+                return m
+            # existing check /episodes
+            m = MagicMock(status_code=200, text=json.dumps({"data": []}))
+            m.json = lambda: {"data": []}
+            return m
+        return fake_get
+
     def test_default_return_unchanged_meta_true_reports_download(self):
-        with patch.object(
-            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: {"data": []})
-        ), patch.object(o.requests, "post", return_value=MagicMock(status_code=201)):
+        cand = {"provider": "jimaku", "subtitle": "opaque1", "score": 90, "language": "ja"}
+        with patch.object(o.requests, "get", side_effect=self._providers_get([cand])), patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=204, text="")
+        ):
             path = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None)
             o._BAZARR_JPN_TRIED.clear()
             o._BAZARR_JPN_CACHE.clear()
-            ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True)
+            # need fresh GET again
+            with patch.object(o.requests, "get", side_effect=self._providers_get([cand])), patch.object(
+                o.requests, "post", return_value=MagicMock(status_code=204, text="")
+            ):
+                ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True)
         self.assertEqual(path, self.sidecar)
         self.assertEqual(ret, (self.sidecar, "download"))
 
@@ -284,45 +302,151 @@ class TestBazarrJpnCandidateMeta(unittest.TestCase):
         # Default allow_existing=True must still return cached/existing without hitting POST
         existing_path = self.sidecar
         fake_data = {"data": [{"subtitles": [{"code2": "jpn", "path": existing_path.replace("/mnt/nas/share/media/", "/data/")}]}]}
-        # map_path will map /data/... back to /mnt/nas/... which equals existing_path if we craft it
-        # Simpler: use map_path identity by passing existing_path directly and mock map_path
         with patch.object(o, "map_path", return_value=existing_path), patch.object(
-            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: fake_data)
+            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: fake_data, text=json.dumps(fake_data))
         ) as mock_get, patch.object(o.requests, "post") as mock_post:
             ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True)
             mock_get.assert_called_once()
             mock_post.assert_not_called()
             self.assertEqual(ret, (existing_path, "existing"))
-            # also verify cache was populated
             self.assertEqual(o._BAZARR_JPN_CACHE.get((1, 2)), existing_path)
 
     def test_allow_existing_false_skips_cache_and_get_existing_branch(self):
         # Seed cache and a GET response that would return "existing" under default;
         # with allow_existing=False both the cache lookup and the GET scan must be skipped,
-        # going straight to POST.
+        # going straight to providers search+download.
         o._BAZARR_JPN_CACHE[(1, 2)] = "/stale/cached.jpn.srt"
-        fake_existing_data = {"data": [{"subtitles": [{"code2": "jpn", "path": self.sidecar}]}]}
-        with patch.object(o, "map_path", return_value=self.sidecar), patch.object(
-            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: fake_existing_data)
-        ) as mock_get, patch.object(
-            o.requests, "post", return_value=MagicMock(status_code=201)
+        cand = {"provider": "jimaku", "subtitle": "opaque1", "score": 80}
+        def fake_get(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                m = MagicMock(status_code=200, text=json.dumps({"data": [cand]}))
+                m.json = lambda: {"data": [cand]}
+                # verify timeout 60
+                self.assertEqual(timeout, 60)
+                self.assertIn("episodeid", params)
+                return m
+            self.fail(f"unexpected GET to {url} with allow_existing=False (existing check should be skipped)")
+
+        with patch.object(o.requests, "get", side_effect=fake_get) as mock_get, patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=204, text="")
         ) as mock_post:
             ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True, allow_existing=False)
-            mock_get.assert_not_called()
+            # one providers GET + one POST
+            self.assertEqual(mock_get.call_count, 1)
+            self.assertIn("/providers/episodes", mock_get.call_args[0][0])
             mock_post.assert_called_once()
+            # verify POST params
+            _, kwargs = mock_post.call_args
+            self.assertEqual(kwargs["params"]["provider"], "jimaku")
+            self.assertEqual(kwargs["params"]["subtitle"], "opaque1")
+            self.assertEqual(kwargs["timeout"], 120)
             self.assertEqual(ret, (self.sidecar, "download"))
-            # cache should have been bypassed (old stale value overwritten by download)
             self.assertEqual(o._BAZARR_JPN_CACHE.get((1, 2)), self.sidecar)
-        # second call with allow_existing=False should also skip cache on a fresh key via _TRIED check
+        # second call with allow_existing=False should also skip cache on a fresh key
         o._BAZARR_JPN_CACHE.clear()
         o._BAZARR_JPN_TRIED.clear()
         o._BAZARR_JPN_CACHE[(3, 4)] = "/another/cached.jpn.srt"
-        with patch.object(o.requests, "get") as mock_get2, patch.object(
-            o.requests, "post", return_value=MagicMock(status_code=201)
+        cand2 = {"provider": "jimaku", "subtitle": "k2", "score": 70}
+        def fake_get2(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                m = MagicMock(status_code=200, text=json.dumps({"data": [cand2]}))
+                m.json = lambda: {"data": [cand2]}
+                return m
+            self.fail("existing GET should be skipped")
+        with patch.object(o.requests, "get", side_effect=fake_get2) as mock_get2, patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=204, text="")
         ) as mock_post2:
             ret2 = o.bazarr_jpn_candidate(self.cfg, 3, 4, self.video, None, return_meta=True, allow_existing=False)
-            mock_get2.assert_not_called()
+            self.assertEqual(mock_get2.call_count, 1)
             mock_post2.assert_called_once()
+
+
+class TestBazarrJpnCandidateProvidersFlow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.video = os.path.join(self.tmp, "v.mkv")
+        open(self.video, "w").close()
+        self.sidecar = os.path.splitext(self.video)[0] + ".jpn.srt"
+        open(self.sidecar, "w").close()
+        self.cfg = {"BAZARR_URL": "http://b/api", "BAZARR_API_KEY": "k"}
+        o._BAZARR_JPN_CACHE.clear()
+        o._BAZARR_JPN_TRIED.clear()
+        o._LOG_RING.clear()
+
+    def test_search_sorts_by_score_desc_and_posts_highest(self):
+        # Two candidates differing in score -> highest score chosen, POST params exact
+        low = {"provider": "jimaku", "subtitle": "low-key", "score": 30, "language": "ja"}
+        high = {"provider": "jimaku", "subtitle": "high-key", "score": 95, "language": "ja"}
+        # return low then high to verify sorting, not order
+        def fake_get(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                self.assertEqual(params, {"episodeid": 10})
+                self.assertEqual(timeout, 60)
+                m = MagicMock(status_code=200, text=json.dumps({"data": [low, high]}))
+                m.json = lambda: {"data": [low, high]}
+                return m
+            # existing check
+            m = MagicMock(status_code=200, text=json.dumps({"data": []}))
+            m.json = lambda: {"data": []}
+            return m
+
+        with patch.object(o.requests, "get", side_effect=fake_get) as mock_get, patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=204, text="")
+        ) as mock_post:
+            ret = o.bazarr_jpn_candidate(self.cfg, 10, 20, self.video, None, return_meta=True)
+            mock_post.assert_called_once()
+            _, kwargs = mock_post.call_args
+            params = kwargs["params"]
+            self.assertEqual(params["provider"], "jimaku")
+            self.assertEqual(params["subtitle"], "high-key")
+            self.assertEqual(params["hi"], "false")
+            self.assertEqual(params["forced"], "false")
+            self.assertEqual(params["original_format"], "False")
+            self.assertEqual(params["seriesid"], 20)
+            self.assertEqual(params["episodeid"], 10)
+            self.assertEqual(kwargs["timeout"], 120)
+            self.assertEqual(ret, (self.sidecar, "download"))
+            # also verify GET called with correct header
+            self.assertTrue(any("/providers/episodes" in c[0][0] for c in mock_get.call_args_list))
+
+    def test_no_candidates_no_post_returns_none(self):
+        def fake_get(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                m = MagicMock(status_code=200, text=json.dumps({"data": []}))
+                m.json = lambda: {"data": []}
+                return m
+            m = MagicMock(status_code=200, text=json.dumps({"data": []}))
+            m.json = lambda: {"data": []}
+            return m
+
+        with patch.object(o.requests, "get", side_effect=fake_get), patch.object(
+            o.requests, "post"
+        ) as mock_post:
+            ret = o.bazarr_jpn_candidate(self.cfg, 11, 21, self.video, None, return_meta=True)
+            mock_post.assert_not_called()
+            self.assertEqual(ret, (None, None))
+            # logged WARNING, not raised
+            self.assertTrue(any("WARNING" in msg and "no candidates" in msg for msg in o._LOG_RING))
+
+    def test_download_500_handled_no_raise(self):
+        cand = {"provider": "jimaku", "subtitle": "k1", "score": 80}
+        def fake_get(url, params=None, headers=None, timeout=None):
+            if "/providers/episodes" in url:
+                m = MagicMock(status_code=200, text=json.dumps({"data": [cand]}))
+                m.json = lambda: {"data": [cand]}
+                return m
+            m = MagicMock(status_code=200, text=json.dumps({"data": []}))
+            m.json = lambda: {"data": []}
+            return m
+
+        with patch.object(o.requests, "get", side_effect=fake_get), patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=500, text="internal error")
+        ) as mock_post:
+            # must not raise
+            ret = o.bazarr_jpn_candidate(self.cfg, 12, 22, self.video, None, return_meta=True)
+            mock_post.assert_called_once()
+            self.assertEqual(ret, (None, None))
+            self.assertTrue(any("WARNING" in msg and "500" in msg for msg in o._LOG_RING))
 
 
 class TestJimakuHuntDailyGate(unittest.TestCase):

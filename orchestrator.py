@@ -1635,13 +1635,27 @@ _BAZARR_JPN_CACHE = {}
 
 
 def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
-    """Pull-based Japanese subtitle for (episode, series) via Bazarr:
+    """Pull-based Japanese subtitle for (episode, series) via Bazarr (two-step providers flow):
+
     1. check Bazarr's existing episode records for a jpn/ja sub whose local
-        file already exists; 2. otherwise ask Bazarr to search+download one
-        (subliminal writes {stem}.jpn.srt next to the video). Returns the local
-        SRT path or None. Defensive: failures are logged and fall through to
-        the next ladder rung; each (episode, series) is only attempted once per
-        daemon lifetime so a broken request cannot poll on every pass.
+        file already exists (allow_existing=True only); 2. otherwise search+download
+        via the verified per-episode providers flow (Bazarr 1.6.0, hand-verified live):
+        STEP A: GET {base}/providers/episodes?episodeid=<ep_id> with X-API-KEY
+        -> 200 {data: [candidate...]} (candidate: provider, subtitle (opaque key),
+        url, language code2 like ja, score percent int, ...); candidates are
+        sorted by score desc (stable) and the top one is taken.
+        STEP B: POST {base}/providers/episodes?seriesid=<sid>&episodeid=<eid>
+        &hi=false&forced=false&original_format=False&provider=<cand.provider>
+        &subtitle=<cand.subtitle> with X-API-KEY -> 204 on success; subliminal
+        writes the sidecar next to the video ({stem}.<lang>.srt).
+        original_format MUST be present as False or Bazarr returns 400.
+        The old json-body POST to /episodes/subtitles with json={seriesid,
+        episodeid, language, forced, hi, options} ALWAYS returned 400 - swagger
+        says POST /episodes/subtitles requires multipart formData file - so that
+        dead code path is replaced by the two-step flow above.
+    Returns the local SRT path or None. Defensive: failures are logged and fall
+    through to the next ladder rung; each (episode, series) is only attempted
+    once per daemon lifetime so a broken request cannot poll on every pass.
     A FOUND path is cached positively (_BAZARR_JPN_CACHE): every target
     language of the episode reuses the same source on its own ladder pass
     without re-querying Bazarr — a one-shot dedup let the first lang consume
@@ -1654,9 +1668,9 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
     tell fresh searches apart from cached/existing results.
     When allow_existing is False (used by run_jimaku_hunt) step 1 is skipped
     entirely — both the _BAZARR_JPN_CACHE lookup and the existing-subtitle
-    scan — going straight to the search+download POST so the pipeline's own
-    AI-uploaded .ja.srt (registered by Bazarr as a subtitle row) does not
-    short-circuit the hunt."""
+    scan — going straight to the providers search+download so the pipeline's
+    own AI-uploaded .ja.srt (registered by Bazarr as a subtitle row) does not
+    short-circuit the hunt. Never raises."""
     def _ret(path, meta):
         return (path, meta) if return_meta else path
 
@@ -1692,29 +1706,84 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
                         if os.path.isfile(p):
                             _BAZARR_JPN_CACHE[key] = p
                             return _ret(p, "existing")
-        # search+download (JSON body, no multipart file)
-        r2 = requests.post(
-            base + "/episodes/subtitles",
-            json={
-                "seriesid": series_id,
-                "episodeid": ep_id,
-                "language": "jpn",
-                "forced": False,
-                "hi": False,
-                "options": {"force_filters": True},
-            },
-            headers=headers,
-            timeout=120,
-        )
-        if r2.status_code not in (200, 201, 204):
-            log(f"ladder: bazarr jpn download ep {ep_id} HTTP {r2.status_code}")
+        # STEP A: search candidates via providers/episodes
+        try:
+            r = requests.get(
+                base + "/providers/episodes",
+                params={"episodeid": ep_id},
+                headers=headers,
+                timeout=60,
+            )
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} failed: {exc}")
+            return _ret(None, None)
+        if r.status_code != 200:
+            try:
+                snippet = (r.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} HTTP {r.status_code}: {snippet}")
+            return _ret(None, None)
+        try:
+            data = r.json()
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} bad json: {exc}")
+            return _ret(None, None)
+        items = (data.get("data") or []) if isinstance(data, dict) else []
+        if not items:
+            try:
+                snippet = (r.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} no candidates (HTTP {r.status_code}): {snippet}")
+            return _ret(None, None)
+        try:
+            items_sorted = sorted(
+                items,
+                key=lambda c: c.get("score", 0) if isinstance(c, dict) else 0,
+                reverse=True,
+            )
+        except Exception:
+            items_sorted = items
+        cand = items_sorted[0]
+        provider = cand.get("provider") if isinstance(cand, dict) else None
+        subtitle = cand.get("subtitle") if isinstance(cand, dict) else None
+        if not provider or not subtitle:
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} candidate missing provider/subtitle: {cand}")
+            return _ret(None, None)
+        # STEP B: download via providers/episodes POST with provider/subtitle params
+        params = {
+            "seriesid": series_id,
+            "episodeid": ep_id,
+            "hi": "false",
+            "forced": "false",
+            "original_format": "False",
+            "provider": provider,
+            "subtitle": subtitle,
+        }
+        try:
+            r2 = requests.post(
+                base + "/providers/episodes",
+                params=params,
+                headers=headers,
+                timeout=120,
+            )
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn download ep {ep_id} failed: {exc}")
+            return _ret(None, None)
+        if r2.status_code != 204:
+            try:
+                snippet = (r2.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn download ep {ep_id} HTTP {r2.status_code}: {snippet}")
             return _ret(None, None)
         searched = True
         stem = os.path.splitext(media_path)[0]
-        for cand in (stem + ".jpn.srt", stem + ".ja.srt"):
-            if os.path.isfile(cand):
-                _BAZARR_JPN_CACHE[key] = cand
-                return _ret(cand, "download")
+        for cand_path in (stem + ".jpn.srt", stem + ".ja.srt"):
+            if os.path.isfile(cand_path):
+                _BAZARR_JPN_CACHE[key] = cand_path
+                return _ret(cand_path, "download")
     except Exception as exc:
         log(f"ladder: bazarr jpn query failed for ep {ep_id}: {exc}")
     return _ret(None, "searched" if searched else None)
