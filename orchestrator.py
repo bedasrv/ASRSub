@@ -118,6 +118,18 @@ REFINE_STATE_FILE = os.environ.get(
 # whether episodes reviewed by refine_subs.py are excluded from upgrades.
 LADDER_UPGRADE_BUDGET = int(os.environ.get("LADDER_UPGRADE_BUDGET", "4"))
 LADDER_COOLDOWN_H = int(os.environ.get("LADDER_COOLDOWN_H", "24"))
+# Jimaku hunt: the pipeline's AI ja uploads are recorded by Bazarr as
+# provider='manual' perfect-score rows, which its upgrade task (only rows
+# scoring below score_out_of - 3) never revisits — and bazarr-jp only
+# auto-searches Jimaku while ja counts as MISSING. Net effect: once ASR ja
+# is uploaded, Jimaku can never arrive on its own. Once a day the pipeline
+# therefore re-searches jpn itself for ASR-sourced ja episodes (same
+# budget/cooldown knob pattern as the upgrade pass above).
+LADDER_JIMAKU_HUNT_BUDGET = int(os.environ.get("LADDER_JIMAKU_HUNT_BUDGET", "10"))
+LADDER_JIMAKU_HUNT_COOLDOWN_H = int(
+    os.environ.get("LADDER_JIMAKU_HUNT_COOLDOWN_H", "24")
+)
+JIMAKU_HUNT_HOUR = int(os.environ.get("JIMAKU_HUNT_HOUR", "5"))
 LADDER_SKIP_REFINED = os.environ.get("LADDER_SKIP_REFINED", "true").lower() in (
     "1",
     "true",
@@ -436,6 +448,13 @@ def _ladder_cfg(cfg):
     return {
         "upgrade_budget": _gi("LADDER_UPGRADE_BUDGET", LADDER_UPGRADE_BUDGET),
         "cooldown_h": _gi("LADDER_COOLDOWN_H", LADDER_COOLDOWN_H),
+        "jimaku_hunt_budget": _gi(
+            "LADDER_JIMAKU_HUNT_BUDGET", LADDER_JIMAKU_HUNT_BUDGET
+        ),
+        "jimaku_hunt_cooldown_h": _gi(
+            "LADDER_JIMAKU_HUNT_COOLDOWN_H", LADDER_JIMAKU_HUNT_COOLDOWN_H
+        ),
+        "jimaku_hunt_hour": _gi("JIMAKU_HUNT_HOUR", JIMAKU_HUNT_HOUR),
         "skip_refined": _gb("LADDER_SKIP_REFINED", LADDER_SKIP_REFINED),
         "min_cues": _gi("LADDER_MIN_CUES", LADDER_MIN_CUES),
         "min_chars": _gi("LADDER_MIN_CHARS", LADDER_MIN_CHARS),
@@ -1615,7 +1634,7 @@ _BAZARR_JPN_TRIED = set()
 _BAZARR_JPN_CACHE = {}
 
 
-def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
+def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
     """Pull-based Japanese subtitle for (episode, series) via Bazarr:
     1. check Bazarr's existing episode records for a jpn/ja sub whose local
        file already exists; 2. otherwise ask Bazarr to search+download one
@@ -1626,16 +1645,26 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
     A FOUND path is cached positively (_BAZARR_JPN_CACHE): every target
     language of the episode reuses the same source on its own ladder pass
     without re-querying Bazarr — a one-shot dedup let the first lang consume
-    the lookup and every later lang fall through to ASR."""
+    the lookup and every later lang fall through to ASR.
+    With return_meta=True returns (path, meta) instead, where meta tells HOW
+    path was obtained — 'cache' (positive cache hit), 'existing' (a jpn sub
+    Bazarr already had on disk), 'download' (the search+download POST landed
+    a NEW sidecar next to the video), 'searched' (POST accepted but no
+    sidecar on disk yet) — or (None, None). The jimaku hunt needs this to
+    tell fresh searches apart from cached/existing results."""
+    def _ret(path, meta):
+        return (path, meta) if return_meta else path
+
+    searched = False
     key = (ep_id, series_id)
     cached = _BAZARR_JPN_CACHE.get(key)
     if cached:
-        return cached
+        return _ret(cached, "cache")
     if key in _BAZARR_JPN_TRIED:
-        return None
+        return _ret(None, None)
     _BAZARR_JPN_TRIED.add(key)
     if not ep_id or not series_id:
-        return None
+        return _ret(None, None)
     try:
         base = cfg["BAZARR_URL"].rstrip("/")
         headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
@@ -1655,7 +1684,7 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
                     p = map_path(s.get("path") or "")
                     if os.path.isfile(p):
                         _BAZARR_JPN_CACHE[key] = p
-                        return p
+                        return _ret(p, "existing")
         # search+download (JSON body, no multipart file)
         r2 = requests.post(
             base + "/episodes/subtitles",
@@ -1672,15 +1701,16 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir):
         )
         if r2.status_code not in (200, 201, 204):
             log(f"ladder: bazarr jpn download ep {ep_id} HTTP {r2.status_code}")
-            return None
+            return _ret(None, None)
+        searched = True
         stem = os.path.splitext(media_path)[0]
         for cand in (stem + ".jpn.srt", stem + ".ja.srt"):
             if os.path.isfile(cand):
                 _BAZARR_JPN_CACHE[key] = cand
-                return cand
+                return _ret(cand, "download")
     except Exception as exc:
         log(f"ladder: bazarr jpn query failed for ep {ep_id}: {exc}")
-    return None
+    return _ret(None, "searched" if searched else None)
 
 
 def _silent_remove(path):
@@ -4544,6 +4574,135 @@ def run_upgrades(cfg, key, prior_cache=None):
     return {"upgraded": upgraded, "checked": checked}
 
 
+def run_jimaku_hunt(cfg, prior_cache=None):
+    """Daily Jimaku sweep: an episode whose on-disk ja came from ASR
+    (registry source 'asr') can never receive real Japanese subs on its own —
+    Bazarr recorded the AI upload as a perfect-score manual row its upgrade
+    task never revisits, and bazarr-jp only searches Jimaku while ja counts
+    as missing. For each eligible episode ask Bazarr to search+download jpn
+    again (bazarr_jpn_candidate with return_meta=True); a fresh download
+    lands as a plain {stem}.jpn.srt sidecar — no re-timing/registration here,
+    the normal ladder + upgrade pass adopts it on subsequent passes.
+    Guards: per-episode cooldown on the row's updated_ts
+    (LADDER_JIMAKU_HUNT_COOLDOWN_H), per-pass budget
+    (LADDER_JIMAKU_HUNT_BUDGET), rows oldest-first. The positive
+    _BAZARR_JPN_CACHE entry is dropped for every freshly searched episode so
+    later ladder reads re-scan disk instead of trusting stale cache.
+    prior_cache mirrors run_upgrades (unused: the hunt only triggers
+    searches). Returns {"checked": n, "searched": m, "landed": k}; never
+    raises."""
+    lc = _ladder_cfg(cfg)
+    if lc["jimaku_hunt_budget"] <= 0:
+        return {"checked": 0, "searched": 0, "landed": 0}
+    registry = load_registry()
+    now = datetime.now(timezone.utc)
+    # One hunt per episode: dedup registry rows by episode_id, the OLDEST
+    # updated_ts wins (it decides both the cooldown and the ordering).
+    by_ep = {}
+    for rec in registry.values():
+        if rec.get("source") != "asr" or rec.get("lang") not in ("ja", "jpn"):
+            continue
+        ep_id = rec.get("episode_id")
+        if not isinstance(ep_id, int):
+            continue
+        cur = by_ep.get(ep_id)
+        if cur is None or (rec.get("updated_ts") or "") < (
+            cur.get("updated_ts") or ""
+        ):
+            by_ep[ep_id] = rec
+    rows = sorted(
+        by_ep.values(),
+        key=lambda r: r.get("updated_ts") or r.get("created_ts") or "",
+    )
+    checked = searched = landed = 0
+    for rec in rows:
+        if searched >= lc["jimaku_hunt_budget"]:
+            break
+        ep_id = rec.get("episode_id")
+        updated = rec.get("updated_ts") or rec.get("created_ts") or ""
+        try:
+            age_h = (
+                now - datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            ).total_seconds() / 3600
+        except Exception:
+            age_h = None  # unknown age: eligible
+        if age_h is not None and age_h < lc["jimaku_hunt_cooldown_h"]:
+            continue
+        checked += 1
+        try:
+            info = get_episode(cfg, ep_id)
+        except Exception as exc:
+            log(f"jimaku hunt: get_episode {ep_id} failed: {exc}")
+            continue
+        ef = info.get("episodeFile") or {}
+        if not info.get("hasFile") or not ef.get("path"):
+            continue
+        media_path = map_path(ef["path"])
+        if not os.path.isfile(media_path):
+            continue
+        series_id = info.get("seriesId") or info.get("sonarrSeriesId")
+        key = (ep_id, series_id)
+        # Force a fresh attempt even when this episode's one-shot lookup was
+        # already consumed earlier in the daemon lifetime (_BAZARR_JPN_TRIED):
+        # searching again is exactly what this sweep is for.
+        _BAZARR_JPN_TRIED.discard(key)
+        try:
+            cand, how = bazarr_jpn_candidate(
+                cfg,
+                ep_id,
+                series_id,
+                media_path,
+                cfg.get("TMP_DIR", "/tmp"),
+                return_meta=True,
+            )
+        except Exception as exc:
+            log(f"jimaku hunt: ep {ep_id} search failed: {exc}")
+            continue
+        if how in ("download", "searched"):
+            # Fresh search: drop any stale positive cache so later ladder
+            # reads re-scan disk instead of trusting the old path.
+            searched += 1
+            _BAZARR_JPN_CACHE.pop(key, None)
+            if how == "download":
+                landed += 1
+                log(f"jimaku hunt: ep {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
+        elif cand:
+            log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")
+    log(
+        f"jimaku hunt: checked={checked} searched={searched} landed={landed} "
+        f"(budget={lc['jimaku_hunt_budget']}, "
+        f"cooldown_h={lc['jimaku_hunt_cooldown_h']})"
+    )
+    return {"checked": checked, "searched": searched, "landed": landed}
+
+
+_JIMAKU_HUNT_LAST_DATE = None
+_JIMAKU_HUNT_SKIPPED_LOG_DATE = None
+
+
+def run_jimaku_hunt_daily(cfg):
+    """Calendar-day gate around run_jimaku_hunt: at most one sweep per UTC
+    day, and only at/after JIMAKU_HUNT_HOUR. Returns the hunt result dict,
+    or None when the gate kept the sweep silent today; the not-yet-due skip
+    is logged once per day."""
+    global _JIMAKU_HUNT_LAST_DATE, _JIMAKU_HUNT_SKIPPED_LOG_DATE
+    lc = _ladder_cfg(cfg)
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    if _JIMAKU_HUNT_LAST_DATE == today:
+        return None
+    if now.hour < lc["jimaku_hunt_hour"]:
+        if _JIMAKU_HUNT_SKIPPED_LOG_DATE != today:
+            _JIMAKU_HUNT_SKIPPED_LOG_DATE = today
+            log(
+                f"jimaku hunt: skipped until hour {lc['jimaku_hunt_hour']:02d} "
+                f"(now {now.hour:02d})"
+            )
+        return None
+    _JIMAKU_HUNT_LAST_DATE = today
+    return run_jimaku_hunt(cfg)
+
+
 # ---------- main ----------
 
 
@@ -5194,6 +5353,13 @@ def run_pass():
         f"wanted_before={wanted_before} wanted_after={wanted_after} "
         f"movies_remaining={movies_remaining}"
     )
+    # Daily Jimaku hunt: ASR-sourced ja never leaves room for Jimaku on its
+    # own (manual/perfect rows are never upgraded by Bazarr); sweep once a
+    # day at/after JIMAKU_HUNT_HOUR.
+    try:
+        run_jimaku_hunt_daily(cfg)
+    except Exception as exc:
+        log(f"jimaku hunt failed: {exc}")
     notify_webhook(
         cfg,
         "pass_completed",
