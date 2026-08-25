@@ -5,6 +5,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import requests
+
 import orchestrator as o
 
 
@@ -823,6 +825,121 @@ class TestJimakuHuntDirectPath(JimakuHuntTestBase):
         self.assertEqual(direct_calls, [])
         self.assertEqual(bazarr_calls, [77])
         self.assertEqual(res["searched"], 1)
+class TestJimakuHuntGhostEpisode404(JimakuHuntTestBase):
+    """Orphaned Sonarr episode ids (media re-imported under new ids) used to
+    404 on EVERY pass forever: no attempt was recorded, so the row stayed
+    immediately eligible each sweep. 404s now run the standard backoff ladder;
+    other errors keep the old log-and-continue without attempt recording."""
+
+    @staticmethod
+    def _http_error(status):
+        resp = requests.Response()
+        resp.status_code = status
+        return requests.HTTPError(f"{status} Client Error", response=resp)
+
+    def setUp(self):
+        super().setUp()
+        # assertions below check ABSENCE of log lines; drop leakage from
+        # earlier tests sharing the process-wide ring
+        o._LOG_RING.clear()
+
+    def _rows(self, *ep_ids):
+        for ep in ep_ids:
+            _write_row(self.registry, stem=f"/t/a{ep}", lang="ja", source="asr",
+                       episode_id=ep, updated_ts=OLD)
+
+    def _hunt(self, get_episode, cand=None):
+        if cand is None:
+            def cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+                return (None, "searched")
+        patches = [
+            patch.object(o, "REGISTRY_FILE", self.registry),
+            patch.object(o, "get_movies", return_value={"data": [], "total": 0}),
+            patch.object(o, "bazarr_jpn_candidate", side_effect=cand),
+            patch.object(o, "get_episode", side_effect=get_episode),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return o.run_jimaku_hunt(self.cfg, None)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def _row(self, ep_id):
+        # append-only ledger: the LAST row per episode wins (registry_upsert
+        # appends the hunt-attempt update)
+        cur = None
+        with open(self.registry) as fh:
+            for l in fh:
+                r = json.loads(l)
+                if r.get("episode_id") == ep_id:
+                    cur = r
+        return cur
+
+    def test_404_records_attempt_and_pass_continues(self):
+        self._rows(77, 78)
+
+        def fake_get(cfg, ep_id):
+            if ep_id == 77:
+                raise self._http_error(404)
+            return {
+                "hasFile": True,
+                "episodeFile": {"path": self.video},
+                "seriesId": 9,
+            }
+
+        res = self._hunt(fake_get)
+        # both items processed in one pass; only the healthy one searched
+        self.assertEqual(res, {"checked": 2, "searched": 1, "landed": 0})
+        ghost = self._row(77)
+        self.assertEqual(ghost["jimaku_hunt_attempts"], 1)
+        self.assertTrue(ghost["jimaku_hunt_last_ts"])
+        # healthy sibling processed normally afterwards: its OWN bazarr
+        # miss recorded attempt 1 (proof the 404 did not derail the pass)
+        healthy = self._row(78)
+        self.assertEqual(healthy["jimaku_hunt_attempts"], 1)
+        self.assertTrue(healthy["jimaku_hunt_last_ts"])
+        self.assertTrue(
+            any(f"ep 77: sonarr episode gone (404), backing off" in m
+                for m in o._LOG_RING)
+        )
+
+    def test_404_backoff_eligibility_applies_next_pass(self):
+        self._rows(77)
+
+        def fake_get(cfg, ep_id):
+            raise self._http_error(404)
+
+        res1 = self._hunt(fake_get)
+        self.assertEqual(res1["checked"], 1)
+        # second pass immediately after: backoff (attempt 1 -> 30min) skips it
+        res2 = self._hunt(fake_get)
+        self.assertEqual(res2, {"checked": 0, "searched": 0, "landed": 0})
+
+    def test_non_404_logs_without_recording_attempt(self):
+        self._rows(79, 80)
+
+        def fake_get(cfg, ep_id):
+            if ep_id == 79:
+                raise self._http_error(500)
+            return {
+                "hasFile": True,
+                "episodeFile": {"path": self.video},
+                "seriesId": 9,
+            }
+
+        res = self._hunt(fake_get)
+        self.assertEqual(res, {"checked": 2, "searched": 1, "landed": 0})
+        failed = self._row(79)
+        self.assertIsNone(failed.get("jimaku_hunt_attempts"))
+        self.assertIsNone(failed.get("jimaku_hunt_last_ts"))
+        self.assertTrue(
+            any("jimaku hunt: get_episode 79 failed" in m for m in o._LOG_RING)
+        )
+        self.assertFalse(
+            any("sonarr episode gone (404)" in m for m in o._LOG_RING)
+        )
 
 
 if __name__ == "__main__":

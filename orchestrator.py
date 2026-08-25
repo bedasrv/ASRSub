@@ -5388,7 +5388,19 @@ def run_jimaku_hunt(cfg, prior_cache=None):
             try:
                 info = get_episode(cfg, ep_id)
             except Exception as exc:
-                log(f"jimaku hunt: get_episode {ep_id} failed: {exc}")
+                if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+                    # Orphaned Sonarr id (episode re-imported under a new id):
+                    # without a recorded attempt the row stays immediately
+                    # eligible EVERY pass and 404-spams forever. Run the
+                    # standard backoff ladder instead (rows are never pruned;
+                    # the ghost is already marked by get_episode).
+                    _jimaku_hunt_record_attempt(rec, now)
+                    log(
+                        f"jimaku hunt: ep {ep_id}: sonarr episode gone (404), "
+                        "backing off"
+                    )
+                else:
+                    log(f"jimaku hunt: get_episode {ep_id} failed: {exc}")
                 continue
             ef = info.get("episodeFile") or {}
             if not info.get("hasFile") or not ef.get("path"):
