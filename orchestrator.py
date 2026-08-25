@@ -122,17 +122,14 @@ LADDER_COOLDOWN_H = int(os.environ.get("LADDER_COOLDOWN_H", "24"))
 # provider='manual' perfect-score rows, which its upgrade task (only rows
 # scoring below score_out_of - 3) never revisits — and bazarr-jp only
 # auto-searches Jimaku while ja counts as MISSING. Net effect: once ASR ja
-# is uploaded, Jimaku can never arrive on its own. Once a day the pipeline
-# therefore re-searches jpn itself for ASR-sourced ja episodes (same
-# budget/cooldown knob pattern as the upgrade pass above).
-LADDER_JIMAKU_HUNT_BUDGET = int(os.environ.get("LADDER_JIMAKU_HUNT_BUDGET", "10"))
-LADDER_JIMAKU_HUNT_COOLDOWN_H = int(
-    os.environ.get("LADDER_JIMAKU_HUNT_COOLDOWN_H", "24")
-)
+# is uploaded, Jimaku can never arrive on its own. The pipeline therefore
+# re-searches jpn itself for ASR-sourced ja episodes every pass with
+# exponential backoff on misses (per-pass budgets: 15 series / 10 movies,
+# far below Jimaku 25/min limit; tiny sleep between searches avoids bursts).
+LADDER_JIMAKU_HUNT_BUDGET = int(os.environ.get("LADDER_JIMAKU_HUNT_BUDGET", "15"))
 LADDER_JIMAKU_HUNT_BUDGET_MOVIES = int(
-    os.environ.get("LADDER_JIMAKU_HUNT_BUDGET_MOVIES", LADDER_JIMAKU_HUNT_BUDGET)
+    os.environ.get("LADDER_JIMAKU_HUNT_BUDGET_MOVIES", "10")
 )
-JIMAKU_HUNT_HOUR = int(os.environ.get("JIMAKU_HUNT_HOUR", "5"))
 LADDER_SKIP_REFINED = os.environ.get("LADDER_SKIP_REFINED", "true").lower() in (
     "1",
     "true",
@@ -454,13 +451,9 @@ def _ladder_cfg(cfg):
         "jimaku_hunt_budget": _gi(
             "LADDER_JIMAKU_HUNT_BUDGET", LADDER_JIMAKU_HUNT_BUDGET
         ),
-        "jimaku_hunt_cooldown_h": _gi(
-            "LADDER_JIMAKU_HUNT_COOLDOWN_H", LADDER_JIMAKU_HUNT_COOLDOWN_H
-        ),
         "jimaku_hunt_budget_movies": _gi(
             "LADDER_JIMAKU_HUNT_BUDGET_MOVIES", LADDER_JIMAKU_HUNT_BUDGET_MOVIES
         ),
-        "jimaku_hunt_hour": _gi("JIMAKU_HUNT_HOUR", JIMAKU_HUNT_HOUR),
         "skip_refined": _gb("LADDER_SKIP_REFINED", LADDER_SKIP_REFINED),
         "min_cues": _gi("LADDER_MIN_CUES", LADDER_MIN_CUES),
         "min_chars": _gi("LADDER_MIN_CHARS", LADDER_MIN_CHARS),
@@ -827,6 +820,8 @@ def registry_upsert(
     retimed=None,
     matched_frac=None,
     kind=None,
+    jimaku_hunt_last_ts=None,
+    jimaku_hunt_attempts=None,
 ):
     """Append a registry row for (stem, lang): the on-disk sidecar file
     {stem}.{lang}.srt is the unit of provenance. A row describes the CURRENT
@@ -864,6 +859,14 @@ def registry_upsert(
         entry["matched_frac"] = matched_frac
     if kind is not None:
         entry["kind"] = kind
+    if jimaku_hunt_last_ts is not None:
+        entry["jimaku_hunt_last_ts"] = jimaku_hunt_last_ts
+    elif prev and "jimaku_hunt_last_ts" in prev:
+        entry["jimaku_hunt_last_ts"] = prev["jimaku_hunt_last_ts"]
+    if jimaku_hunt_attempts is not None:
+        entry["jimaku_hunt_attempts"] = jimaku_hunt_attempts
+    elif prev and "jimaku_hunt_attempts" in prev:
+        entry["jimaku_hunt_attempts"] = prev["jimaku_hunt_attempts"]
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1716,6 +1719,10 @@ def bazarr_jpn_movie_candidate(cfg, radarr_id, media_path, tmp_dir, return_meta=
         except Exception as exc:
             log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} failed: {exc}")
             return _ret(None, None)
+        if r.status_code == 429:
+            reset_after = r.headers.get("x-ratelimit-reset-after") or r.headers.get("x-ratelimit-reset") or r.headers.get("Retry-After") or ""
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} HTTP 429 rate limited" + (f" reset_after={reset_after}" if reset_after else ""))
+            return _ret(None, "rate_limited")
         if r.status_code != 200:
             try:
                 snippet = (r.text or "")[:200]
@@ -1769,6 +1776,10 @@ def bazarr_jpn_movie_candidate(cfg, radarr_id, media_path, tmp_dir, return_meta=
         except Exception as exc:
             log(f"WARNING: ladder: bazarr jpn download movie {radarr_id} failed: {exc}")
             return _ret(None, None)
+        if r2.status_code == 429:
+            reset_after = r2.headers.get("x-ratelimit-reset-after") or r2.headers.get("x-ratelimit-reset") or r2.headers.get("Retry-After") or ""
+            log(f"WARNING: ladder: bazarr jpn download movie {radarr_id} HTTP 429 rate limited" + (f" reset_after={reset_after}" if reset_after else ""))
+            return _ret(None, "rate_limited")
         if r2.status_code != 204:
             try:
                 snippet = (r2.text or "")[:200]
@@ -1870,6 +1881,10 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
         except Exception as exc:
             log(f"WARNING: ladder: bazarr jpn search ep {ep_id} failed: {exc}")
             return _ret(None, None)
+        if r.status_code == 429:
+            reset_after = r.headers.get("x-ratelimit-reset-after") or r.headers.get("x-ratelimit-reset") or r.headers.get("Retry-After") or ""
+            log(f"WARNING: ladder: bazarr jpn search ep {ep_id} HTTP 429 rate limited" + (f" reset_after={reset_after}" if reset_after else ""))
+            return _ret(None, "rate_limited")
         if r.status_code != 200:
             try:
                 snippet = (r.text or "")[:200]
@@ -1924,6 +1939,10 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
         except Exception as exc:
             log(f"WARNING: ladder: bazarr jpn download ep {ep_id} failed: {exc}")
             return _ret(None, None)
+        if r2.status_code == 429:
+            reset_after = r2.headers.get("x-ratelimit-reset-after") or r2.headers.get("x-ratelimit-reset") or r2.headers.get("Retry-After") or ""
+            log(f"WARNING: ladder: bazarr jpn download ep {ep_id} HTTP 429 rate limited" + (f" reset_after={reset_after}" if reset_after else ""))
+            return _ret(None, "rate_limited")
         if r2.status_code != 204:
             try:
                 snippet = (r2.text or "")[:200]
@@ -4804,8 +4823,111 @@ def run_upgrades(cfg, key, prior_cache=None):
     return {"upgraded": upgraded, "checked": checked}
 
 
+def _jimaku_hunt_backoff_minutes(attempts):
+    """Exponential backoff: 30*2^(N-1) capped at 1440 min (24h).
+    attempts >=1 -> minutes, attempts <=0 -> 0 (fresh row immediate)."""
+    try:
+        n = int(attempts)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return 0
+    return min(30 * (2 ** (n - 1)), 1440)
+
+
+def _jimaku_hunt_parse_ts(ts_str):
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _jimaku_hunt_eligible(rec, now):
+    """True when backoff window has elapsed. Fresh rows (no hunt fields)
+    are immediately eligible. Backoff = min(30*2^(N-1),1440) minutes."""
+    last_ts = rec.get("jimaku_hunt_last_ts")
+    attempts = rec.get("jimaku_hunt_attempts")
+    try:
+        n = int(attempts) if attempts is not None else 0
+    except Exception:
+        n = 0
+    if not last_ts:
+        return True
+    dt = _jimaku_hunt_parse_ts(last_ts)
+    if dt is None:
+        return True
+    backoff = _jimaku_hunt_backoff_minutes(n if n > 0 else 1)
+    # fresh row with no attempts but with last_ts shouldn't happen; treat as needing 30min
+    if n == 0:
+        backoff = 30
+    elapsed_min = (now - dt).total_seconds() / 60.0
+    return elapsed_min >= backoff
+
+
+def _jimaku_hunt_record_attempt(rec, now):
+    """Persist hunt miss tracking on the registry row(s) for this episode.
+    Increments jimaku_hunt_attempts and sets jimaku_hunt_last_ts to now.
+    Updates all matching asr ja/jpn rows for the same episode_id to keep
+    dedup consistent (one hunt per episode, not per stem)."""
+    try:
+        ep_id = rec.get("episode_id")
+        lang = rec.get("lang")
+        stem = rec.get("stem") or ""
+        # gather all matching rows for this episode to keep them in sync
+        try:
+            all_recs = list(load_registry().values())
+        except Exception:
+            all_recs = [rec]
+        # filter to same episode_id and ja/jpn asr rows
+        targets = []
+        for r in all_recs:
+            if r.get("episode_id") != ep_id:
+                continue
+            if r.get("source") != "asr":
+                continue
+            if r.get("lang") not in ("ja", "jpn"):
+                continue
+            if r.get("stem"):
+                targets.append(r)
+        if not targets:
+            targets = [rec]
+        # dedup by stem+lang
+        seen = set()
+        for t in targets:
+            key = (t.get("stem"), t.get("lang"))
+            if key in seen:
+                continue
+            seen.add(key)
+            prev_attempts = t.get("jimaku_hunt_attempts")
+            try:
+                n = int(prev_attempts) if prev_attempts is not None else 0
+            except Exception:
+                n = 0
+            new_n = n + 1
+            now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            registry_upsert(
+                t.get("stem") or stem,
+                t.get("lang") or lang,
+                t.get("source") or "asr",
+                source_path=t.get("source_path"),
+                source_hash=t.get("source_hash"),
+                source_kind=t.get("source_kind"),
+                ep_id=ep_id if isinstance(ep_id, int) else None,
+                audio_id=t.get("audio_id"),
+                retimed=t.get("retimed"),
+                matched_frac=t.get("matched_frac"),
+                kind=t.get("kind"),
+                jimaku_hunt_last_ts=now_iso,
+                jimaku_hunt_attempts=new_n,
+            )
+    except Exception as exc:
+        log(f"WARNING: jimaku hunt: failed to record attempt for ep {rec.get('episode_id')}: {exc}")
+
+
 def run_jimaku_hunt(cfg, prior_cache=None):
-    """Daily Jimaku sweep: an episode or movie whose on-disk ja came from ASR
+    """Per-pass Jimaku sweep: an episode or movie whose on-disk ja came from ASR
     (registry source 'asr') can never receive real Japanese subs on its own —
     Bazarr recorded the AI upload as a perfect-score manual row its upgrade
     task never revisits, and bazarr-jp only searches Jimaku while ja counts
@@ -4814,24 +4936,23 @@ def run_jimaku_hunt(cfg, prior_cache=None):
     return_meta=True); a fresh download lands as a plain {stem}.jpn.srt
     sidecar — no re-timing/registration here, the normal ladder + upgrade pass
     adopts it on subsequent passes.
-    Guards: per-episode/movie cooldown on the row's updated_ts
-    (LADDER_JIMAKU_HUNT_COOLDOWN_H), per-pass budget
+    Guards: per-item exponential backoff on jimaku_hunt_last_ts /
+    jimaku_hunt_attempts (30m, 1h, 2h, 4h, 8h, 16h, 24h cap), per-pass budget
     (LADDER_JIMAKU_HUNT_BUDGET, shared with movies; LADDER_JIMAKU_HUNT_BUDGET_MOVIES
-    may override for movies, default share), rows oldest-first. The positive
-    _BAZARR_JPN_CACHE / _BAZARR_JPN_MOVIE_CACHE entry is dropped for every
-    freshly searched item so later ladder reads re-scan disk instead of trusting
-    stale cache. prior_cache mirrors run_upgrades (unused). Returns
-    {"checked": n, "searched": m, "landed": k}; never raises."""
+    may override for movies, default separate), rows oldest hunt_last_ts first
+    (None sorts oldest). The positive _BAZARR_JPN_CACHE / _BAZARR_JPN_MOVIE_CACHE
+    entry is dropped for every freshly searched item so later ladder reads
+    re-scan disk instead of trusting stale cache. 429 rate limit aborts the rest
+    of the pass (WARNING with reset_after, no attempt counted). Tiny sleep (2.5s)
+    between searches avoids bursting >24 req/min. prior_cache mirrors run_upgrades
+    (unused). Returns {"checked": n, "searched": m, "landed": k}; never raises."""
     lc = _ladder_cfg(cfg)
     if lc["jimaku_hunt_budget"] <= 0:
         return {"checked": 0, "searched": 0, "landed": 0}
     registry = load_registry()
     now = datetime.now(timezone.utc)
     # One hunt per episode/movie: dedup registry rows by (kind, episode_id),
-    # the OLDEST updated_ts wins (it decides both the cooldown and the ordering).
-    # Movies are detected via kind=="movie" (the registry_upsert for movies may
-    # carry that field) — fallback to series when absent, matching _process_actions
-    # and state handling where kind=="movie" distinguishes radarrId rows.
+    # the OLDEST updated_ts wins for dedup identity; ordering later uses hunt ts.
     by_series = {}
     by_movie = {}
     for rec in registry.values():
@@ -4867,30 +4988,43 @@ def run_jimaku_hunt(cfg, prior_cache=None):
             if ep_id in movie_path_map and ep_id not in by_movie:
                 rec = by_series.pop(ep_id)
                 by_movie[ep_id] = rec
-    # Build combined oldest-first list with type flag; budget is shared.
+    # Build combined oldest-hunt-first list with type flag; budget is shared.
+    def _hunt_sort_key(item):
+        # item is (rec, kind, ep_id) tuple; sort by hunt_last_ts (None = oldest)
+        _, rec = item
+        ts = _jimaku_hunt_parse_ts(rec.get("jimaku_hunt_last_ts"))
+        if ts is None:
+            return (0, "")  # None sorts oldest
+        return (1, ts.isoformat())
+    series_items = [(ep_id, rec) for ep_id, rec in by_series.items()]
+    movie_items = [(ep_id, rec) for ep_id, rec in by_movie.items()]
+    # combine for shared ordering
     combined = []
-    for ep_id, rec in by_series.items():
-        combined.append((rec.get("updated_ts") or rec.get("created_ts") or "", "series", ep_id, rec))
-    for ep_id, rec in by_movie.items():
-        combined.append((rec.get("updated_ts") or rec.get("created_ts") or "", "movie", ep_id, rec))
-    combined.sort(key=lambda x: x[0])
+    for ep_id, rec in series_items:
+        combined.append(("series", ep_id, rec))
+    for ep_id, rec in movie_items:
+        combined.append(("movie", ep_id, rec))
+    # sort by hunt_last_ts oldest first (None first), then by string fallback for determinism
+    def _key(entry):
+        kind, ep_id, rec = entry
+        ts = _jimaku_hunt_parse_ts(rec.get("jimaku_hunt_last_ts"))
+        if ts is None:
+            return (0, "", ep_id)
+        return (1, ts.isoformat(), ep_id)
+    combined.sort(key=_key)
     checked = searched = landed = 0
     movie_searched = 0
     movie_budget = lc.get("jimaku_hunt_budget_movies", lc["jimaku_hunt_budget"])
-    for _, kind, ep_id, rec in combined:
+    abort_429 = False
+    for kind, ep_id, rec in combined:
+        if abort_429:
+            break
         # Shared budget guard; also respect separate movie budget when set
         if searched >= lc["jimaku_hunt_budget"]:
             break
         if kind == "movie" and movie_searched >= movie_budget:
             continue
-        updated = rec.get("updated_ts") or rec.get("created_ts") or ""
-        try:
-            age_h = (
-                now - datetime.fromisoformat(updated.replace("Z", "+00:00"))
-            ).total_seconds() / 3600
-        except Exception:
-            age_h = None  # unknown age: eligible
-        if age_h is not None and age_h < lc["jimaku_hunt_cooldown_h"]:
+        if not _jimaku_hunt_eligible(rec, now):
             continue
         checked += 1
         if kind == "movie":
@@ -4911,6 +5045,11 @@ def run_jimaku_hunt(cfg, prior_cache=None):
             except Exception as exc:
                 log(f"jimaku hunt: movie {ep_id} search failed: {exc}")
                 continue
+            if how == "rate_limited":
+                log(f"WARNING: jimaku hunt: aborting remaining hunt due to 429 (movie {ep_id})")
+                abort_429 = True
+                # do not count attempt
+                break
             if how in ("download", "searched"):
                 searched += 1
                 movie_searched += 1
@@ -4918,8 +5057,18 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                 if how == "download":
                     landed += 1
                     log(f"jimaku hunt: movie {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
+                else:
+                    _jimaku_hunt_record_attempt(rec, now)
+                    log(f"jimaku hunt: movie {ep_id}: no jpn found (attempt {rec.get('jimaku_hunt_attempts', 0) + 1})")
+            elif how in ("existing", "cache"):
+                # found but not downloaded: back off as miss
+                _jimaku_hunt_record_attempt(rec, now)
+                log(f"jimaku hunt: movie {ep_id}: jpn already present ({how})")
             elif cand:
                 log(f"jimaku hunt: movie {ep_id}: jpn already present ({how})")
+            # tiny sleep between searches to avoid 429 bursts
+            if searched < lc["jimaku_hunt_budget"] and movie_searched < movie_budget:
+                time.sleep(2.5)
         else:
             try:
                 info = get_episode(cfg, ep_id)
@@ -4951,6 +5100,10 @@ def run_jimaku_hunt(cfg, prior_cache=None):
             except Exception as exc:
                 log(f"jimaku hunt: ep {ep_id} search failed: {exc}")
                 continue
+            if how == "rate_limited":
+                log(f"WARNING: jimaku hunt: aborting remaining hunt due to 429 (ep {ep_id})")
+                abort_429 = True
+                break
             if how in ("download", "searched"):
                 # Fresh search: drop any stale positive cache so later ladder
                 # reads re-scan disk instead of trusting the old path.
@@ -4959,41 +5112,21 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                 if how == "download":
                     landed += 1
                     log(f"jimaku hunt: ep {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
+                else:
+                    _jimaku_hunt_record_attempt(rec, now)
+                    log(f"jimaku hunt: ep {ep_id}: no jpn found (attempt {rec.get('jimaku_hunt_attempts', 0) + 1})")
+            elif how in ("existing", "cache"):
+                _jimaku_hunt_record_attempt(rec, now)
+                log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")
             elif cand:
                 log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")
+            if searched < lc["jimaku_hunt_budget"]:
+                time.sleep(2.5)
     log(
         f"jimaku hunt: checked={checked} searched={searched} landed={landed} "
-        f"(budget={lc['jimaku_hunt_budget']}, "
-        f"cooldown_h={lc['jimaku_hunt_cooldown_h']})"
+        f"(budget={lc['jimaku_hunt_budget']})"
     )
     return {"checked": checked, "searched": searched, "landed": landed}
-
-
-_JIMAKU_HUNT_LAST_DATE = None
-_JIMAKU_HUNT_SKIPPED_LOG_DATE = None
-
-
-def run_jimaku_hunt_daily(cfg):
-    """Calendar-day gate around run_jimaku_hunt: at most one sweep per UTC
-    day, and only at/after JIMAKU_HUNT_HOUR. Returns the hunt result dict,
-    or None when the gate kept the sweep silent today; the not-yet-due skip
-    is logged once per day."""
-    global _JIMAKU_HUNT_LAST_DATE, _JIMAKU_HUNT_SKIPPED_LOG_DATE
-    lc = _ladder_cfg(cfg)
-    now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
-    if _JIMAKU_HUNT_LAST_DATE == today:
-        return None
-    if now.hour < lc["jimaku_hunt_hour"]:
-        if _JIMAKU_HUNT_SKIPPED_LOG_DATE != today:
-            _JIMAKU_HUNT_SKIPPED_LOG_DATE = today
-            log(
-                f"jimaku hunt: skipped until hour {lc['jimaku_hunt_hour']:02d} "
-                f"(now {now.hour:02d})"
-            )
-        return None
-    _JIMAKU_HUNT_LAST_DATE = today
-    return run_jimaku_hunt(cfg)
 
 
 # ---------- main ----------
@@ -5646,11 +5779,11 @@ def run_pass():
         f"wanted_before={wanted_before} wanted_after={wanted_after} "
         f"movies_remaining={movies_remaining}"
     )
-    # Daily Jimaku hunt: ASR-sourced ja never leaves room for Jimaku on its
-    # own (manual/perfect rows are never upgraded by Bazarr); sweep once a
-    # day at/after JIMAKU_HUNT_HOUR.
+    # Per-pass Jimaku hunt: ASR-sourced ja never leaves room for Jimaku on its
+    # own (manual/perfect rows are never upgraded by Bazarr); sweep every pass
+    # with exponential backoff, per-pass budgets and 429-aware abort.
     try:
-        run_jimaku_hunt_daily(cfg)
+        run_jimaku_hunt(cfg)
     except Exception as exc:
         log(f"jimaku hunt failed: {exc}")
     notify_webhook(
