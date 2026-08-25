@@ -114,6 +114,14 @@ REGISTRY_FILE = os.environ.get(
 REFINE_STATE_FILE = os.environ.get(
     "REFINE_STATE_FILE", "/home/user/.config/asr-pipeline/refine_state.jsonl"
 )
+# Jimaku-hunt backoff bookkeeping (last_ts/attempts per stem|lang|ep).
+# Deliberately OUTSIDE subtitle_registry.jsonl: that ledger is provenance
+# ("where did this sidecar come from"), and one hunt pass used to append up
+# to budget rows of pure bookkeeping that flooded dashboard /provenance.
+HUNT_STATE_FILE = os.environ.get(
+    "HUNT_STATE_FILE",
+    os.path.join(os.path.dirname(STATE_FILE), "jimaku_hunt_state.json"),
+)
 # Per-pass budget of auto-upgrades (a Jimaku batch download must not trigger a
 # translation storm), cooldown before the same episode may be re-upgraded, and
 # whether episodes reviewed by refine_subs.py are excluded from upgrades.
@@ -834,8 +842,6 @@ def registry_upsert(
     retimed=None,
     matched_frac=None,
     kind=None,
-    jimaku_hunt_last_ts=None,
-    jimaku_hunt_attempts=None,
 ):
     """Append a registry row for (stem, lang): the on-disk sidecar file
     {stem}.{lang}.srt is the unit of provenance. A row describes the CURRENT
@@ -873,14 +879,10 @@ def registry_upsert(
         entry["matched_frac"] = matched_frac
     if kind is not None:
         entry["kind"] = kind
-    if jimaku_hunt_last_ts is not None:
-        entry["jimaku_hunt_last_ts"] = jimaku_hunt_last_ts
-    elif prev and "jimaku_hunt_last_ts" in prev:
-        entry["jimaku_hunt_last_ts"] = prev["jimaku_hunt_last_ts"]
-    if jimaku_hunt_attempts is not None:
-        entry["jimaku_hunt_attempts"] = jimaku_hunt_attempts
-    elif prev and "jimaku_hunt_attempts" in prev:
-        entry["jimaku_hunt_attempts"] = prev["jimaku_hunt_attempts"]
+    # NOTE: no jimaku_hunt_* fields here — hunt backoff lives in
+    # HUNT_STATE_FILE (see _jimaku_hunt_record_attempt); this ledger is
+    # provenance only. Legacy rows carrying those fields are left as-is
+    # (append-only) and still honored via _hunt_state_get's fallback.
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -5151,11 +5153,65 @@ def _jimaku_hunt_parse_ts(ts_str):
         return None
 
 
+def _hunt_state_key(rec):
+    """Backoff state key for one hunt item: "<stem>|<lang>|<ep_id or ''>"."""
+    ep_id = rec.get("episode_id")
+    return f"{rec.get('stem') or ''}|{rec.get('lang') or ''}|{ep_id if isinstance(ep_id, int) else ''}"
+
+
+def _hunt_state_load():
+    """Tolerant read of HUNT_STATE_FILE: missing/corrupt -> {} (all items
+    fresh); never raises."""
+    try:
+        with open(HUNT_STATE_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _hunt_state_save(state):
+    """Atomic write (tmp + os.replace); failures logged, never raised."""
+    try:
+        d = os.path.dirname(HUNT_STATE_FILE)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = HUNT_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        os.replace(tmp, HUNT_STATE_FILE)
+    except OSError as exc:
+        log(f"WARNING: jimaku hunt: cannot write {HUNT_STATE_FILE}: {exc}")
+
+
+def _hunt_state_get(rec):
+    """Effective (last_ts, attempts) for one hunt item: the dedicated hunt
+    state file FIRST, legacy registry-row fields (jimaku_hunt_last_ts /
+    jimaku_hunt_attempts) when no state-file entry exists — so backoffs
+    recorded before the migration keep their ladder positions."""
+    entry = _hunt_state_load().get(_hunt_state_key(rec))
+    if isinstance(entry, dict):
+        return entry.get("last_ts"), entry.get("attempts")
+    return rec.get("jimaku_hunt_last_ts"), rec.get("jimaku_hunt_attempts")
+
+
+def _hunt_state_attempts(rec):
+    """Effective attempts count for log lines (post-record reads give the
+    just-persisted number)."""
+    _, attempts = _hunt_state_get(rec)
+    try:
+        return int(attempts) if attempts is not None else 0
+    except Exception:
+        return 0
+
+
 def _jimaku_hunt_eligible(rec, now):
-    """True when backoff window has elapsed. Fresh rows (no hunt fields)
+    """True when backoff window has elapsed. Fresh items (no hunt state)
     are immediately eligible. Backoff = min(30*2^(N-1),1440) minutes."""
-    last_ts = rec.get("jimaku_hunt_last_ts")
-    attempts = rec.get("jimaku_hunt_attempts")
+    last_ts, attempts = _hunt_state_get(rec)
     try:
         n = int(attempts) if attempts is not None else 0
     except Exception:
@@ -5174,61 +5230,25 @@ def _jimaku_hunt_eligible(rec, now):
 
 
 def _jimaku_hunt_record_attempt(rec, now):
-    """Persist hunt miss tracking on the registry row(s) for this episode.
-    Increments jimaku_hunt_attempts and sets jimaku_hunt_last_ts to now.
-    Updates all matching asr ja/jpn rows for the same episode_id to keep
-    dedup consistent (one hunt per episode, not per stem)."""
+    """Persist hunt miss tracking OUTSIDE the provenance ledger: writes
+    {"last_ts", "attempts", "updated"} under "<stem>|<lang>|<ep>" in
+    HUNT_STATE_FILE. (registry_upsert here used to append bookkeeping rows
+    indistinguishable from real extractions — one pass flooded the ledger
+    and the dashboard Recent feed.) Legacy jimaku_hunt_* row fields are only
+    READ (fallback in _hunt_state_get), never written. Signature and
+    never-raises semantics unchanged."""
     try:
-        ep_id = rec.get("episode_id")
-        lang = rec.get("lang")
-        stem = rec.get("stem") or ""
-        # gather all matching rows for this episode to keep them in sync
+        key = _hunt_state_key(rec)
+        state = _hunt_state_load()
+        entry = state.get(key)
+        prev_attempts = entry.get("attempts") if isinstance(entry, dict) else rec.get("jimaku_hunt_attempts")
         try:
-            all_recs = list(load_registry().values())
+            n = int(prev_attempts) if prev_attempts is not None else 0
         except Exception:
-            all_recs = [rec]
-        # filter to same episode_id and ja/jpn asr rows
-        targets = []
-        for r in all_recs:
-            if r.get("episode_id") != ep_id:
-                continue
-            if r.get("source") != "asr":
-                continue
-            if r.get("lang") not in ("ja", "jpn"):
-                continue
-            if r.get("stem"):
-                targets.append(r)
-        if not targets:
-            targets = [rec]
-        # dedup by stem+lang
-        seen = set()
-        for t in targets:
-            key = (t.get("stem"), t.get("lang"))
-            if key in seen:
-                continue
-            seen.add(key)
-            prev_attempts = t.get("jimaku_hunt_attempts")
-            try:
-                n = int(prev_attempts) if prev_attempts is not None else 0
-            except Exception:
-                n = 0
-            new_n = n + 1
-            now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            registry_upsert(
-                t.get("stem") or stem,
-                t.get("lang") or lang,
-                t.get("source") or "asr",
-                source_path=t.get("source_path"),
-                source_hash=t.get("source_hash"),
-                source_kind=t.get("source_kind"),
-                ep_id=ep_id if isinstance(ep_id, int) else None,
-                audio_id=t.get("audio_id"),
-                retimed=t.get("retimed"),
-                matched_frac=t.get("matched_frac"),
-                kind=t.get("kind"),
-                jimaku_hunt_last_ts=now_iso,
-                jimaku_hunt_attempts=new_n,
-            )
+            n = 0
+        now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        state[key] = {"last_ts": now_iso, "attempts": n + 1, "updated": now_iso}
+        _hunt_state_save(state)
     except Exception as exc:
         log(f"WARNING: jimaku hunt: failed to record attempt for ep {rec.get('episode_id')}: {exc}")
 
@@ -5251,8 +5271,10 @@ def run_jimaku_hunt(cfg, prior_cache=None):
     Movies stay on the Bazarr-only path. A Jimaku 429 on the direct path
     aborts the rest of the pass exactly like a Bazarr 429 (no attempt
     counted).
-    Guards: per-item exponential backoff on jimaku_hunt_last_ts /
-    jimaku_hunt_attempts (30m, 1h, 2h, 4h, 8h, 16h, 24h cap), per-pass budget
+    Guards: per-item exponential backoff tracked in HUNT_STATE_FILE
+    (<stem>|<lang>|<ep> -> last_ts/attempts; legacy registry-row
+    jimaku_hunt_* fields honored when no state entry exists)
+    (30m, 1h, 2h, 4h, 8h, 16h, 24h cap), per-pass budget
     (LADDER_JIMAKU_HUNT_BUDGET, shared with movies; LADDER_JIMAKU_HUNT_BUDGET_MOVIES
     may override for movies, default separate), rows oldest hunt_last_ts first
     (None sorts oldest). The positive _BAZARR_JPN_CACHE / _BAZARR_JPN_MOVIE_CACHE
@@ -5305,9 +5327,9 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                 by_movie[ep_id] = rec
     # Build combined oldest-hunt-first list with type flag; budget is shared.
     def _hunt_sort_key(item):
-        # item is (rec, kind, ep_id) tuple; sort by hunt_last_ts (None = oldest)
+        # item is (rec, kind, ep_id) tuple; sort by hunt last_ts (None = oldest)
         _, rec = item
-        ts = _jimaku_hunt_parse_ts(rec.get("jimaku_hunt_last_ts"))
+        ts = _jimaku_hunt_parse_ts(_hunt_state_get(rec)[0])
         if ts is None:
             return (0, "")  # None sorts oldest
         return (1, ts.isoformat())
@@ -5319,10 +5341,10 @@ def run_jimaku_hunt(cfg, prior_cache=None):
         combined.append(("series", ep_id, rec))
     for ep_id, rec in movie_items:
         combined.append(("movie", ep_id, rec))
-    # sort by hunt_last_ts oldest first (None first), then by string fallback for determinism
+    # sort by hunt last_ts oldest first (None first), then by string fallback for determinism
     def _key(entry):
         kind, ep_id, rec = entry
-        ts = _jimaku_hunt_parse_ts(rec.get("jimaku_hunt_last_ts"))
+        ts = _jimaku_hunt_parse_ts(_hunt_state_get(rec)[0])
         if ts is None:
             return (0, "", ep_id)
         return (1, ts.isoformat(), ep_id)
@@ -5374,7 +5396,7 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                     log(f"jimaku hunt: movie {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
                 else:
                     _jimaku_hunt_record_attempt(rec, now)
-                    log(f"jimaku hunt: movie {ep_id}: no jpn found (attempt {rec.get('jimaku_hunt_attempts', 0) + 1})")
+                    log(f"jimaku hunt: movie {ep_id}: no jpn found (attempt {_hunt_state_attempts(rec)})")
             elif how in ("existing", "cache"):
                 # found but not downloaded: back off as miss
                 _jimaku_hunt_record_attempt(rec, now)
@@ -5479,7 +5501,7 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                     log(f"jimaku hunt: ep {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
                 else:
                     _jimaku_hunt_record_attempt(rec, now)
-                    log(f"jimaku hunt: ep {ep_id}: no jpn found (attempt {rec.get('jimaku_hunt_attempts', 0) + 1})")
+                    log(f"jimaku hunt: ep {ep_id}: no jpn found (attempt {_hunt_state_attempts(rec)})")
             elif how in ("existing", "cache"):
                 _jimaku_hunt_record_attempt(rec, now)
                 log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")

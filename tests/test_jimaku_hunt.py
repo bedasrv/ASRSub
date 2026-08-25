@@ -51,12 +51,21 @@ class JimakuHuntTestBase(unittest.TestCase):
         }
         o._BAZARR_JPN_CACHE.clear()
         o._BAZARR_JPN_TRIED.clear()
+        # hunt backoff state isolated per test (never the real state file)
+        self.hunt_state = os.path.join(self.tmp, "jimaku_hunt_state.json")
+        self.state_patch = patch.object(o, "HUNT_STATE_FILE", self.hunt_state)
+        self.state_patch.start()
         # avoid 2.5s sleeps
         self.sleep_patch = patch.object(o.time, "sleep", lambda x: None)
         self.sleep_patch.start()
 
     def tearDown(self):
         self.sleep_patch.stop()
+        self.state_patch.stop()
+
+    def _state_entry(self, stem, lang, ep_id):
+        with open(self.hunt_state) as fh:
+            return json.load(fh).get(f"{stem}|{lang}|{ep_id}")
 
     def _hunt(self, cand=None, get_episode=None, movie_candidate=None, movies=None):
         patches = [
@@ -287,11 +296,19 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
         self.cfg = {"TARGET_LANGS": ["ja"], "TMP_DIR": self.tmp, "BAZARR_URL": "http://127.0.0.1:1/api", "BAZARR_API_KEY": "x"}
         o._BAZARR_JPN_CACHE.clear()
         o._BAZARR_JPN_TRIED.clear()
+        self.hunt_state = os.path.join(self.tmp, "jimaku_hunt_state.json")
+        self.state_patch = patch.object(o, "HUNT_STATE_FILE", self.hunt_state)
+        self.state_patch.start()
         self.sleep_patch = patch.object(o.time, "sleep", lambda x: None)
         self.sleep_patch.start()
 
     def tearDown(self):
         self.sleep_patch.stop()
+        self.state_patch.stop()
+
+    def _state_entry(self, stem, lang, ep_id):
+        with open(self.hunt_state) as fh:
+            return json.load(fh).get(f"{stem}|{lang}|{ep_id}")
 
     def test_miss_increments_attempts_and_sets_last_ts(self):
         _write_row(self.registry, stem=os.path.splitext(self.video)[0], lang="ja", source="asr", episode_id=70, updated_ts=OLD)
@@ -302,12 +319,15 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
         with patch.object(o, "REGISTRY_FILE", self.registry), patch.object(o, "get_movies", return_value={"data": [], "total": 0}), patch.object(o, "bazarr_jpn_candidate", side_effect=fake_cand), patch.object(o, "get_episode", side_effect=fake_get):
             res = o.run_jimaku_hunt(self.cfg, None)
         self.assertEqual(res["searched"], 1)
+        # backoff lives in the dedicated state file...
+        entry = self._state_entry(os.path.splitext(self.video)[0], "ja", 70)
+        self.assertEqual(entry["attempts"], 1)
+        self.assertIn("last_ts", entry)
+        # ...and the provenance ledger is NOT touched (no bookkeeping rows)
         rows = o.load_records_jsonl(self.registry)
-        # last row should have hunt fields
-        last = rows[-1]
-        self.assertEqual(last["episode_id"], 70)
-        self.assertEqual(last["jimaku_hunt_attempts"], 1)
-        self.assertIn("jimaku_hunt_last_ts", last)
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("jimaku_hunt_attempts", rows[0])
+        self.assertNotIn("jimaku_hunt_last_ts", rows[0])
         # second hunt immediately should be backed off (30 min)
         o._BAZARR_JPN_TRIED.clear()
         def fake_cand2(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
@@ -332,9 +352,12 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
                     return (vid2.replace(".mkv", ".jpn.srt"), meta)
                 with patch.object(o, "REGISTRY_FILE", reg2), patch.object(o, "bazarr_jpn_candidate", side_effect=fake_cand), patch.object(o, "get_episode", side_effect=fake_get):
                     res = o.run_jimaku_hunt(self.cfg, None)
-                rows = o.load_records_jsonl(reg2)
-                last = rows[-1]
-                self.assertEqual(last["jimaku_hunt_attempts"], 1)
+                entry = json.load(open(self.hunt_state)).get(
+                    f"{os.path.splitext(vid2)[0]}|ja|71"
+                )
+                self.assertEqual(entry["attempts"], 1)
+                # ledger untouched: exactly the one seeded provenance row
+                self.assertEqual(len(o.load_records_jsonl(reg2)), 1)
 
     def test_landed_download_removes_from_future_eligibility(self):
         # hunt lands download -> no hunt attempt increment, but source will change later
@@ -379,11 +402,19 @@ class TestJimakuHunt429(unittest.TestCase):
         o._BAZARR_JPN_CACHE.clear()
         o._BAZARR_JPN_TRIED.clear()
         o._LOG_RING.clear()
+        self.hunt_state = os.path.join(self.tmp, "jimaku_hunt_state.json")
+        self.state_patch = patch.object(o, "HUNT_STATE_FILE", self.hunt_state)
+        self.state_patch.start()
         self.sleep_patch = patch.object(o.time, "sleep", lambda x: None)
         self.sleep_patch.start()
 
     def tearDown(self):
         self.sleep_patch.stop()
+        self.state_patch.stop()
+
+    def _state_entry(self, stem, lang, ep_id):
+        with open(self.hunt_state) as fh:
+            return json.load(fh).get(f"{stem}|{lang}|{ep_id}")
 
     def test_429_aborts_remaining_budget_without_counting(self):
         now = datetime.now(timezone.utc)
@@ -407,14 +438,12 @@ class TestJimakuHunt429(unittest.TestCase):
         self.assertEqual(res["landed"], 0)
         # 429 should have logged WARNING with reset_after? candidate logs it, hunt logs abort
         self.assertTrue(any("WARNING" in m and "429" in m for m in o._LOG_RING))
-        # check that aborted item's attempt not counted
+        # aborted item's attempt not recorded anywhere
+        self.assertIsNone(self._state_entry("/t/e81", "ja", 81))
+        self.assertEqual(self._state_entry("/t/e80", "ja", 80)["attempts"], 1)
+        # and the ledger gained no bookkeeping rows at all
         rows = o.load_records_jsonl(self.registry)
-        # ep 81 should not have hunt attempt recorded
-        ep81_rows = [r for r in rows if r.get("episode_id") == 81 and "jimaku_hunt_attempts" in r]
-        self.assertEqual(len(ep81_rows), 0)
-        # ep 80 should have one
-        ep80_rows = [r for r in rows if r.get("episode_id") == 80 and r.get("jimaku_hunt_attempts") == 1]
-        self.assertEqual(len(ep80_rows), 1)
+        self.assertFalse(any("jimaku_hunt_attempts" in r for r in rows))
 
     def test_429_movie_aborts(self):
         # movie path
@@ -892,16 +921,20 @@ class TestJimakuHuntGhostEpisode404(JimakuHuntTestBase):
         res = self._hunt(fake_get)
         # both items processed in one pass; only the healthy one searched
         self.assertEqual(res, {"checked": 2, "searched": 1, "landed": 0})
-        ghost = self._row(77)
-        self.assertEqual(ghost["jimaku_hunt_attempts"], 1)
-        self.assertTrue(ghost["jimaku_hunt_last_ts"])
+        # backoff recorded in the dedicated state file, NOT the ledger
+        ghost_state = self._state_entry("/t/a77", "ja", 77)
+        self.assertEqual(ghost_state["attempts"], 1)
+        self.assertTrue(ghost_state["last_ts"])
+        ghost_row = self._row(77)
+        self.assertNotIn("jimaku_hunt_attempts", ghost_row)
+        self.assertNotIn("jimaku_hunt_last_ts", ghost_row)
         # healthy sibling processed normally afterwards: its OWN bazarr
         # miss recorded attempt 1 (proof the 404 did not derail the pass)
-        healthy = self._row(78)
-        self.assertEqual(healthy["jimaku_hunt_attempts"], 1)
-        self.assertTrue(healthy["jimaku_hunt_last_ts"])
+        healthy_state = self._state_entry("/t/a78", "ja", 78)
+        self.assertEqual(healthy_state["attempts"], 1)
+        self.assertTrue(healthy_state["last_ts"])
         self.assertTrue(
-            any(f"ep 77: sonarr episode gone (404), backing off" in m
+            any("ep 77: sonarr episode gone (404), backing off" in m
                 for m in o._LOG_RING)
         )
 
@@ -934,12 +967,101 @@ class TestJimakuHuntGhostEpisode404(JimakuHuntTestBase):
         failed = self._row(79)
         self.assertIsNone(failed.get("jimaku_hunt_attempts"))
         self.assertIsNone(failed.get("jimaku_hunt_last_ts"))
+        # nothing written for it anywhere: no state-file entry either
+        self.assertIsNone(self._state_entry("/t/a79", "ja", 79))
         self.assertTrue(
             any("jimaku hunt: get_episode 79 failed" in m for m in o._LOG_RING)
         )
         self.assertFalse(
             any("sonarr episode gone (404)" in m for m in o._LOG_RING)
         )
+class TestJimakuHuntStateFile(JimakuHuntTestBase):
+    """Hunt backoff lives in HUNT_STATE_FILE (<stem>|<lang>|<ep>), NOT in the
+    provenance ledger: record_attempt must never append registry rows, and
+    readers prefer the state file while still honoring legacy row fields."""
+
+    def _rec(self, ep=60, stem="/t/x", lang="ja"):
+        return {"stem": stem, "lang": lang, "episode_id": ep,
+                "source": "asr", "updated_ts": OLD}
+
+    def test_record_attempt_writes_state_not_registry(self):
+        _write_row(self.registry, stem="/t/x", lang="ja", source="asr",
+                   episode_id=60, updated_ts=OLD)
+        with open(self.registry) as fh:
+            before = sum(1 for _ in fh)
+        now = datetime.now(timezone.utc)
+        o._jimaku_hunt_record_attempt(self._rec(), now)
+        # ledger untouched
+        with open(self.registry) as fh:
+            after = sum(1 for _ in fh)
+        self.assertEqual(after, before)
+        # state file holds the attempt
+        entry = self._state_entry("/t/x", "ja", 60)
+        self.assertEqual(entry["attempts"], 1)
+        self.assertTrue(entry["last_ts"])
+        self.assertTrue(entry["updated"])
+        # increments on repeat misses
+        o._jimaku_hunt_record_attempt(self._rec(), now)
+        self.assertEqual(self._state_entry("/t/x", "ja", 60)["attempts"], 2)
+
+    def test_eligible_prefers_state_file_over_legacy_fields(self):
+        now = datetime.now(timezone.utc)
+        rec = dict(self._rec(), jimaku_hunt_last_ts=_iso(now - timedelta(hours=48)),
+                   jimaku_hunt_attempts=8)  # legacy says long overdue
+        # fresh state miss (attempt 1 just now) -> 30min backoff wins
+        o._jimaku_hunt_record_attempt(rec, now)
+        self.assertFalse(o._jimaku_hunt_eligible(rec, now))
+        os.remove(self.hunt_state)  # state entry gone -> legacy fields rule
+        self.assertTrue(o._jimaku_hunt_eligible(rec, now))
+
+    def test_eligible_falls_back_to_legacy_row_fields(self):
+        now = datetime.now(timezone.utc)
+        recent = dict(self._rec(ep=61),
+                      jimaku_hunt_last_ts=_iso(now - timedelta(minutes=5)),
+                      jimaku_hunt_attempts=1)
+        overdue = dict(self._rec(ep=62),
+                       jimaku_hunt_last_ts=_iso(now - timedelta(minutes=31)),
+                       jimaku_hunt_attempts=1)
+        self.assertFalse(o._jimaku_hunt_eligible(recent, now))
+        self.assertTrue(o._jimaku_hunt_eligible(overdue, now))
+
+    def test_corrupt_state_file_treated_as_fresh_without_crashing(self):
+        with open(self.hunt_state, "w") as fh:
+            fh.write("{not json at all")
+        now = datetime.now(timezone.utc)
+        rec = self._rec()
+        self.assertTrue(o._jimaku_hunt_eligible(rec, now))
+        # recording still works (overwrites the corrupt file atomically)
+        o._jimaku_hunt_record_attempt(rec, now)
+        self.assertEqual(self._state_entry("/t/x", "ja", 60)["attempts"], 1)
+
+    def test_hunt_ordering_and_skips_use_state_file(self):
+        # two items: ep 63 has a FRESH state-file miss, ep 64 is fresh ->
+        # only 64 is checked this pass
+        _write_row(self.registry, stem="/t/a63", lang="ja", source="asr",
+                   episode_id=63, updated_ts=OLD)
+        _write_row(self.registry, stem="/t/a64", lang="ja", source="asr",
+                   episode_id=64, updated_ts=OLD)
+        o._jimaku_hunt_record_attempt(
+            {"stem": "/t/a63", "lang": "ja", "episode_id": 63},
+            datetime.now(timezone.utc),
+        )
+        seen = []
+
+        def fake_get(cfg, ep_id):
+            seen.append(ep_id)
+            return {"hasFile": True, "episodeFile": {"path": self.video}, "seriesId": 9}
+
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            return (None, "searched")
+
+        with patch.object(o, "REGISTRY_FILE", self.registry), \
+                patch.object(o, "get_movies", return_value={"data": [], "total": 0}), \
+                patch.object(o, "bazarr_jpn_candidate", side_effect=fake_cand), \
+                patch.object(o, "get_episode", side_effect=fake_get):
+            res = o.run_jimaku_hunt(self.cfg, None)
+        self.assertEqual(seen, [64])
+        self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
 
 
 if __name__ == "__main__":
