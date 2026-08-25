@@ -19,6 +19,7 @@ see pipeline/emotion.py; ladder output untouched).
 
 import collections
 import fcntl
+import glob
 import hashlib
 import hmac
 import json
@@ -3432,10 +3433,56 @@ def jellyfin_refresh(cfg, media_path, title=None, item_type="Episode"):
     threading.Thread(target=_run, daemon=True).start()
 
 
+_BAZARR_WANTED_JOBS = {
+    "series": "wanted_search_missing_subtitles_series",
+    "movie": "wanted_search_missing_subtitles_movies",
+}
+
+
+def _bazarr_wanted_refill(cfg, kind="series"):
+    """Best-effort: nudge both Bazarr instances to run their "Search for
+    Missing Subtitles" task right now (route verified against the live
+    swagger: POST /system/tasks?taskid=<job_id>, 204 on success), so episodes
+    whose subtitle files were just deleted re-enter wanted immediately
+    instead of waiting for the next scheduled scan — Bazarr's DB keeps rows
+    pointing at deleted files until a scan, which made retry/delete feel like
+    dead buttons. Never raises: failures are logged as WARNING (Bazarr then
+    self-heals at its next scheduled scan)."""
+    job = _BAZARR_WANTED_JOBS.get(kind) or _BAZARR_WANTED_JOBS["series"]
+    targets = [(cfg["BAZARR_URL"], cfg["BAZARR_API_KEY"])]
+    if cfg.get("BAZARR_URL_2"):
+        targets.append((cfg["BAZARR_URL_2"], cfg.get("BAZARR_API_KEY_2") or ""))
+    for base, key in targets:
+        try:
+            r = requests.post(
+                base.rstrip("/") + "/system/tasks",
+                params={"taskid": job},
+                headers={"X-API-KEY": key},
+                timeout=30,
+            )
+            if r.status_code == 204:
+                log(f"bazarr: triggered '{job}' on {base.rstrip('/')}")
+            else:
+                log(
+                    f"WARNING: bazarr: '{job}' trigger on {base.rstrip('/')} "
+                    f"HTTP {r.status_code}; self-heals at the next scheduled scan"
+                )
+        except Exception as exc:
+            log(
+                f"WARNING: bazarr: '{job}' trigger on {base.rstrip('/')} failed ({exc}); "
+                "self-heals at the next scheduled scan"
+            )
+
+
 def _delete_episode_subtitles(cfg, ep_id, langs=None):
-    """Remove {video stem}.{lang}.srt files (NAS path) plus TMP_DIR copies
-    the pipeline wrote for the episode. langs=None deletes all TARGET_LANGS;
-    otherwise only the listed languages. Never raises."""
+    """Remove every {video stem}.{lang}*.srt variant (NAS path) plus TMP_DIR
+    copies the pipeline wrote for the episode. The glob covers Bazarr's
+    asynchronous HI twins and forced variants ({stem}.ja.srt, {stem}.ja.hi.srt,
+    {stem}.id.forced.srt, ...): deleting only the exact {stem}.{lang}.srt left
+    those twins behind with stale Bazarr DB rows. langs=None deletes all
+    TARGET_LANGS; otherwise only the listed languages. Afterwards both Bazarr
+    instances are asked to run their wanted-search task so missing subtitles
+    refill immediately (_bazarr_wanted_refill). Never raises."""
     deleted = []
     langs = langs or list(cfg.get("TARGET_LANGS", []))
     try:
@@ -3445,8 +3492,7 @@ def _delete_episode_subtitles(cfg, ep_id, langs=None):
         if p and os.path.isfile(p):
             stem = os.path.splitext(p)[0]
             for lang in langs:
-                cand = f"{stem}.{lang}.srt"
-                if os.path.isfile(cand):
+                for cand in sorted(glob.glob(glob.escape(stem) + f".{lang}*.srt")):
                     try:
                         os.remove(cand)
                         deleted.append(cand)
@@ -3465,14 +3511,18 @@ def _delete_episode_subtitles(cfg, ep_id, langs=None):
                 deleted.append(cand)
             except OSError:
                 pass
+    _bazarr_wanted_refill(cfg, "series")
     return deleted
 
 
 def _delete_movie_subtitles(cfg, movie_id, langs=None):
-    """Remove {video stem}.{lang}.srt files (NAS path) plus TMP_DIR copies
-    the pipeline wrote for the movie. The path is resolved from Bazarr/Radarr
+    """Remove every {video stem}.{lang}*.srt variant (NAS path) plus TMP_DIR
+    copies the pipeline wrote for the movie (glob covers .hi./.forced twins;
+    see _delete_episode_subtitles). The path is resolved from Bazarr/Radarr
     (movies are not in Sonarr). langs=None deletes all TARGET_LANGS;
-    otherwise only the listed languages. Never raises."""
+    otherwise only the listed languages. Afterwards both Bazarr instances are
+    asked to run their movies wanted-search task (_bazarr_wanted_refill).
+    Never raises."""
     deleted = []
     langs = langs or list(cfg.get("TARGET_LANGS", []))
     try:
@@ -3485,8 +3535,7 @@ def _delete_movie_subtitles(cfg, movie_id, langs=None):
         if p and os.path.isfile(p):
             stem = os.path.splitext(p)[0]
             for lang in langs:
-                cand = f"{stem}.{lang}.srt"
-                if os.path.isfile(cand):
+                for cand in sorted(glob.glob(glob.escape(stem) + f".{lang}*.srt")):
                     try:
                         os.remove(cand)
                         deleted.append(cand)
@@ -3505,6 +3554,7 @@ def _delete_movie_subtitles(cfg, movie_id, langs=None):
                 deleted.append(cand)
             except OSError:
                 pass
+    _bazarr_wanted_refill(cfg, "movie")
     return deleted
 
 
