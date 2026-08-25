@@ -129,6 +129,9 @@ LADDER_JIMAKU_HUNT_BUDGET = int(os.environ.get("LADDER_JIMAKU_HUNT_BUDGET", "10"
 LADDER_JIMAKU_HUNT_COOLDOWN_H = int(
     os.environ.get("LADDER_JIMAKU_HUNT_COOLDOWN_H", "24")
 )
+LADDER_JIMAKU_HUNT_BUDGET_MOVIES = int(
+    os.environ.get("LADDER_JIMAKU_HUNT_BUDGET_MOVIES", LADDER_JIMAKU_HUNT_BUDGET)
+)
 JIMAKU_HUNT_HOUR = int(os.environ.get("JIMAKU_HUNT_HOUR", "5"))
 LADDER_SKIP_REFINED = os.environ.get("LADDER_SKIP_REFINED", "true").lower() in (
     "1",
@@ -453,6 +456,9 @@ def _ladder_cfg(cfg):
         ),
         "jimaku_hunt_cooldown_h": _gi(
             "LADDER_JIMAKU_HUNT_COOLDOWN_H", LADDER_JIMAKU_HUNT_COOLDOWN_H
+        ),
+        "jimaku_hunt_budget_movies": _gi(
+            "LADDER_JIMAKU_HUNT_BUDGET_MOVIES", LADDER_JIMAKU_HUNT_BUDGET_MOVIES
         ),
         "jimaku_hunt_hour": _gi("JIMAKU_HUNT_HOUR", JIMAKU_HUNT_HOUR),
         "skip_refined": _gb("LADDER_SKIP_REFINED", LADDER_SKIP_REFINED),
@@ -820,6 +826,7 @@ def registry_upsert(
     audio_id=None,
     retimed=None,
     matched_frac=None,
+    kind=None,
 ):
     """Append a registry row for (stem, lang): the on-disk sidecar file
     {stem}.{lang}.srt is the unit of provenance. A row describes the CURRENT
@@ -855,6 +862,8 @@ def registry_upsert(
         entry["retimed"] = retimed
     if matched_frac is not None:
         entry["matched_frac"] = matched_frac
+    if kind is not None:
+        entry["kind"] = kind
     os.makedirs(os.path.dirname(REGISTRY_FILE), exist_ok=True)
     with open(REGISTRY_FILE, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1632,6 +1641,150 @@ def extract_embedded_subtitle(media_path, lang, out_path):
 
 _BAZARR_JPN_TRIED = set()
 _BAZARR_JPN_CACHE = {}
+_BAZARR_JPN_MOVIE_TRIED = set()
+_BAZARR_JPN_MOVIE_CACHE = {}
+
+
+def bazarr_jpn_movie_candidate(cfg, radarr_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+    """Pull-based Japanese subtitle for a movie via Bazarr (two-step providers flow):
+
+    Mirror of bazarr_jpn_candidate but against the /movies endpoints (verified
+    live swagger.json on :6767):
+      1. check Bazarr's existing movie records for a jpn/ja sub whose local
+         file already exists (allow_existing=True only): GET /movies?radarrid=<id>
+      2. otherwise search+download via the per-movie providers flow:
+         STEP A: GET {base}/providers/movies?radarrid=<id> -> {data: [candidate...]}
+         (candidate: provider, subtitle, score, language ...)
+         sorted by score desc, top taken.
+         STEP B: POST {base}/providers/movies?radarrid=<id>
+         &hi=false&forced=false&original_format=False&provider=<p>&subtitle=<s>
+         -> 204 on success; subliminal writes {stem}.<lang>.srt.
+
+    Returns the local SRT path or None. Semantics identical to
+    bazarr_jpn_candidate: return_meta, allow_existing, one-shot dedup
+    (_BAZARR_JPN_MOVIE_TRIED), positive cache (_BAZARR_JPN_MOVIE_CACHE).
+    Never raises."""
+    def _ret(path, meta):
+        return (path, meta) if return_meta else path
+
+    searched = False
+    key = radarr_id
+    if allow_existing:
+        cached = _BAZARR_JPN_MOVIE_CACHE.get(key)
+        if cached:
+            return _ret(cached, "cache")
+    if key in _BAZARR_JPN_MOVIE_TRIED:
+        return _ret(None, None)
+    _BAZARR_JPN_MOVIE_TRIED.add(key)
+    if not radarr_id:
+        return _ret(None, None)
+    try:
+        base = cfg["BAZARR_URL"].rstrip("/")
+        headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
+        if allow_existing:
+            r = requests.get(
+                base + "/movies",
+                params={"radarrid": radarr_id},
+                headers=headers,
+                timeout=60,
+            )
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                items = (data.get("data") or []) if isinstance(data, dict) else []
+                # also handle single-object response
+                if isinstance(data, dict) and not items and data.get("subtitles"):
+                    items = [data]
+                for it in items:
+                    for s in it.get("subtitles") or []:
+                        if (s.get("code2") or "") not in ("ja", "jpn", "jp"):
+                            continue
+                        p = map_path(s.get("path") or "")
+                        if os.path.isfile(p):
+                            _BAZARR_JPN_MOVIE_CACHE[key] = p
+                            return _ret(p, "existing")
+        # STEP A: search candidates via providers/movies
+        try:
+            r = requests.get(
+                base + "/providers/movies",
+                params={"radarrid": radarr_id},
+                headers=headers,
+                timeout=60,
+            )
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} failed: {exc}")
+            return _ret(None, None)
+        if r.status_code != 200:
+            try:
+                snippet = (r.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} HTTP {r.status_code}: {snippet}")
+            return _ret(None, None)
+        try:
+            data = r.json()
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} bad json: {exc}")
+            return _ret(None, None)
+        items = (data.get("data") or []) if isinstance(data, dict) else []
+        if not items:
+            try:
+                snippet = (r.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} no candidates (HTTP {r.status_code}): {snippet}")
+            return _ret(None, None)
+        try:
+            items_sorted = sorted(
+                items,
+                key=lambda c: c.get("score", 0) if isinstance(c, dict) else 0,
+                reverse=True,
+            )
+        except Exception:
+            items_sorted = items
+        cand = items_sorted[0]
+        provider = cand.get("provider") if isinstance(cand, dict) else None
+        subtitle = cand.get("subtitle") if isinstance(cand, dict) else None
+        if not provider or not subtitle:
+            log(f"WARNING: ladder: bazarr jpn search movie {radarr_id} candidate missing provider/subtitle: {cand}")
+            return _ret(None, None)
+        # STEP B: download via providers/movies POST with provider/subtitle params
+        params = {
+            "radarrid": radarr_id,
+            "hi": "false",
+            "forced": "false",
+            "original_format": "False",
+            "provider": provider,
+            "subtitle": subtitle,
+        }
+        try:
+            r2 = requests.post(
+                base + "/providers/movies",
+                params=params,
+                headers=headers,
+                timeout=120,
+            )
+        except Exception as exc:
+            log(f"WARNING: ladder: bazarr jpn download movie {radarr_id} failed: {exc}")
+            return _ret(None, None)
+        if r2.status_code != 204:
+            try:
+                snippet = (r2.text or "")[:200]
+            except Exception:
+                snippet = ""
+            log(f"WARNING: ladder: bazarr jpn download movie {radarr_id} HTTP {r2.status_code}: {snippet}")
+            return _ret(None, None)
+        searched = True
+        stem = os.path.splitext(media_path)[0]
+        for cand_path in (stem + ".jpn.srt", stem + ".ja.srt"):
+            if os.path.isfile(cand_path):
+                _BAZARR_JPN_MOVIE_CACHE[key] = cand_path
+                return _ret(cand_path, "download")
+    except Exception as exc:
+        log(f"ladder: bazarr jpn query failed for movie {radarr_id}: {exc}")
+    return _ret(None, "searched" if searched else None)
 
 
 def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
@@ -4329,7 +4482,7 @@ def process_after_asr(
             )
         elapsed = round(time.time() - t0, 1)
         stem = os.path.splitext(map_path((info.get("episodeFile") or {}).get("path", "")))[0] or None
-        registry_upsert(stem, lang, "asr", ep_id=ep_id)
+        registry_upsert(stem, lang, "asr", ep_id=ep_id, kind=("movie" if movie_id is not None else None))
         st_entry = {
             "sonarrEpisodeId": ep_id,
             "language": lang,
@@ -4492,6 +4645,7 @@ def process_ladder(
             ep_id=ep_id,
             retimed=source.get("align_stats", {}).get("method"),
             matched_frac=source.get("align_stats", {}).get("matched_frac"),
+            kind=("movie" if movie_id is not None else None),
         )
         elapsed = round(time.time() - t0, 1)
         st_entry = {
@@ -4651,50 +4805,84 @@ def run_upgrades(cfg, key, prior_cache=None):
 
 
 def run_jimaku_hunt(cfg, prior_cache=None):
-    """Daily Jimaku sweep: an episode whose on-disk ja came from ASR
+    """Daily Jimaku sweep: an episode or movie whose on-disk ja came from ASR
     (registry source 'asr') can never receive real Japanese subs on its own —
     Bazarr recorded the AI upload as a perfect-score manual row its upgrade
     task never revisits, and bazarr-jp only searches Jimaku while ja counts
-    as missing. For each eligible episode ask Bazarr to search+download jpn
-    again (bazarr_jpn_candidate with return_meta=True); a fresh download
-    lands as a plain {stem}.jpn.srt sidecar — no re-timing/registration here,
-    the normal ladder + upgrade pass adopts it on subsequent passes.
-    Guards: per-episode cooldown on the row's updated_ts
+    as missing. For each eligible episode/movie ask Bazarr to search+download
+    jpn again (bazarr_jpn_candidate / bazarr_jpn_movie_candidate with
+    return_meta=True); a fresh download lands as a plain {stem}.jpn.srt
+    sidecar — no re-timing/registration here, the normal ladder + upgrade pass
+    adopts it on subsequent passes.
+    Guards: per-episode/movie cooldown on the row's updated_ts
     (LADDER_JIMAKU_HUNT_COOLDOWN_H), per-pass budget
-    (LADDER_JIMAKU_HUNT_BUDGET), rows oldest-first. The positive
-    _BAZARR_JPN_CACHE entry is dropped for every freshly searched episode so
-    later ladder reads re-scan disk instead of trusting stale cache.
-    prior_cache mirrors run_upgrades (unused: the hunt only triggers
-    searches). Returns {"checked": n, "searched": m, "landed": k}; never
-    raises."""
+    (LADDER_JIMAKU_HUNT_BUDGET, shared with movies; LADDER_JIMAKU_HUNT_BUDGET_MOVIES
+    may override for movies, default share), rows oldest-first. The positive
+    _BAZARR_JPN_CACHE / _BAZARR_JPN_MOVIE_CACHE entry is dropped for every
+    freshly searched item so later ladder reads re-scan disk instead of trusting
+    stale cache. prior_cache mirrors run_upgrades (unused). Returns
+    {"checked": n, "searched": m, "landed": k}; never raises."""
     lc = _ladder_cfg(cfg)
     if lc["jimaku_hunt_budget"] <= 0:
         return {"checked": 0, "searched": 0, "landed": 0}
     registry = load_registry()
     now = datetime.now(timezone.utc)
-    # One hunt per episode: dedup registry rows by episode_id, the OLDEST
-    # updated_ts wins (it decides both the cooldown and the ordering).
-    by_ep = {}
+    # One hunt per episode/movie: dedup registry rows by (kind, episode_id),
+    # the OLDEST updated_ts wins (it decides both the cooldown and the ordering).
+    # Movies are detected via kind=="movie" (the registry_upsert for movies may
+    # carry that field) — fallback to series when absent, matching _process_actions
+    # and state handling where kind=="movie" distinguishes radarrId rows.
+    by_series = {}
+    by_movie = {}
     for rec in registry.values():
         if rec.get("source") != "asr" or rec.get("lang") not in ("ja", "jpn"):
             continue
         ep_id = rec.get("episode_id")
         if not isinstance(ep_id, int):
             continue
-        cur = by_ep.get(ep_id)
+        is_movie = rec.get("kind") == "movie"
+        target = by_movie if is_movie else by_series
+        cur = target.get(ep_id)
         if cur is None or (rec.get("updated_ts") or "") < (
             cur.get("updated_ts") or ""
         ):
-            by_ep[ep_id] = rec
-    rows = sorted(
-        by_ep.values(),
-        key=lambda r: r.get("updated_ts") or r.get("created_ts") or "",
-    )
+            target[ep_id] = rec
+    # Pre-fetch movie path map once (needed for movie rows and for
+    # legacy rows without kind where episode_id is a radarrId)
+    movie_path_map = {}
+    if by_series or by_movie:
+        try:
+            movies = get_movies(cfg)
+            for m in movies.get("data") or []:
+                rid = m.get("radarrId")
+                if isinstance(rid, int) and m.get("path"):
+                    movie_path_map[rid] = map_path(m["path"])
+        except Exception as exc:
+            log(f"jimaku hunt: get_movies failed: {exc}")
+            movie_path_map = {}
+    # Legacy fallback: rows without kind whose episode_id matches a known
+    # radarrId are movie rows stored before kind-aware registry_upsert
+    if movie_path_map:
+        for ep_id in list(by_series.keys()):
+            if ep_id in movie_path_map and ep_id not in by_movie:
+                rec = by_series.pop(ep_id)
+                by_movie[ep_id] = rec
+    # Build combined oldest-first list with type flag; budget is shared.
+    combined = []
+    for ep_id, rec in by_series.items():
+        combined.append((rec.get("updated_ts") or rec.get("created_ts") or "", "series", ep_id, rec))
+    for ep_id, rec in by_movie.items():
+        combined.append((rec.get("updated_ts") or rec.get("created_ts") or "", "movie", ep_id, rec))
+    combined.sort(key=lambda x: x[0])
     checked = searched = landed = 0
-    for rec in rows:
+    movie_searched = 0
+    movie_budget = lc.get("jimaku_hunt_budget_movies", lc["jimaku_hunt_budget"])
+    for _, kind, ep_id, rec in combined:
+        # Shared budget guard; also respect separate movie budget when set
         if searched >= lc["jimaku_hunt_budget"]:
             break
-        ep_id = rec.get("episode_id")
+        if kind == "movie" and movie_searched >= movie_budget:
+            continue
         updated = rec.get("updated_ts") or rec.get("created_ts") or ""
         try:
             age_h = (
@@ -4705,46 +4893,74 @@ def run_jimaku_hunt(cfg, prior_cache=None):
         if age_h is not None and age_h < lc["jimaku_hunt_cooldown_h"]:
             continue
         checked += 1
-        try:
-            info = get_episode(cfg, ep_id)
-        except Exception as exc:
-            log(f"jimaku hunt: get_episode {ep_id} failed: {exc}")
-            continue
-        ef = info.get("episodeFile") or {}
-        if not info.get("hasFile") or not ef.get("path"):
-            continue
-        media_path = map_path(ef["path"])
-        if not os.path.isfile(media_path):
-            continue
-        series_id = info.get("seriesId") or info.get("sonarrSeriesId")
-        key = (ep_id, series_id)
-        # Force a fresh attempt even when this episode's one-shot lookup was
-        # already consumed earlier in the daemon lifetime (_BAZARR_JPN_TRIED):
-        # searching again is exactly what this sweep is for.
-        _BAZARR_JPN_TRIED.discard(key)
-        try:
-            cand, how = bazarr_jpn_candidate(
-                cfg,
-                ep_id,
-                series_id,
-                media_path,
-                cfg.get("TMP_DIR", "/tmp"),
-                return_meta=True,
-                allow_existing=False,
-            )
-        except Exception as exc:
-            log(f"jimaku hunt: ep {ep_id} search failed: {exc}")
-            continue
-        if how in ("download", "searched"):
-            # Fresh search: drop any stale positive cache so later ladder
-            # reads re-scan disk instead of trusting the old path.
-            searched += 1
-            _BAZARR_JPN_CACHE.pop(key, None)
-            if how == "download":
-                landed += 1
-                log(f"jimaku hunt: ep {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
-        elif cand:
-            log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")
+        if kind == "movie":
+            media_path = movie_path_map.get(ep_id)
+            if not media_path or not os.path.isfile(media_path):
+                continue
+            key = ep_id
+            _BAZARR_JPN_MOVIE_TRIED.discard(key)
+            try:
+                cand, how = bazarr_jpn_movie_candidate(
+                    cfg,
+                    ep_id,
+                    media_path,
+                    cfg.get("TMP_DIR", "/tmp"),
+                    return_meta=True,
+                    allow_existing=False,
+                )
+            except Exception as exc:
+                log(f"jimaku hunt: movie {ep_id} search failed: {exc}")
+                continue
+            if how in ("download", "searched"):
+                searched += 1
+                movie_searched += 1
+                _BAZARR_JPN_MOVIE_CACHE.pop(key, None)
+                if how == "download":
+                    landed += 1
+                    log(f"jimaku hunt: movie {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
+            elif cand:
+                log(f"jimaku hunt: movie {ep_id}: jpn already present ({how})")
+        else:
+            try:
+                info = get_episode(cfg, ep_id)
+            except Exception as exc:
+                log(f"jimaku hunt: get_episode {ep_id} failed: {exc}")
+                continue
+            ef = info.get("episodeFile") or {}
+            if not info.get("hasFile") or not ef.get("path"):
+                continue
+            media_path = map_path(ef["path"])
+            if not os.path.isfile(media_path):
+                continue
+            series_id = info.get("seriesId") or info.get("sonarrSeriesId")
+            key = (ep_id, series_id)
+            # Force a fresh attempt even when this episode's one-shot lookup was
+            # already consumed earlier in the daemon lifetime (_BAZARR_JPN_TRIED):
+            # searching again is exactly what this sweep is for.
+            _BAZARR_JPN_TRIED.discard(key)
+            try:
+                cand, how = bazarr_jpn_candidate(
+                    cfg,
+                    ep_id,
+                    series_id,
+                    media_path,
+                    cfg.get("TMP_DIR", "/tmp"),
+                    return_meta=True,
+                    allow_existing=False,
+                )
+            except Exception as exc:
+                log(f"jimaku hunt: ep {ep_id} search failed: {exc}")
+                continue
+            if how in ("download", "searched"):
+                # Fresh search: drop any stale positive cache so later ladder
+                # reads re-scan disk instead of trusting the old path.
+                searched += 1
+                _BAZARR_JPN_CACHE.pop(key, None)
+                if how == "download":
+                    landed += 1
+                    log(f"jimaku hunt: ep {ep_id}: new jpn sidecar {cand} (ladder picks it up)")
+            elif cand:
+                log(f"jimaku hunt: ep {ep_id}: jpn already present ({how})")
     log(
         f"jimaku hunt: checked={checked} searched={searched} landed={landed} "
         f"(budget={lc['jimaku_hunt_budget']}, "
