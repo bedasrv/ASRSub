@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from tests import HermeticStateMixin
+
 import orchestrator as o
 
 
@@ -37,8 +39,9 @@ def _iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-class JimakuHuntTestBase(unittest.TestCase):
+class JimakuHuntTestBase(HermeticStateMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.video = os.path.join(self.tmp, "v.mkv")
@@ -60,6 +63,7 @@ class JimakuHuntTestBase(unittest.TestCase):
         self.sleep_patch.start()
 
     def tearDown(self):
+        super().tearDown()
         self.sleep_patch.stop()
         self.state_patch.stop()
 
@@ -96,7 +100,7 @@ class JimakuHuntTestBase(unittest.TestCase):
                 p.stop()
 
 
-class TestBackoffSchedule(unittest.TestCase):
+class TestBackoffSchedule(HermeticStateMixin, unittest.TestCase):
     def test_backoff_schedule_math(self):
         # 30m, 60m, 2h, 4h, 8h, 16h, 24h cap
         self.assertEqual(o._jimaku_hunt_backoff_minutes(1), 30)
@@ -287,8 +291,9 @@ class TestJimakuHuntBackoffBudget(JimakuHuntTestBase):
         self.assertEqual(res["searched"], 2)
 
 
-class TestJimakuHuntMissIncrements(unittest.TestCase):
+class TestJimakuHuntMissIncrements(HermeticStateMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.video = os.path.join(self.tmp, "v.mkv")
@@ -303,6 +308,7 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
         self.sleep_patch.start()
 
     def tearDown(self):
+        super().tearDown()
         self.sleep_patch.stop()
         self.state_patch.stop()
 
@@ -340,8 +346,9 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
     def test_existing_and_cache_also_increment(self):
         for meta in ("existing", "cache"):
             with self.subTest(meta=meta):
-                # fresh registry each subtest
-                tmp2 = tempfile.mkdtemp()
+                # fresh registry each subtest (inside self.tmp -> cleaned by mixin)
+                tmp2 = os.path.join(self.tmp, f"subtest-{meta}")
+                os.makedirs(tmp2)
                 reg2 = os.path.join(tmp2, "registry.jsonl")
                 vid2 = os.path.join(tmp2, "v.mkv")
                 open(vid2, "w").close()
@@ -391,9 +398,10 @@ class TestJimakuHuntMissIncrements(unittest.TestCase):
         self.assertEqual(res2["checked"], 0)
 
 
-class TestJimakuHunt429(unittest.TestCase):
+class TestJimakuHunt429(HermeticStateMixin, unittest.TestCase):
     # ensure get_movies mocked
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.video = os.path.join(self.tmp, "v.mkv")
@@ -409,6 +417,7 @@ class TestJimakuHunt429(unittest.TestCase):
         self.sleep_patch.start()
 
     def tearDown(self):
+        super().tearDown()
         self.sleep_patch.stop()
         self.state_patch.stop()
 
@@ -446,8 +455,9 @@ class TestJimakuHunt429(unittest.TestCase):
         self.assertFalse(any("jimaku_hunt_attempts" in r for r in rows))
 
     def test_429_movie_aborts(self):
-        # movie path
-        movie_dir = tempfile.mkdtemp()
+        # movie path (inside self.tmp -> cleaned by mixin)
+        movie_dir = os.path.join(self.tmp, "movie")
+        os.makedirs(movie_dir)
         movie_path = os.path.join(movie_dir, "m.mkv")
         open(movie_path, "w").close()
         # need registry row for movie kind
@@ -544,8 +554,9 @@ class TestJimakuHuntNeverRaises(JimakuHuntTestBase):
         self.assertEqual(res, {"checked": 1, "searched": 0, "landed": 0})
 
 
-class TestBazarrJpnCandidateMeta(unittest.TestCase):
+class TestBazarrJpnCandidateMeta(HermeticStateMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.video = os.path.join(self.tmp, "v.mkv")
         open(self.video, "w").close()
@@ -655,8 +666,9 @@ class TestBazarrJpnCandidateMeta(unittest.TestCase):
             self.assertTrue(any("429" in msg for msg in o._LOG_RING))
 
 
-class TestBazarrJpnCandidateProvidersFlow(unittest.TestCase):
+class TestBazarrJpnCandidateProvidersFlow(HermeticStateMixin, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.video = os.path.join(self.tmp, "v.mkv")
         open(self.video, "w").close()

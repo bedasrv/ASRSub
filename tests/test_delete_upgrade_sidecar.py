@@ -5,6 +5,8 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
+from tests import HermeticStateMixin
+
 import orchestrator as o
 
 
@@ -31,8 +33,9 @@ def _write_row(path, **fields):
 MINIMAL_SRT = "1\n00:00:01,000 --> 00:00:02,000\nテスト\n\n"
 
 
-class TestGlobDeletion(unittest.TestCase):
+class TestGlobDeletion(HermeticStateMixin):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.cfg = {
@@ -61,7 +64,8 @@ class TestGlobDeletion(unittest.TestCase):
             open(os.path.join(self.tmp, n), "w").close()
         tmp_copy = os.path.join(self.tmp, "77_ja.srt")
         open(tmp_copy, "w").close()
-        o.registry_upsert(stem, "ja", "asr", ep_id=77)
+        with patch.object(o, "REGISTRY_FILE", self.registry):
+            o.registry_upsert(stem, "ja", "asr", ep_id=77)
         refills = []
         with patch.object(o, "REGISTRY_FILE", self.registry), patch.object(
             o, "get_episode", return_value={"episodeFile": {"path": video}}
@@ -105,8 +109,9 @@ class TestGlobDeletion(unittest.TestCase):
         self.assertEqual(refills, ["series"])
 
 
-class TestBazarrWantedRefill(unittest.TestCase):
+class TestBazarrWantedRefill(HermeticStateMixin):
     def setUp(self):
+        super().setUp()
         self.cfg = {
             "BAZARR_URL": "http://b1/api",
             "BAZARR_API_KEY": "k1",
@@ -161,8 +166,9 @@ class TestBazarrWantedRefill(unittest.TestCase):
             o._bazarr_wanted_refill(self.cfg, "series")
 
 
-class TestExternalSidecarRegistration(unittest.TestCase):
+class TestExternalSidecarRegistration(HermeticStateMixin):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.video = os.path.join(self.tmp, "fake.mkv")
@@ -294,8 +300,9 @@ class TestExternalSidecarRegistration(unittest.TestCase):
         self.assertEqual(calls["retime"], 0)
 
 
-class TestSidecarTrustedKinds(unittest.TestCase):
+class TestSidecarTrustedKinds(HermeticStateMixin):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.video = os.path.join(self.tmp, "v.mkv")
@@ -346,8 +353,9 @@ class TestSidecarTrustedKinds(unittest.TestCase):
         self.assertFalse(self._trusted())
 
 
-class TestUpgradeEligibility(unittest.TestCase):
+class TestUpgradeEligibility(HermeticStateMixin):
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.mkdtemp()
         self.registry = os.path.join(self.tmp, "registry.jsonl")
         self.refined = os.path.join(self.tmp, "refine_state.jsonl")
