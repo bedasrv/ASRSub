@@ -4445,23 +4445,32 @@ def process_ladder(
 
 
 def run_upgrades(cfg, key, prior_cache=None):
-    """Auto-upgrade pass: AI-owned subs produced from ASR/eng get re-translated
-    from a better jpn source when one appears. Guards: only AI-owned subs
-    (registry authoritative, marker fallback), refine-history skip
-    (LADDER_SKIP_REFINED), source-hash dedup, per-episode cooldown +
-    per-pass upgrade budget (LADDER_UPGRADE_BUDGET). Returns
-    {"upgraded": n, "checked": n}."""
+    """Auto-upgrade pass: AI-owned subs produced from ASR/eng/jpn get
+    re-translated from a better jpn source when one appears — including rows
+    whose current output came from a jpn source (source 'jpn': a Jimaku .ja
+    sidecar that arrived after generation, adopted verbatim or translated,
+    may itself be superseded by a NEWER sidecar; late-arriving better sources
+    win automatically). Only OUTPUT languages are eligible (lang in
+    TARGET_LANGS) so source-sidecar rows ({stem}.jpn.srt etc., written by the
+    webhook/_register_external_sidecar) are never re-processed. Guards: only
+    AI-owned subs (registry authoritative, marker fallback), refine-history
+    skip (LADDER_SKIP_REFINED), source-hash dedup (re-translation only when
+    the jpn source file actually changed/new), per-episode cooldown +
+    per-pass upgrade budget (LADDER_UPGRADE_BUDGET). Rows oldest-first.
+    Returns {"upgraded": n, "checked": n}."""
     lc = _ladder_cfg(cfg)
     if lc["upgrade_budget"] <= 0:
         return {"upgraded": 0, "checked": 0}
     registry = load_registry()
     refined = load_refined_set() if lc["skip_refined"] else set()
     now = datetime.now(timezone.utc)
+    target_langs = set(cfg.get("TARGET_LANGS") or [])
     rows = sorted(
         (
             rec
             for rec in registry.values()
-            if rec.get("source") in ("asr", "eng")
+            if rec.get("source") in ("asr", "eng", "jpn")
+            and rec.get("lang") in target_langs
         ),
         key=lambda r: r.get("updated_ts") or r.get("created_ts") or "",
     )
