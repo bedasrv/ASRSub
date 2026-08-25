@@ -1694,21 +1694,24 @@ def _silent_remove(path):
 
 def _sidecar_trusted(stem, lang, media_path, sidecar_path):
     """Trust verification for the on-disk sidecar sidecar_path: TRUSTED
-    (aligned by construction — skip the re-timing gate, use as-is) iff the
-    registry row exists with source_kind 'embedded' (the tdarr webhook
-    extracted it from this video's own subtitle stream), the row's audio_id
-    matches the CURRENT video's audio signature (not a stale sidecar left
-    behind by a Sonarr file upgrade), and the on-disk content hash still
-    matches the row's source_hash (not clobbered by Bazarr or another
-    writer). Anything else is NOT trusted: the external rung's re-timing
-    gate runs on the file as-is (Bazarr content = external; stale content =
-    gate re-times or rejects; either way never silently used misaligned).
-    Logs the reason at INFO/WARNING; never raises."""
+    (skip the re-timing gate) iff the registry row exists with a trusted
+    source_kind, the row's audio_id matches the CURRENT video's audio
+    signature (not a stale sidecar left behind by a Sonarr file upgrade),
+    and the on-disk content hash still matches the row's source_hash (not
+    clobbered by Bazarr or another writer). Trusted source_kinds:
+    'embedded' — the tdarr webhook extracted it from this video's own
+    subtitle stream (aligned by construction); 'external' — a Jimaku/
+    Bazarr-sourced sidecar that the re-timing gate itself accepted once and
+    _register_external_sidecar then registered (byte-identical content is
+    not re-judged every pass). Anything else is NOT trusted: the external
+    rung's re-timing gate runs on the file as-is (Bazarr content = external;
+    stale content = gate re-times or rejects; either way never silently used
+    misaligned). Logs the reason at INFO/WARNING; never raises."""
     row = registry_get(stem, lang)
     if not row:
         log(f"ladder: {os.path.basename(sidecar_path)} not trusted: no row")
         return False
-    if row.get("source_kind") != "embedded":
+    if row.get("source_kind") not in ("embedded", "external"):
         log(
             f"ladder: {os.path.basename(sidecar_path)} not trusted: "
             f"source_kind={row.get('source_kind')!r}"
@@ -1731,6 +1734,50 @@ def _sidecar_trusted(stem, lang, media_path, sidecar_path):
         log(f"ladder: {os.path.basename(sidecar_path)} not trusted: clobbered (hash mismatch)")
         return False
     return True
+
+
+def _register_external_sidecar(stem, kind, media_path, cand, source_hash, ep_id=None, stats=None):
+    """Adoption for UNTRUSTED external jpn/eng sidecars ({stem}.ja.srt /
+    .jpn.srt / .ja.hi.srt / .jpn.hi.srt — Jimaku/Bazarr-sourced), analogous to
+    _adopt_embedded's webhook-row adoption: once the ladder's ASR-anchored
+    re-timing gate has ACCEPTED a sidecar (post-retime), register it as
+    source_kind 'external' so subsequent passes trust the byte-identical file
+    (hash + audio_id guards in _sidecar_trusted) and skip the gate instead of
+    re-timing or re-rejecting the same file on every pass. Idempotent: skips
+    when the existing row already describes this exact content, so repeated
+    ladder hits never append junk rows. Never raises."""
+    if not source_hash:
+        return
+    try:
+        row = registry_get(stem, kind)
+        if (
+            row
+            and row.get("source_kind") == "external"
+            and row.get("source_hash") == source_hash
+        ):
+            return
+        try:
+            cur_audio = audio_stream_signature(probe_audio(media_path))
+        except Exception:
+            cur_audio = ""
+        registry_upsert(
+            stem,
+            kind,
+            kind,
+            source_path=cand,
+            source_hash=source_hash,
+            source_kind="external",
+            ep_id=ep_id if isinstance(ep_id, int) else None,
+            audio_id=cur_audio,
+            retimed=(stats or {}).get("method"),
+            matched_frac=(stats or {}).get("matched_frac"),
+        )
+        log(
+            f"ladder: registered external {kind} sidecar "
+            f"{os.path.basename(cand)} (retime passed; future passes skip the gate)"
+        )
+    except Exception as exc:
+        log(f"WARNING: ladder: external sidecar registration failed for {cand}: {exc}")
 
 
 _ADOPT_TRIED = set()
@@ -2143,7 +2190,13 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
     computed (probe/ASR failure; the sub keeps its original timing, logged) —
     and (None, stats) on reject (empty ASR cues, or order-ratio out of bounds
     = release mismatch): same fall-through semantics as the old ffsubsync
-    gate. Never raises. sub_lang ("jpn"/"eng") enables text anchoring (eng
+    gate. A sidecar ACCEPTED here is registered by the caller
+    (_register_external_sidecar) as trusted source_kind 'external', so a
+    legitimate Jimaku file is judged once — subsequent passes with identical
+    content skip this gate entirely instead of rejecting/re-timing it every
+    pass; only genuinely unusable files (rejected every pass, never
+    registered) keep hitting the gate until they change or disappear.
+    Never raises. sub_lang ("jpn"/"eng") enables text anchoring (eng
     only when the anchor ASR speaks en — movies with eng audio); when None it
     is inferred from the cue text (CJK vs latin ratio)."""
     tmp_dir = tmp_dir or os.environ.get("TMP_DIR") or "/tmp"
@@ -2242,9 +2295,19 @@ def retime_external_subtitle(sub_path, media_path, cfg, tmp_dir=None, sub_lang=N
             min_anchor_frac=lc["retime_min_anchor_frac"],
         )
         if retimed is None:
+            # 'segments'/'cues' are different quantities (ASR speech anchors
+            # vs subtitle cues) — the gate compares their RATIO against
+            # [1/max_ratio, max_ratio] (release mismatch), never their
+            # equality; degenerate-output rejects additionally carry a
+            # stats['reason']. Log the actual criterion + reason explicitly.
+            ratio = (len(anchors) / len(sub_ms)) if sub_ms else 0.0
+            reason = stats.get("reason")
             log(
                 f"WARNING: ladder: retime: rejected {sub_path} "
-                f"(method={stats.get('method')}, segments={len(anchors)} vs cues={len(sub_ms)})"
+                f"(method={stats.get('method')}, asr_segments={len(anchors)}, cues={len(sub_ms)}, "
+                f"ratio={ratio:.2f}, allowed=1/{lc['retime_max_ratio']:g}..{lc['retime_max_ratio']:g}"
+                + (f", reason={reason}" if reason else "")
+                + ")"
             )
             _silent_remove(conv)
             return None, stats
@@ -2326,6 +2389,9 @@ def detect_ladder_source(cfg, media_path, target_lang, tmp_dir, ep_id=None, seri
         if not verdict_a["ok"]:
             _silent_remove(retimed)
             return None
+        # gate passed -> register the on-disk sidecar as trusted 'external'
+        # so later passes skip the retime gate for this exact file
+        _register_external_sidecar(stem, kind, media_path, cand, hit["source_hash"], ep_id, stats)
         hit["cues"] = verdict_a["cues"]
         hit["align_tmp"] = retimed
         hit["align_stats"] = stats
