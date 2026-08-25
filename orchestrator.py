@@ -1634,14 +1634,14 @@ _BAZARR_JPN_TRIED = set()
 _BAZARR_JPN_CACHE = {}
 
 
-def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
     """Pull-based Japanese subtitle for (episode, series) via Bazarr:
     1. check Bazarr's existing episode records for a jpn/ja sub whose local
-       file already exists; 2. otherwise ask Bazarr to search+download one
-       (subliminal writes {stem}.jpn.srt next to the video). Returns the local
-       SRT path or None. Defensive: failures are logged and fall through to
-       the next ladder rung; each (episode, series) is only attempted once per
-       daemon lifetime so a broken request cannot poll on every pass.
+        file already exists; 2. otherwise ask Bazarr to search+download one
+        (subliminal writes {stem}.jpn.srt next to the video). Returns the local
+        SRT path or None. Defensive: failures are logged and fall through to
+        the next ladder rung; each (episode, series) is only attempted once per
+        daemon lifetime so a broken request cannot poll on every pass.
     A FOUND path is cached positively (_BAZARR_JPN_CACHE): every target
     language of the episode reuses the same source on its own ladder pass
     without re-querying Bazarr — a one-shot dedup let the first lang consume
@@ -1651,15 +1651,21 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
     Bazarr already had on disk), 'download' (the search+download POST landed
     a NEW sidecar next to the video), 'searched' (POST accepted but no
     sidecar on disk yet) — or (None, None). The jimaku hunt needs this to
-    tell fresh searches apart from cached/existing results."""
+    tell fresh searches apart from cached/existing results.
+    When allow_existing is False (used by run_jimaku_hunt) step 1 is skipped
+    entirely — both the _BAZARR_JPN_CACHE lookup and the existing-subtitle
+    scan — going straight to the search+download POST so the pipeline's own
+    AI-uploaded .ja.srt (registered by Bazarr as a subtitle row) does not
+    short-circuit the hunt."""
     def _ret(path, meta):
         return (path, meta) if return_meta else path
 
     searched = False
     key = (ep_id, series_id)
-    cached = _BAZARR_JPN_CACHE.get(key)
-    if cached:
-        return _ret(cached, "cache")
+    if allow_existing:
+        cached = _BAZARR_JPN_CACHE.get(key)
+        if cached:
+            return _ret(cached, "cache")
     if key in _BAZARR_JPN_TRIED:
         return _ret(None, None)
     _BAZARR_JPN_TRIED.add(key)
@@ -1668,23 +1674,24 @@ def bazarr_jpn_candidate(cfg, ep_id, series_id, media_path, tmp_dir, return_meta
     try:
         base = cfg["BAZARR_URL"].rstrip("/")
         headers = {"X-API-KEY": cfg["BAZARR_API_KEY"]}
-        r = requests.get(
-            base + "/episodes",
-            params={"episodeid[]": ep_id},
-            headers=headers,
-            timeout=60,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            items = (data.get("data") or []) if isinstance(data, dict) else []
-            for it in items:
-                for s in it.get("subtitles") or []:
-                    if (s.get("code2") or "") not in ("ja", "jpn", "jp"):
-                        continue
-                    p = map_path(s.get("path") or "")
-                    if os.path.isfile(p):
-                        _BAZARR_JPN_CACHE[key] = p
-                        return _ret(p, "existing")
+        if allow_existing:
+            r = requests.get(
+                base + "/episodes",
+                params={"episodeid[]": ep_id},
+                headers=headers,
+                timeout=60,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                items = (data.get("data") or []) if isinstance(data, dict) else []
+                for it in items:
+                    for s in it.get("subtitles") or []:
+                        if (s.get("code2") or "") not in ("ja", "jpn", "jp"):
+                            continue
+                        p = map_path(s.get("path") or "")
+                        if os.path.isfile(p):
+                            _BAZARR_JPN_CACHE[key] = p
+                            return _ret(p, "existing")
         # search+download (JSON body, no multipart file)
         r2 = requests.post(
             base + "/episodes/subtitles",
@@ -4654,6 +4661,7 @@ def run_jimaku_hunt(cfg, prior_cache=None):
                 media_path,
                 cfg.get("TMP_DIR", "/tmp"),
                 return_meta=True,
+                allow_existing=False,
             )
         except Exception as exc:
             log(f"jimaku hunt: ep {ep_id} search failed: {exc}")

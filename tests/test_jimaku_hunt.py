@@ -59,7 +59,7 @@ class JimakuHuntTestBase(unittest.TestCase):
                 "bazarr_jpn_candidate",
                 side_effect=cand
                 or (
-                    lambda cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False: (
+                    lambda cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True: (
                         None,
                         None,
                     )
@@ -88,10 +88,11 @@ class TestJimakuHuntEligibility(JimakuHuntTestBase):
         _write_row(self.registry, stem="/t/d", lang="en", source="eng", episode_id=4, updated_ts=OLD)
         calls = []
 
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
             self.assertTrue(return_meta)
+            self.assertFalse(allow_existing)
             calls.append((ep_id, media_path))
-            return ("/x.srt", "existing")
+            return (None, "searched")
 
         def fake_get_episode(cfg, ep_id):
             if ep_id == 1:
@@ -104,7 +105,7 @@ class TestJimakuHuntEligibility(JimakuHuntTestBase):
 
         res, _ = self._hunt(cand=fake_cand, get_episode=fake_get_episode)
         self.assertEqual(calls, [(1, self.video)])  # deduped; only ep 1 searched
-        self.assertEqual(res, {"checked": 1, "searched": 0, "landed": 0})
+        self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
 
     def test_episodes_without_video_file_skipped(self):
         _write_row(self.registry, stem="/t/a", lang="ja", source="asr", episode_id=5, updated_ts=OLD)
@@ -114,7 +115,7 @@ class TestJimakuHuntEligibility(JimakuHuntTestBase):
 
         called = []
 
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
             called.append(ep_id)
             return (None, None)
 
@@ -163,7 +164,8 @@ class TestJimakuHuntCooldownBudget(JimakuHuntTestBase):
                 "seriesId": 9,
             }
 
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            self.assertFalse(allow_existing)
             return (None, "searched")  # every search consumes budget
 
         res, _ = self._hunt(cand=fake_cand, get_episode=fake_get_episode)
@@ -193,7 +195,8 @@ class TestJimakuHuntFreshDownload(JimakuHuntTestBase):
         self._eligible_row()
         o._BAZARR_JPN_CACHE[(41, 9)] = "/stale/old.jpn.srt"
 
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            self.assertFalse(allow_existing)
             return (os.path.splitext(self.video)[0] + ".jpn.srt", "download")
 
         res, _ = self._hunt(cand=fake_cand, get_episode=self._get_episode)
@@ -203,23 +206,30 @@ class TestJimakuHuntFreshDownload(JimakuHuntTestBase):
     def test_searched_without_sidecar_also_invalidates_cache(self):
         self._eligible_row()
         o._BAZARR_JPN_CACHE[(41, 9)] = "/stale/old.jpn.srt"
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            self.assertFalse(allow_existing)
             return (None, "searched")
 
         res, _ = self._hunt(cand=fake_cand, get_episode=self._get_episode)
         self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
         self.assertNotIn((41, 9), o._BAZARR_JPN_CACHE)
 
-    def test_existing_sidecar_keeps_cache(self):
+    def test_existing_sidecar_now_triggers_search_via_allow_existing_false(self):
+        # Hunt previously returned "existing" and kept cache; with
+        # allow_existing=False it must bypass the existing-row shortcut
+        # and reach the search+download POST (so searched increments and
+        # stale cache is dropped).
         self._eligible_row()
         o._BAZARR_JPN_CACHE[(41, 9)] = "/stale/old.jpn.srt"
 
-        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False):
-            return ("/real/now.jpn.srt", "existing")
+        def fake_cand(cfg, ep_id, series_id, media_path, tmp_dir, return_meta=False, allow_existing=True):
+            self.assertTrue(return_meta)
+            self.assertFalse(allow_existing)
+            return (None, "searched")
 
         res, _ = self._hunt(cand=fake_cand, get_episode=self._get_episode)
-        self.assertEqual(res, {"checked": 1, "searched": 0, "landed": 0})
-        self.assertEqual(o._BAZARR_JPN_CACHE.get((41, 9)), "/stale/old.jpn.srt")
+        self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
+        self.assertNotIn((41, 9), o._BAZARR_JPN_CACHE)
 
 
 class TestJimakuHuntNeverRaises(JimakuHuntTestBase):
@@ -269,6 +279,50 @@ class TestBazarrJpnCandidateMeta(unittest.TestCase):
             ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True)
         self.assertEqual(path, self.sidecar)
         self.assertEqual(ret, (self.sidecar, "download"))
+
+    def test_default_true_returns_existing_without_post(self):
+        # Default allow_existing=True must still return cached/existing without hitting POST
+        existing_path = self.sidecar
+        fake_data = {"data": [{"subtitles": [{"code2": "jpn", "path": existing_path.replace("/mnt/nas/share/media/", "/data/")}]}]}
+        # map_path will map /data/... back to /mnt/nas/... which equals existing_path if we craft it
+        # Simpler: use map_path identity by passing existing_path directly and mock map_path
+        with patch.object(o, "map_path", return_value=existing_path), patch.object(
+            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: fake_data)
+        ) as mock_get, patch.object(o.requests, "post") as mock_post:
+            ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True)
+            mock_get.assert_called_once()
+            mock_post.assert_not_called()
+            self.assertEqual(ret, (existing_path, "existing"))
+            # also verify cache was populated
+            self.assertEqual(o._BAZARR_JPN_CACHE.get((1, 2)), existing_path)
+
+    def test_allow_existing_false_skips_cache_and_get_existing_branch(self):
+        # Seed cache and a GET response that would return "existing" under default;
+        # with allow_existing=False both the cache lookup and the GET scan must be skipped,
+        # going straight to POST.
+        o._BAZARR_JPN_CACHE[(1, 2)] = "/stale/cached.jpn.srt"
+        fake_existing_data = {"data": [{"subtitles": [{"code2": "jpn", "path": self.sidecar}]}]}
+        with patch.object(o, "map_path", return_value=self.sidecar), patch.object(
+            o.requests, "get", return_value=MagicMock(status_code=200, json=lambda: fake_existing_data)
+        ) as mock_get, patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=201)
+        ) as mock_post:
+            ret = o.bazarr_jpn_candidate(self.cfg, 1, 2, self.video, None, return_meta=True, allow_existing=False)
+            mock_get.assert_not_called()
+            mock_post.assert_called_once()
+            self.assertEqual(ret, (self.sidecar, "download"))
+            # cache should have been bypassed (old stale value overwritten by download)
+            self.assertEqual(o._BAZARR_JPN_CACHE.get((1, 2)), self.sidecar)
+        # second call with allow_existing=False should also skip cache on a fresh key via _TRIED check
+        o._BAZARR_JPN_CACHE.clear()
+        o._BAZARR_JPN_TRIED.clear()
+        o._BAZARR_JPN_CACHE[(3, 4)] = "/another/cached.jpn.srt"
+        with patch.object(o.requests, "get") as mock_get2, patch.object(
+            o.requests, "post", return_value=MagicMock(status_code=201)
+        ) as mock_post2:
+            ret2 = o.bazarr_jpn_candidate(self.cfg, 3, 4, self.video, None, return_meta=True, allow_existing=False)
+            mock_get2.assert_not_called()
+            mock_post2.assert_called_once()
 
 
 class TestJimakuHuntDailyGate(unittest.TestCase):
