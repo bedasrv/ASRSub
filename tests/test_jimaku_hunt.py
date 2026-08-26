@@ -1076,5 +1076,129 @@ class TestJimakuHuntStateFile(JimakuHuntTestBase):
         self.assertEqual(res, {"checked": 1, "searched": 1, "landed": 0})
 
 
+class TestUpgradeTombstone404(JimakuHuntTestBase):
+    """run_upgrades: orphaned Sonarr ids (get_episode 404) get a tombstone in
+    HUNT_STATE_FILE once, then are skipped silently on every later pass.
+    Non-404 failures keep the legacy behavior (logged, re-probed)."""
+
+    def _seed(self, ep_id=292):
+        self.stem = os.path.splitext(self.video)[0]
+        _write_row(
+            self.registry,
+            stem=self.stem,
+            lang="ja",
+            source="asr",
+            episode_id=ep_id,
+            updated_ts=OLD,
+        )
+
+    def _upgrades(self, get_episode):
+        patches = [
+            patch.object(o, "REGISTRY_FILE", self.registry),
+            patch.object(o, "get_episode", side_effect=get_episode),
+        ]
+        for p in patches:
+            p.start()
+        o._LOG_RING.clear()
+        try:
+            return o.run_upgrades(
+                dict(self.cfg, LADDER_UPGRADE_BUDGET=5), "testkey"
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_404_tombstones_once_and_logs_compact_line(self):
+        calls = []
+
+        def gone(cfg, ep_id):
+            calls.append(ep_id)
+            raise requests.HTTPError(
+                "404 Client Error", response=MagicMock(status_code=404)
+            )
+
+        self._seed(292)
+        res = self._upgrades(gone)
+        self.assertEqual(calls, [292])
+        self.assertEqual(res["checked"], 1)
+        entry = self._state_entry(self.stem, "ja", 292)
+        self.assertIsNotNone(entry)
+        self.assertGreaterEqual(entry["attempts"], 99)
+        self.assertTrue(
+            any(
+                "upgrade: ep 292: sonarr episode gone (404), skipping" in m
+                for m in o._LOG_RING
+            ),
+            o._LOG_RING,
+        )
+        self.assertFalse(any("failed:" in m for m in o._LOG_RING))
+
+    def test_second_pass_skips_silently_without_get_episode(self):
+        def boom(cfg, ep_id):
+            raise AssertionError("tombstoned id must not be re-probed")
+
+        now = datetime.now(timezone.utc)
+        self._seed(292)
+        # tombstone via the production helper (HUNT_STATE_FILE is isolated)
+        o._jimaku_hunt_tombstone(
+            {"stem": self.stem, "lang": "ja", "episode_id": 292}, now
+        )
+        res = self._upgrades(boom)
+        self.assertEqual(res, {"upgraded": 0, "checked": 0})
+        self.assertEqual(list(o._LOG_RING), [])
+
+    def test_tombstone_also_backs_off_the_hunt_path(self):
+        """Pinned attempts>=99 must be understood by existing readers:
+        _jimaku_hunt_eligible reports ineligible without special-casing."""
+        rec = {"stem": "/t/x", "lang": "ja", "episode_id": 7}
+        o._jimaku_hunt_tombstone(rec, datetime.now(timezone.utc))
+        self.assertFalse(o._jimaku_hunt_eligible(rec, datetime.now(timezone.utc)))
+        self.assertTrue(o._hunt_state_is_tombstoned(rec))
+
+    def test_non_404_unchanged(self):
+        calls = []
+
+        def err(cfg, ep_id, status):
+            calls.append(ep_id)
+            raise requests.HTTPError(
+                f"{status} Server Error", response=MagicMock(status_code=status)
+            )
+
+        def err500(cfg, ep_id):
+            return err(cfg, ep_id, 500)
+
+        def plain(cfg, ep_id):
+            calls.append(ep_id)
+            raise ValueError("connection boom")
+
+        self._seed(292)
+        res = self._upgrades(err500)
+        self.assertEqual(res["checked"], 1)
+        # nothing written -> state file never even created
+        entry = (
+            self._state_entry(self.stem, "ja", 292)
+            if os.path.exists(self.hunt_state)
+            else None
+        )
+        self.assertIsNone(entry)
+        self.assertTrue(any("upgrade: get_episode 292 failed:" in m for m in o._LOG_RING))
+        self.assertFalse(any("gone (404)" in m for m in o._LOG_RING))
+
+        # second pass still probes: no tombstone was written
+        self._upgrades(err500)
+        self.assertEqual(calls, [292, 292])
+
+        # exception without .response keeps the same legacy behavior
+        calls.clear()
+        self._upgrades(plain)
+        self.assertEqual(calls, [292])
+        entry = (
+            self._state_entry(self.stem, "ja", 292)
+            if os.path.exists(self.hunt_state)
+            else None
+        )
+        self.assertIsNone(entry)
+
+
 if __name__ == "__main__":
     unittest.main()

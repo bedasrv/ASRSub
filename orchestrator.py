@@ -5078,11 +5078,19 @@ def run_upgrades(cfg, key, prior_cache=None):
             age_h = None  # unknown age: eligible
         if age_h is not None and age_h < lc["cooldown_h"]:
             continue
+        if _hunt_state_is_tombstoned(rec):
+            continue  # orphaned sonarr id (404 tombstone): skip silently
         checked += 1
         try:
             info = get_episode(cfg, ep_id)
         except Exception as exc:
-            log(f"upgrade: get_episode {ep_id} failed: {exc}")
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 404:
+                # same disease the hunt fixed: never re-probe a dead id
+                _jimaku_hunt_tombstone(rec, now)
+                log(f"upgrade: ep {ep_id}: sonarr episode gone (404), skipping")
+            else:
+                log(f"upgrade: get_episode {ep_id} failed: {exc}")
             continue
         ef = info.get("episodeFile") or {}
         if not info.get("hasFile") or not ef.get("path"):
@@ -5251,6 +5259,50 @@ def _jimaku_hunt_record_attempt(rec, now):
         _hunt_state_save(state)
     except Exception as exc:
         log(f"WARNING: jimaku hunt: failed to record attempt for ep {rec.get('episode_id')}: {exc}")
+
+
+# Orphaned-episode tombstone pin: attempts >= this value in HUNT_STATE_FILE
+# means "Sonarr returns 404 for this id" (organic hunt misses can never
+# reach it: backoff caps at one probe/24h). Existing readers need no change:
+# _jimaku_hunt_eligible treats it as a maximal (24h-capped) backoff.
+_TOMBSTONE_ATTEMPTS = 99
+
+
+def _hunt_state_is_tombstoned(rec):
+    """True when the item is tombstoned as orphaned in HUNT_STATE_FILE
+    (attempts pinned >= _TOMBSTONE_ATTEMPTS); legacy registry-row fallback
+    honored via _hunt_state_get."""
+    _, attempts = _hunt_state_get(rec)
+    try:
+        return int(attempts) >= _TOMBSTONE_ATTEMPTS
+    except Exception:
+        return False
+
+
+def _jimaku_hunt_tombstone(rec, now):
+    """Persist an orphaned-episode tombstone (Sonarr 404, e.g. from the
+    upgrade pass) into HUNT_STATE_FILE under the same "<stem>|<lang>|<ep>"
+    key: attempts pinned at _TOMBSTONE_ATTEMPTS so existing backoff readers
+    treat the item as backed off while the upgrade pass skips it outright.
+    Never raises."""
+    try:
+        key = _hunt_state_key(rec)
+        now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        state = _hunt_state_load()
+        entry = state.get(key)
+        prev = entry.get("attempts") if isinstance(entry, dict) else rec.get("jimaku_hunt_attempts")
+        try:
+            n = int(prev) if prev is not None else 0
+        except Exception:
+            n = 0
+        state[key] = {
+            "last_ts": now_iso,
+            "attempts": max(n, _TOMBSTONE_ATTEMPTS),
+            "updated": now_iso,
+        }
+        _hunt_state_save(state)
+    except Exception as exc:
+        log(f"WARNING: upgrade: failed to tombstone ep {rec.get('episode_id')}: {exc}")
 
 
 def run_jimaku_hunt(cfg, prior_cache=None):
