@@ -61,15 +61,19 @@ impl AppState {
     }
 }
 
-fn check_token(cfg: &Config, headers: &HeaderMap) -> bool {
+pub(crate) fn check_token(cfg: &Config, headers: &HeaderMap) -> bool {
     // Deny-by-default when no key is configured (same posture as the v1
     // ControlHandler): an unconfigured daemon never accepts control POSTs.
     let key = cfg.control_key();
     if key.is_empty() {
         return false;
     }
+    // Accept either sender header: `X-API-Key` (dashboard/pctl) or
+    // `X-Control-Key` (media-server notification plugins, as the retired
+    // Python ControlHandler did). Either must equal CONTROL_API_KEY.
     let token = headers
         .get("x-api-key")
+        .or_else(|| headers.get("x-control-key"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     secure_eq(token, &key)
@@ -577,5 +581,39 @@ mod tests {
         assert_eq!(items[2].get("ai"), Some(&serde_json::Value::Bool(true)));
         // Cap honored.
         assert_eq!(activity_items(2, &p).len(), 2);
+    }
+
+    #[test]
+    fn control_token_accepts_either_sender_header() {
+        // Either sender header authorizes (legacy parity: dashboard/pctl use
+        // X-API-Key, media-server notification plugins X-Control-Key).
+        let dir = tempfile::tempdir().unwrap();
+        let kf = dir.path().join("control_api_key");
+        std::fs::write(&kf, "s3cret\n").unwrap();
+        std::env::set_var("CONTROL_API_KEY_FILE", kf.to_str().unwrap());
+        let cfg = crate::config::Config::load().expect("config loads");
+        std::env::remove_var("CONTROL_API_KEY_FILE");
+
+        let hdr = |name: axum::http::HeaderName, val: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(name, val.parse().unwrap());
+            h
+        };
+        assert!(check_token(
+            &cfg,
+            &hdr(axum::http::HeaderName::from_static("x-api-key"), "s3cret")
+        ));
+        assert!(check_token(
+            &cfg,
+            &hdr(
+                axum::http::HeaderName::from_static("x-control-key"),
+                "s3cret"
+            )
+        ));
+        assert!(!check_token(
+            &cfg,
+            &hdr(axum::http::HeaderName::from_static("x-api-key"), "wrong")
+        ));
+        assert!(!check_token(&cfg, &HeaderMap::new()));
     }
 }

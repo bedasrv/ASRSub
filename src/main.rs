@@ -444,15 +444,33 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
     // Control API server.
     let app = api::router(app_state.clone());
     // Webhook route shares the port: tdarr POST /webhook wakes + extracts.
+    // Authenticated like every other control POST (legacy parity: the retired
+    // Python ControlHandler 401'd ALL POST paths, webhooks included) — an
+    // unauthenticated caller must not be able to trigger ffmpeg runs, media-dir
+    // writes, or wake-induced API spend. OPS: the Tdarr/Sonarr notification
+    // must send X-API-Key (or X-Control-Key) == CONTROL_API_KEY.
+    let webhook_inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let app = app.route(
         "/webhook",
         axum::routing::post({
             let st = app_state.clone();
-            move |body: String| {
+            let inflight = webhook_inflight.clone();
+            move |headers: axum::http::HeaderMap, body: String| {
                 let st = st.clone();
+                let inflight = inflight.clone();
                 async move {
-                    handle_webhook(st, &body).await;
-                    axum::http::StatusCode::OK
+                    if !api::check_token(&st.cfg, &headers) {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::response::Json(serde_json::json!({"error": "unauthorized"})),
+                        );
+                    }
+                    handle_webhook(st, inflight, &body).await;
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::response::Json(serde_json::json!({"ok": true})),
+                    )
                 }
             }
         }),
@@ -524,29 +542,58 @@ async fn sleep_or_wake(st: &Arc<api::AppState>, secs: u64) {
     }
 }
 
-/// Minimal tdarr webhook: wakes the daemon; when the payload carries a media
-/// file path, embedded subtitle streams are extracted to sidecars first.
-async fn handle_webhook(st: Arc<api::AppState>, body: &str) {
-    st.wake.notify_one();
-    let v: serde_json::Value = match serde_json::from_str(body) {
-        Ok(v) => v,
-        Err(_) => return,
+/// Tdarr webhook: wake the daemon and extract embedded subtitle streams to
+/// sidecars. Fail-closed on missing/invalid payloads (legacy parity: a POST
+/// without a `file` field starts no work); concurrent duplicates for the same
+/// file collapse to one extraction (legacy dedup, filesystem edition — the
+/// pass loop adopts whatever lands via the normal ladder guards).
+async fn handle_webhook(
+    st: Arc<api::AppState>,
+    inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    body: &str,
+) {
+    let Some(file) = webhook_file_from_body(body) else {
+        return;
     };
+    if !Path::new(&file).is_file() {
+        return;
+    }
+    st.wake.notify_one();
+    if !claim_inflight(&inflight, &file).await {
+        tracing::debug!(file = %file, "webhook: extraction already running, skip duplicate");
+        return;
+    }
+    tokio::spawn(async move {
+        let r = extract_embedded(&file).await;
+        inflight.lock().await.remove(&file);
+        if let Err(e) = r {
+            tracing::debug!(error = %e, "webhook embedded extract skipped");
+        }
+    });
+}
+
+/// Sender payload file field: `file` (Tdarr) wins, then `filePath`, `path`.
+/// Non-object / invalid JSON → None (no work starts).
+fn webhook_file_from_body(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let file = v
         .get("file")
         .or_else(|| v.get("filePath"))
         .or_else(|| v.get("path"))
         .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
-    if file.is_empty() || !Path::new(&file).is_file() {
-        return;
+        .unwrap_or("");
+    if file.is_empty() {
+        return None;
     }
-    tokio::spawn(async move {
-        if let Err(e) = extract_embedded(&file).await {
-            tracing::debug!(error = %e, "webhook embedded extract skipped");
-        }
-    });
+    Some(file.to_string())
+}
+
+/// Insert into the in-flight set; false means already present (duplicate).
+async fn claim_inflight(
+    inflight: &Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    file: &str,
+) -> bool {
+    inflight.lock().await.insert(file.to_string())
 }
 
 /// Extract embedded ja/en/id subtitle streams to canonical
@@ -658,5 +705,40 @@ mod tests {
         let ja2 = vec![m("a"), m("b")];
         let tr3 = vec![m("c"), m("d")];
         assert_eq!(without_marker_pairs(&ja2, &tr3).len(), 2);
+    }
+
+    #[test]
+    fn webhook_body_file_priority_and_rejections() {
+        // `file` wins over the aliases.
+        assert_eq!(
+            webhook_file_from_body(r#"{"file": "/m/a.mkv", "path": "/m/b.mkv"}"#),
+            Some("/m/a.mkv".to_string())
+        );
+        assert_eq!(
+            webhook_file_from_body(r#"{"filePath": "/m/c.mkv"}"#),
+            Some("/m/c.mkv".to_string())
+        );
+        assert_eq!(
+            webhook_file_from_body(r#"{"path": "/m/d.mkv"}"#),
+            Some("/m/d.mkv".to_string())
+        );
+        // Fail-closed: invalid JSON, non-object, missing/empty/non-string.
+        assert_eq!(webhook_file_from_body("not json"), None);
+        assert_eq!(webhook_file_from_body("[1,2]"), None);
+        assert_eq!(webhook_file_from_body("{}"), None);
+        assert_eq!(webhook_file_from_body(r#"{"file": ""}"#), None);
+        assert_eq!(webhook_file_from_body(r#"{"file": 42}"#), None);
+    }
+
+    #[tokio::test]
+    async fn webhook_inflight_dedups_concurrent_duplicates() {
+        let set: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
+        assert!(claim_inflight(&set, "/m/a.mkv").await);
+        // Duplicate while in flight: rejected; release frees the slot.
+        assert!(!claim_inflight(&set, "/m/a.mkv").await);
+        assert!(claim_inflight(&set, "/m/b.mkv").await);
+        set.lock().await.remove("/m/a.mkv");
+        assert!(claim_inflight(&set, "/m/a.mkv").await);
     }
 }

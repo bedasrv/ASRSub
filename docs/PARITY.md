@@ -32,7 +32,7 @@
 | 4 | Registry core (upsert/delete/reconcile/locking) | reconciliation ×3 files (7), `test_registry_lock_and_tmp_ladder` (3), `test_registry_write_serialization` (1) | `src/state.rs` (4): roundtrip, consume, delete scoping, kind | PARTIAL | Hash-trust cases (~10) are obsolete by design (hashes removed in `2d4afd6`). fd-lock serialization untested. |
 | 5 | Language aliases/compat (jpn/jp/ind, canonical rows) | adversarial 1–7 + compat + alias_gaps (~30) | `src/lang.rs` (3), delete scoping, `m:/e:` routing | PARTIAL | Core normalization covered; stale-row/legacy-alias adoption ladders untested. |
 | 6 | HI/canonical policy, delete + upgrade sidecars | `test_permanent_subtitle_policy_red` (26), `test_delete_upgrade_sidecar` (19) | Sim A/B (uploads `[en,id]`, marker), `replaceable_lists_canonical_first` | PARTIAL | Untested: HI-twin delete globs, upgrade-on-changed-JPN, forced-sibling preservation. `actions.rs` has zero tests. |
-| 7 | Webhook durability (SQLite ledger, claim/lease/token fencing, auth) | `test_webhook_durability_red` (17), `test_webhook_remediation_tdd` (15), `test_remaining_remediation_tdd` (7) | ABSENT: no SQLite dep; `handle_webhook` (`src/main.rs:529`) is wake + spawn embedded extract only; no auth or dedup visible at the call site | GAP | Verify: auth requirement, concurrent-duplicate handling, stale-owner protection. Highest-risk row — confirm threat model (port exposure) first. |
+| 7 | Webhook durability (SQLite ledger, claim/lease/token fencing, auth) | `test_webhook_durability_red` (17), `test_webhook_remediation_tdd` (15), `test_remaining_remediation_tdd` (7) | Auth restored on `/webhook` (either sender header, 401 otherwise) + validate-before-wake + in-flight dedup; ledger intentionally absent (filesystem-as-ledger: sidecars adopted via ladder guards) | COVERED | Resolved 2026-09-08. OPS: Tdarr/Sonarr notification must send the key header. Remaining waiver: lease-fencing/dupe semantics replaced by simpler dedup — recorded here. |
 | 8 | Retime/align | `test_retime_safety` (10), dry_tests retime (~25) | INTENTIONALLY REMOVED (`RETIME_*`/`ALIGN_*` keys pruned) | DIVERGED | Rationale: Japanese keeps raw timing, external trusted as-is. Needs explicit sign-off, then waive. |
 | 9 | Timeline gate (pileup/hole/shrink/monotonicity) | `test_timeline_gate` (8), marker-guard + recalc-order (2) | `src/srt.rs` (9): parse, marker, clamp, CPS merge, sanitize, split — gate specifics untested | PARTIAL | Port the 8 gate cases; they are small and pure. |
 | 10 | Translation guards/stitch/fallback/source-language | lirik_fix (4), source-language (5), dry_tests merge/echo/tail/per-line (~8) | `src/translate.rs` (4) + marker filter | PARTIAL | Untested: prompt carries actual source language, per-line fallback language preservation. |
@@ -49,7 +49,7 @@
 
 ## Port queue (highest value first)
 
-1. Row 7 — verify webhook auth/dedup threat model; port or fix.
+1. Row 7 — verify webhook auth/dedup threat model; port or fix. ✅ done 2026-09-08
 2. Row 2 — port `test_jimaku_api` ranking/error/cache cases to `src/jimaku.rs`.
 3. Row 3 — decision: accept hunt simplification (waive with rationale) or re-add backoff.
 4. Row 18 — movie phase in `src/sim.rs`.

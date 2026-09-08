@@ -62,10 +62,18 @@ the daemon logs and degrades instead of refusing to start):
 
 The retired Python daemon used a SQLite webhook inbox
 (`webhook_inbox.db` + integrity checks). The Rust daemon has **no inbox
-DB**: `POST /webhook` wakes the pass loop immediately and extracts embedded
-subtitles inline on a spawned task. There is nothing to `PRAGMA
+DB**: `POST /webhook` (authenticated like every other control POST — send
+`X-API-Key` or `X-Control-Key: <CONTROL_API_KEY>`, otherwise 401) wakes the
+pass loop and extracts embedded subtitles on a spawned task, with
+concurrent duplicates for the same file collapsed to one extraction.
+A POST without a `file`/`filePath`/`path` field is a no-op.
+There is nothing to `PRAGMA
 integrity_check` — if you migrated from the Python deployment, the stale
 `.db` files under the state dir are inert and can be archived away.
+
+> OPS: the Tdarr/Sonarr notification that POSTs `/webhook` MUST carry the
+> key header — without it webhooks 401 and new episodes wait for the next
+> periodic pass (30–120s) instead of starting immediately.
 
 ### 4. Runtime Pause (no paused boot)
 
