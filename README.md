@@ -18,8 +18,10 @@ asrsub_providers.json
                 Remote endpoints for Whisper STT + LLM translation
 Dockerfile / docker-compose.yml / build.sh / deploy.sh / pctl
 docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical)
-legacy/         Retired Python implementation (rollback + reference),
-                eval harness, frozen Python suite (run: cd legacy && pytest tests/)
+legacy/         Retired Python implementation (reference only — rollback
+                is redeploying the previous SHA image per docs/DEPLOY.md),
+                eval harness, frozen Python suite (run: cd legacy && pytest tests/).
+                Parity checklist: docs/PARITY.md
 ```
 
 ## Quickstart
