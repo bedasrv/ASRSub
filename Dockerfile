@@ -1,15 +1,22 @@
-FROM python:3.12-slim
+# asrsub (Rust): remote-API subtitle pipeline — no local models, no GPU.
+# Multi-stage: build static-ish release binary, ship ffmpeg + ca-certs only.
+ARG RUST_VERSION=1.85
+FROM rust:${RUST_VERSION}-slim-bookworm AS build
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release && cp target/release/asrsub /asrsub
 
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 HOME=/home/user DEBIAN_FRONTEND=noninteractive LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
-
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1 libchromaprint-tools curl && rm -rf /var/lib/apt/lists/*
-
+FROM debian:bookworm-slim
+ENV HOME=/home/user DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub
+COPY --from=build /asrsub /usr/local/bin/asrsub
+COPY asrsub_providers.json /app/asrsub_providers.json
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub
-
-COPY --chown=asrsub:asrsub . /app
 USER asrsub
-CMD [python, orchestrator.py]
+ENTRYPOINT ["asrsub"]
+CMD ["daemon"]

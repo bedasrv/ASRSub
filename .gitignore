@@ -1,3 +1,7 @@
+# Rust
+/target/
+**/*.rs.bk
+
 # Python
 __pycache__/
 *.py[cod]
@@ -20,6 +24,8 @@ pipeline.env
 
 # Runtime state & data
 *.lock
+# ...but keep the Rust dependency lockfile (binary crate: reproducible builds)
+!Cargo.lock
 state.jsonl
 state*.jsonl
 tmp/
