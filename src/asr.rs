@@ -16,10 +16,11 @@ use crate::srt::{ensure_contiguous, split_long_cues, Cue};
 pub const MAX_CUE_MS: u32 = 8000;
 const CHUNK_BYTES: u64 = 24 * 1024 * 1024;
 
+/// Audio track identity used for source choice: ffprobe index + language
+/// tag. Codec names are intentionally not carried (nothing consumes them).
 #[derive(Debug, Clone)]
 pub struct AudioStream {
     pub index: u32,
-    pub codec: String,
     pub language: Option<String>,
 }
 
@@ -61,11 +62,6 @@ pub async fn probe_audio(path: &str) -> Result<Vec<AudioStream>> {
         }
         streams.push(AudioStream {
             index: s.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
-            codec: s
-                .get("codec_name")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string(),
             language: s
                 .get("tags")
                 .and_then(|t| t.get("language"))
@@ -308,10 +304,10 @@ pub async fn media_duration_s(path: &str) -> Option<f64> {
 }
 
 /// Full ASR for one episode: extract -> (chunked) remote transcribe ->
-/// contiguous `<=8s` cues. Temp audio is removed on every path, including
-/// transcription failures (a `Drop` guard owns the cleanup, not the tail).
-/// `fanout` bounds concurrent piece transcriptions (the shared whisper
-/// semaphore + breaker apply on top).
+/// contiguous `<=max_cue_ms` cues. Temp audio is removed on every path,
+/// including transcription failures (a `Drop` guard owns the cleanup, not
+/// the tail). `fanout` bounds concurrent piece transcriptions (the shared
+/// whisper semaphore + breaker apply on top).
 pub async fn transcribe_episode(
     pool: &ProviderPool,
     tmp_dir: &Path,
@@ -319,6 +315,7 @@ pub async fn transcribe_episode(
     choice: &AudioChoice,
     episode_key: &str,
     fanout: usize,
+    max_cue_ms: u32,
 ) -> Result<Vec<Cue>> {
     let base = tmp_dir.join(format!("asr-{episode_key}"));
     tokio::fs::create_dir_all(&base).await?;
@@ -408,7 +405,7 @@ pub async fn transcribe_episode(
         all
     };
     ensure_contiguous(&mut cues);
-    Ok(split_long_cues(cues, MAX_CUE_MS))
+    Ok(split_long_cues(cues, max_cue_ms))
 }
 
 async fn transcribe_chunk(
@@ -433,12 +430,10 @@ mod tests {
         vec![
             AudioStream {
                 index: 0,
-                codec: "aac".into(),
                 language: Some("jpn".into()),
             },
             AudioStream {
                 index: 1,
-                codec: "aac".into(),
                 language: Some("eng".into()),
             },
         ]

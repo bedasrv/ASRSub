@@ -288,12 +288,11 @@ pub fn cps_merge(
     out
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TimelineViolation(pub String);
-
 /// Structural timeline checks: monotonic, non-overlapping (after contiguity
 /// this only fires on zero-duration), bounded duration, non-empty text.
-pub fn validate_timeline(cues: &[Cue], max_cue_ms: u32) -> Vec<TimelineViolation> {
+/// Returns human-readable violation strings (callers only need the count,
+/// but the messages make warn logs actionable).
+pub fn validate_timeline(cues: &[Cue], max_cue_ms: u32) -> Vec<String> {
     let mut v = Vec::new();
     // The leading AI provenance marker is exempt: it is metadata, not
     // dialogue, and may touch t=0 dialogue by 1 ms when the episode opens
@@ -304,19 +303,19 @@ pub fn validate_timeline(cues: &[Cue], max_cue_ms: u32) -> Vec<TimelineViolation
     };
     for (i, c) in body.iter().enumerate() {
         if c.text.trim().is_empty() {
-            v.push(TimelineViolation(format!("cue {i}: empty text")));
+            v.push(format!("cue {i}: empty text"));
         }
         if c.end_ms < c.start_ms {
-            v.push(TimelineViolation(format!("cue {i}: end before start")));
+            v.push(format!("cue {i}: end before start"));
         }
         if c.end_ms - c.start_ms > max_cue_ms {
-            v.push(TimelineViolation(format!(
+            v.push(format!(
                 "cue {i}: duration {}ms > {max_cue_ms}ms",
                 c.end_ms - c.start_ms
-            )));
+            ));
         }
         if i > 0 && c.start_ms < body[i - 1].end_ms {
-            v.push(TimelineViolation(format!("cue {i}: overlaps previous")));
+            v.push(format!("cue {i}: overlaps previous"));
         }
     }
     v
@@ -369,15 +368,10 @@ fn latin_ratio(s: &str) -> f64 {
 /// Foreign-script guard: lines that are hanzi-without-kana or mostly-latin
 /// (OP/ED lyrics the ASR echoed in Chinese/English) become SDH placeholders
 /// so the translator never echoes the whole chunk.
-pub fn guard_foreign_lines(
-    lines: Vec<String>,
-    placeholders: &[String],
-) -> (Vec<String>, Vec<(usize, String)>) {
+pub fn guard_foreign_lines(lines: Vec<String>, placeholders: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(lines.len());
-    let mut foreign = Vec::new();
     for (i, l) in lines.into_iter().enumerate() {
         if (has_hanzi(&l) && !has_kana(&l)) || (latin_ratio(&l) > 0.5 && !has_kana(&l)) {
-            foreign.push((i, l));
             let ph = placeholders
                 .get(i % placeholders.len().max(1))
                 .cloned()
@@ -387,7 +381,7 @@ pub fn guard_foreign_lines(
             out.push(l);
         }
     }
-    (out, foreign)
+    out
 }
 
 fn has_non_latin_letter(s: &str) -> bool {

@@ -3,7 +3,7 @@
 //! Every chunk races the ordered [`ProviderPool`] (fastest-first, per-endpoint
 //! semaphores, circuit-breakers) so one slow/dead free-tier model never stalls
 //! the sweep. The wire contract mirrors the Python cloud branch: system prompt
-//! with KNOWLEDGE + prior-context refs, user JSON `{source_language,
+//! with KNOWLEDGE, user JSON `{source_language,
 //! target_language, lines}`, assistant JSON array of the same length. Guards:
 //! wrong-script rejection, CJK-echo probe, count-mismatch retry, per-line
 //! fallback, merge-aware tail completion.
@@ -49,7 +49,7 @@ struct ChatMsgIn {
     content: Option<String>,
 }
 
-fn system_prompt(target: &str, source: &str, knowledge: &str, context: &[String]) -> String {
+fn system_prompt(target: &str, source: &str, knowledge: &str) -> String {
     let mut s = format!(
         "You are a professional anime subtitle translator. Translate the provided {source} \
          subtitle lines into {target}. Rules: (1) output ONLY a JSON array of strings, \
@@ -60,17 +60,6 @@ fn system_prompt(target: &str, source: &str, knowledge: &str, context: &[String]
     if !knowledge.is_empty() {
         s.push_str("\n\n");
         s.push_str(knowledge);
-    }
-    if !context.is_empty() {
-        s.push_str(
-            "\n\nUse these previously translated lines from earlier episodes for \
-             consistent names, terms, and style:\n",
-        );
-        for l in context.iter().take(20) {
-            s.push_str("REF: ");
-            s.push_str(l);
-            s.push('\n');
-        }
     }
     s
 }
@@ -199,7 +188,6 @@ async fn attempt_chunk(
     target_lang: &str,
     source_lang: &str,
     knowledge: &str,
-    context: &[String],
     placeholders: &[String],
 ) -> Option<Vec<String>> {
     let target_name = lang_name(target_lang).to_string();
@@ -215,7 +203,7 @@ async fn attempt_chunk(
         "lines": chunk,
     }))
     .unwrap();
-    let system = system_prompt(&target_name, &source_name, knowledge, context);
+    let system = system_prompt(&target_name, &source_name, knowledge);
     let mut messages = vec![
         ChatMsg {
             role: "system".to_string(),
@@ -273,7 +261,6 @@ async fn translate_single_line(
         target_lang,
         source_lang,
         knowledge,
-        &[],
         placeholders,
     )
     .await
@@ -293,7 +280,6 @@ pub struct TranslateJob<'a> {
     pub target_lang: &'a str,
     pub source_lang: &'a str,
     pub knowledge: &'a str,
-    pub context: Vec<String>,
     pub chunk_size: usize,
     pub fanout: usize,
     pub skip_guard: bool,
@@ -308,8 +294,7 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
     let target_lang = normalize_lang(job.target_lang);
     let mut lines = sanitize_lines(job.lines, 10);
     if !job.skip_guard {
-        let (g, _) = guard_foreign_lines(lines, job.placeholders);
-        lines = g;
+        lines = guard_foreign_lines(lines, job.placeholders);
     }
     if lines.is_empty() {
         return Ok(Vec::new());
@@ -323,16 +308,15 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
         let pool = pool.clone();
         let sem = sem.clone();
         let chunk = chunk.to_vec();
-        let (tgt, src, know, ctx, ph) = (
+        let (tgt, src, know, ph) = (
             target_lang.clone(),
             job.source_lang.to_string(),
             job.knowledge.to_string(),
-            job.context.clone(),
             job.placeholders.to_vec(),
         );
         jobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
-            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ctx, &ph).await;
+            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await;
             Ok::<_, anyhow::Error>((ci, chunk, out))
         });
     }

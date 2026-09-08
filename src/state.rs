@@ -27,6 +27,10 @@ pub struct StateEntry {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Provenance ledger row: which sidecar came from where, and when.
+/// `source_path`/`target_path`/`ts`/`extra` are human-debugging provenance;
+/// nothing verifies hashes (no trust gate was ported), so no hash fields
+/// are stored — the sidecar bytes on disk are authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryRow {
     #[serde(default)]
@@ -42,13 +46,7 @@ pub struct RegistryRow {
     #[serde(default)]
     pub source_path: Option<String>,
     #[serde(default)]
-    pub source_hash: Option<String>,
-    #[serde(default)]
     pub target_path: Option<String>,
-    #[serde(default)]
-    pub target_hash: Option<String>,
-    #[serde(default)]
-    pub audio_id: Option<String>,
     #[serde(default)]
     pub ts: Option<String>,
     #[serde(flatten)]
@@ -293,11 +291,6 @@ fn unix_to_ymd_hms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y } as i32;
     (y, m, d, tod / 3600, (tod % 3600) / 60, tod % 60)
-}
-
-pub fn sha256_bytes(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(data))
 }
 
 #[cfg(test)]

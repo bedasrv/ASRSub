@@ -51,6 +51,7 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | `MAX_EPS_PER_RUN` / `EPISODE_CONCURRENCY` | Pass cap / parallel episodes |
 | `ASR_CONCURRENCY` / `TRANSLATE_CONCURRENCY` / `UPLOAD_CONCURRENCY` | Stage fan-outs |
 | `TRANSLATE_CHUNK` | Lines per LLM request (default 10) |
+| `MAX_CUE_MS` | Max cue duration in ms (default 8000) |
 | `PROVIDERS_FILE` | Path to `asrsub_providers.json` |
 | `CONTROL_API_KEY_FILE` | Control-token secret (`/run/secrets/control_api_key` in compose) |
 
@@ -70,7 +71,7 @@ GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
 
 - `/health` liveness · `/status` daemon state · `/config` masked config · `/` dashboard UI
 - `/pause` `/resume` `/run-once` `/wake` control · `/webhook` Tdarr wake + embedded-sub extract
-- `/api2/status /health /config /provenance /wanted /library /exclusions`
+- `/api2/status /health /config /provenance /wanted /library /activity /exclusions`
 - `/api2/episode/{id|m:id|e:id}/retry|skip|delete|exclude|unexclude`
   (`m:` = movie/radarr id; retry/delete accept `{"language","kind"}`)
 

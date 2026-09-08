@@ -94,6 +94,18 @@ fn unquote(v: &str) -> String {
 /// Process-env keys the pipeline owns. The environment wins over files, but
 /// ONLY for these keys or keys already present from files — arbitrary env
 /// (`PATH`, `HOSTNAME`, …) must never leak into the config map or `/config`.
+/// Process-env keys the pipeline owns. The environment wins over files, but
+/// ONLY for these keys or keys already present from files — arbitrary env
+/// (`PATH`, `HOSTNAME`, …) must never leak into the config map or `/config`.
+///
+/// Deliberately absent: the Python-era surface this port did not implement
+/// — `RETIME_*`, `ALIGN_*`, ladder upgrade/hunt budgets, `REGEN/
+/// MOVIE_LIBRARY`, `MAX_TRANSLATE_WORKERS`, local-inference keys
+/// (`TRANSLATE_BASE/MODEL/API_KEY`, `TRANSLATE_CONTEXT_LINES`), and
+/// outbound-webhook keys (`WEBHOOK_URLS/SECRET/EVENTS`, `HERMES_*`).
+/// Env-provided values for these are ignored outright; file-provided ones
+/// still echo in `/config` but nothing consumes them. Listing them here
+/// would promise knobs that do nothing.
 const ENV_ALLOWLIST: &[&str] = &[
     "SONARR_URL",
     "SONARR_API_KEY",
@@ -114,10 +126,6 @@ const ENV_ALLOWLIST: &[&str] = &[
     "TARGET_LANGS",
     "MAX_EPS_PER_RUN",
     "TRANSLATE_CHUNK",
-    "TRANSLATE_CONTEXT_LINES",
-    "TRANSLATE_BASE",
-    "TRANSLATE_MODEL",
-    "TRANSLATE_API_KEY",
     "EPISODE_CONCURRENCY",
     "ASR_CONCURRENCY",
     "TRANSLATE_CONCURRENCY",
@@ -142,37 +150,13 @@ const ENV_ALLOWLIST: &[&str] = &[
     "CPS_MERGE_MAX_DUR_MS",
     "CPS_MERGE_MAX_GAP_MS",
     "WEBHOOK_PORT",
-    "WEBHOOK_URLS",
-    "WEBHOOK_SECRET",
-    "WEBHOOK_EVENTS",
-    "HERMES_WEBHOOK_URL",
-    "HERMES_WEBHOOK_SECRET",
     "CONTROL_API_KEY",
     "CONTROL_API_KEY_FILE",
-    "LADDER_UPGRADE_BUDGET",
-    "LADDER_COOLDOWN_H",
-    "LADDER_JIMAKU_HUNT_BUDGET",
-    "LADDER_JIMAKU_HUNT_BUDGET_MOVIES",
-    "LADDER_SKIP_REFINED",
     "LADDER_MIN_CUES",
     "LADDER_MIN_CHARS",
     "LADDER_MIN_CJK",
     "LADDER_SPAN_TOLERANCE",
-    "ALIGN_ENABLED",
-    "ALIGN_MAX_OFFSET_S",
-    "ALIGN_MAX_OFFSET_SECONDS",
-    "RETIME_ENABLED",
-    "RETIME_TEXT_THRESHOLD",
-    "RETIME_MAX_RATIO",
-    "RETIME_MIN_ANCHOR_FRAC",
-    "RETIME_ACCEPT_MIN_ANCHOR_FRAC",
-    "RETIME_MIN_ANCHORS",
-    "RETIME_MAX_ANCHOR_P75_MS",
-    "RETIME_MAX_ANCHOR_P90_MS",
     "MAX_CUE_MS",
-    "MAX_TRANSLATE_WORKERS",
-    "REGEN_LIBRARY",
-    "MOVIE_LIBRARY",
     "ASRSUB_CONFIG_DIR",
     "RUST_LOG",
 ];
@@ -269,6 +253,7 @@ pub struct Config {
     pub ladder_min_cjk: f64,
     pub ladder_span_tol: f64,
     pub anilist_cache: PathBuf,
+    pub max_cue_ms: u32,
 }
 
 impl Config {
@@ -400,6 +385,10 @@ impl Config {
                 .get("LADDER_SPAN_TOLERANCE")
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(0.15),
+            max_cue_ms: raw
+                .get("MAX_CUE_MS")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(crate::asr::MAX_CUE_MS),
             anilist_cache: get_path(
                 "ANILIST_CACHE",
                 &dir.join("anilist_cache.json").to_string_lossy(),

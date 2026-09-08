@@ -75,14 +75,7 @@ impl Pipeline {
             .unwrap_or(&media_path)
             .to_string();
         let streams = asr::probe_audio(&media_path).await?;
-        let mapped: Vec<asr::AudioStream> = streams
-            .into_iter()
-            .map(|s| asr::AudioStream {
-                index: s.index,
-                codec: s.codec,
-                language: s.language,
-            })
-            .collect();
+        let mapped: Vec<asr::AudioStream> = streams;
 
         let mut asr_cache: std::collections::HashMap<String, Vec<Cue>> =
             std::collections::HashMap::new();
@@ -136,6 +129,7 @@ impl Pipeline {
                                 &choice,
                                 &key,
                                 self.cfg.asr_concurrency,
+                                self.cfg.max_cue_ms,
                             )
                             .await?;
                             asr_cache.insert(choice.asr_lang.clone(), fresh.clone());
@@ -171,7 +165,6 @@ impl Pipeline {
                             "Japanese"
                         },
                         knowledge: &knowledge,
-                        context: Vec::new(),
                         chunk_size: self.cfg.translate_chunk,
                         fanout: self.cfg.translate_concurrency,
                         skip_guard: normalize_lang(&src_lang) == "en",
@@ -194,7 +187,7 @@ impl Pipeline {
                 self.cfg.cps_merge_max_gap_ms,
             );
             srt::ensure_contiguous(&mut merged);
-            let violations = srt::validate_timeline(&merged, asr::MAX_CUE_MS);
+            let violations = srt::validate_timeline(&merged, self.cfg.max_cue_ms);
             if !violations.is_empty() {
                 tracing::warn!(episode = cand.episode_id, lang = %lang, n = violations.len(), "timeline violations after merge");
             }
@@ -310,6 +303,8 @@ impl Pipeline {
     /// Provenance commit. ASR rows carry `source = "asr"` with NO
     /// `source_kind` (matching `registry_upsert(stem, lang, "asr", ...)` in
     /// orchestrator.py); ladder rows carry `jpn`/`eng` + `external`.
+    /// Paths are recorded for human debugging; nothing verifies hashes, so
+    /// none are stored (and no file re-read happens here).
     async fn commit_registry(&self, c: RegistryCommit<'_>) {
         let stem = c.stem;
         let lang = c.lang;
@@ -319,10 +314,6 @@ impl Pipeline {
         let kind = c.kind;
         let media_path = c.media_path;
         let target = crate::lang::canonical_target_sidecar(stem, lang);
-        let target_hash = tokio::fs::read(&target)
-            .await
-            .ok()
-            .map(|b| state::sha256_bytes(&b));
         let mut extra = std::collections::HashMap::new();
         extra.insert(
             "media_path".to_string(),
@@ -341,10 +332,7 @@ impl Pipeline {
             source: Some(source.to_string()),
             source_kind: source_kind.map(str::to_string),
             source_path: Some(target.clone()),
-            source_hash: target_hash.clone(),
             target_path: Some(target),
-            target_hash,
-            audio_id: None,
             ts: Some(state::utc_now_iso()),
             extra,
         };

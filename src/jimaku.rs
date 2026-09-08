@@ -16,6 +16,10 @@ pub struct Jimaku {
     http: reqwest::Client,
     pace_ms: u64,
     anilist_cache: std::path::PathBuf,
+    /// API deadline for entry search + file listing (`JIMAKU_TIMEOUT`, s).
+    api_timeout: std::time::Duration,
+    /// AniList GraphQL deadline (`ANILIST_TIMEOUT`, s).
+    anilist_timeout: std::time::Duration,
     /// Serializes pacing sleeps across the shared client: without this,
     /// N episode workers sleep in parallel and fire together, defeating
     /// the 25 req/min pacing.
@@ -23,6 +27,13 @@ pub struct Jimaku {
     /// Serializes AniList cache read→query→write so concurrent misses for
     /// different series cannot lose updates (last-writer-wins).
     cache_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 impl Jimaku {
@@ -60,6 +71,8 @@ impl Jimaku {
                     .unwrap_or_else(std::time::Instant::now),
             )),
             cache_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            api_timeout: std::time::Duration::from_secs(env_secs("JIMAKU_TIMEOUT", 30)),
+            anilist_timeout: std::time::Duration::from_secs(env_secs("ANILIST_TIMEOUT", 30)),
         }
     }
 
@@ -97,7 +110,7 @@ impl Jimaku {
         let r = self
             .auth(self.http.get(format!("{}/entries/search", self.base)))
             .query(&[("anilist_id", anilist_id)])
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(self.api_timeout)
             .send()
             .await
             .context("jimaku search")?;
@@ -121,7 +134,7 @@ impl Jimaku {
         if let Some(ep) = episode {
             b = b.query(&[("episode", ep)]);
         }
-        let r = b.timeout(std::time::Duration::from_secs(30)).send().await?;
+        let r = b.timeout(self.api_timeout).send().await?;
         if r.status().as_u16() == 429 {
             anyhow::bail!("jimaku 429 rate limited");
         }
@@ -130,6 +143,8 @@ impl Jimaku {
     }
 
     /// Stream-download to `dest` via `<dest>.part` + atomic rename.
+    /// Fixed 120 s deadline (subtitle archives, not API calls — outside
+    /// `JIMAKU_TIMEOUT` by design).
     pub async fn download(&self, url: &str, dest: &std::path::Path) -> Result<()> {
         self.pace().await;
         if let Some(p) = dest.parent() {
@@ -214,7 +229,7 @@ impl Jimaku {
             }))
             .header("User-Agent", "asrsub-jimaku/3.0")
             .header("Accept", "application/json")
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(self.anilist_timeout)
             .send()
             .await
             .ok()?;

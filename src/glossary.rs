@@ -1,6 +1,6 @@
 //! Per-series name glossary (schema v2) injected as KNOWLEDGE background.
 //!
-//! `glossary.json`: `{ "<Series>": {"entries": [{ja, en, aliases[], kind, note}]}}`.
+//! `glossary.json`: `{ "<Series>": {"entries": [{ja, en, aliases[], kind}]}}`.
 //! A legacy flat map `{ "<Series>": {"カナ": "En"} }` is migrated in memory.
 //! Episode-cast filtering scans the full cue text once per episode so every
 //! chunk of the episode shares one stable KNOWLEDGE prefix (prefix-cache
@@ -21,8 +21,6 @@ pub struct GlossaryEntry {
     pub aliases: Vec<String>,
     #[serde(default = "default_kind")]
     pub kind: String,
-    #[serde(default)]
-    pub note: String,
 }
 
 fn default_kind() -> String {
@@ -163,11 +161,6 @@ fn entries_from_raw(raw: &serde_json::Value) -> Vec<GlossaryEntry> {
                     en: en.to_string(),
                     aliases,
                     kind,
-                    note: e
-                        .get("note")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string(),
                 })
             })
             .collect();
@@ -187,7 +180,6 @@ fn entries_from_raw(raw: &serde_json::Value) -> Vec<GlossaryEntry> {
                 en: en.to_string(),
                 aliases: Vec::new(),
                 kind: "character".to_string(),
-                note: "v1-migrated".to_string(),
             })
         })
         .collect()

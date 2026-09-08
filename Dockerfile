@@ -3,7 +3,7 @@
 ARG RUST_VERSION=1.85
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

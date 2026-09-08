@@ -24,21 +24,16 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RequestShape {
-    #[serde(default)]
-    pub temperature: Option<f64>,
-    #[serde(default)]
-    pub thinking: Option<serde_json::Value>,
-    #[serde(default)]
-    pub headers: Vec<String>,
-}
+/// Honored provider-file keys per entry: `endpoint`, `model`, `key_env`,
+/// `api_key`, `probe_latency_s`, `thinking_param_accepted` (+ the
+/// `whisper_stt` / `whisper_stt_fallbacks` / `llm_translation_models`
+/// structure). Anything else in the file (legacy `request_shape`, cost
+/// metadata, name aliases) parses but is intentionally ignored: unknown
+/// keys never fail a load.
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmProvider {
-    pub provider: String,
     pub endpoint: String,
-    pub base_url: String,
     pub model: String,
     #[serde(default)]
     pub key_env: String,
@@ -48,8 +43,6 @@ pub struct LlmProvider {
     pub probe_latency_s: f64,
     #[serde(default)]
     pub thinking_param_accepted: bool,
-    #[serde(default)]
-    pub request_shape: Option<RequestShape>,
 }
 
 fn default_latency() -> f64 {
@@ -58,19 +51,12 @@ fn default_latency() -> f64 {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WhisperProvider {
-    pub provider: String,
     pub endpoint: String,
     pub model: String,
     #[serde(default)]
     pub key_env: String,
     #[serde(default)]
     pub api_key: String,
-    #[serde(default)]
-    pub rate_usd_per_audio_sec: Option<f64>,
-    #[serde(default)]
-    pub via_upstream: Option<String>,
-    #[serde(default)]
-    pub request_shape: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -423,8 +409,11 @@ mod tests {
         let http = reqwest::Client::builder().build().unwrap();
         let pool = ProviderPool::new(f, http);
         assert_eq!(pool.whisper_len(), 3);
-        let order: Vec<String> =
-            pool.ordered_whisper().into_iter().map(|(_, w)| w.model).collect();
+        let order: Vec<String> = pool
+            .ordered_whisper()
+            .into_iter()
+            .map(|(_, w)| w.model)
+            .collect();
         assert_eq!(order, vec!["m0", "m1", "m2"]);
         assert_eq!(order[0], "m0");
     }

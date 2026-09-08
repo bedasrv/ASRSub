@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 
 use crate::config::Config;
 use crate::pipeline::Pipeline;
+use crate::state::StateEntry;
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct LastPass {
@@ -103,6 +104,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api2/provenance", get(h_provenance))
         .route("/api2/wanted", get(h_wanted))
         .route("/api2/library", get(h_library))
+        .route("/api2/activity", get(h_activity))
         .route("/api2/exclusions", get(h_exclusions))
         .route("/api2/episode/:id/retry", post(h_retry))
         .route("/api2/episode/:id/skip", post(h_skip))
@@ -265,6 +267,43 @@ async fn h_library(State(s): State<Arc<AppState>>) -> Json<Value> {
         })
         .collect();
     Json(json!({"total": items.len(), "data": items}))
+}
+
+/// Recent pipeline activity, newest first, in the dashboard's
+/// `{items:[...]}` shape (`kind`, `ts`, `episode_id`, `language`,
+/// `detail`, `ai`). State-derived only: no Bazarr history merge, so the
+/// endpoint stays a cheap local read on every dashboard poll.
+async fn h_activity(State(s): State<Arc<AppState>>) -> Json<Value> {
+    Json(json!({"items": activity_items(40, &s.cfg.state_file)}))
+}
+
+fn activity_items(n: usize, state_file: &std::path::Path) -> Vec<Value> {
+    let rows: Vec<StateEntry> = crate::state::load_jsonl(state_file);
+    rows.into_iter()
+        .rev()
+        .take(n.max(1))
+        .map(|e| {
+            let kind = e.kind.as_deref().unwrap_or("series");
+            // Dashboard pills: "pipeline" rows show the status detail,
+            // "movie" rows get the MOVIE badge.
+            let ui_kind = if kind == "movie" { "movie" } else { "pipeline" };
+            let status = e.status.as_deref().unwrap_or("");
+            // `detail` travels inside the flattened `extra` map (see
+            // `append_state`); surface it after the status.
+            let detail = match e.extra.get("detail").and_then(|v| v.as_str()) {
+                Some(d) if !d.is_empty() => format!("{status}: {d}"),
+                _ => status.to_string(),
+            };
+            json!({
+                "kind": ui_kind,
+                "ts": e.ts,
+                "episode_id": e.episode_id,
+                "language": e.language.as_deref().map(crate::lang::normalize_lang),
+                "detail": detail,
+                "ai": status == "done",
+            })
+        })
+        .collect()
 }
 
 async fn h_exclusions(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -506,5 +545,37 @@ mod tests {
         let (kind, lang) = body_kind_lang(&None, "movie");
         assert_eq!(kind, "movie");
         assert_eq!(lang, None);
+    }
+
+    #[test]
+    fn activity_maps_state_tail_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("state.jsonl");
+        for (id, status) in [(1, "done"), (2, "error"), (3, "done")] {
+            crate::state::append_jsonl(
+                &p,
+                &serde_json::json!({
+                    "sonarrEpisodeId": id,
+                    "language": "id",
+                    "status": status,
+                    "detail": if status == "error" { "boom" } else { "" },
+                    "kind": if id == 3 { "movie" } else { "series" },
+                }),
+            )
+            .unwrap();
+        }
+        let items = activity_items(10, &p);
+        assert_eq!(items.len(), 3);
+        // Newest first; movie rows carry the MOVIE kind; error detail shown.
+        assert_eq!(items[0].get("episode_id").and_then(|v| v.as_i64()), Some(3));
+        assert_eq!(items[0].get("kind").and_then(|v| v.as_str()), Some("movie"));
+        assert_eq!(
+            items[1].get("detail").and_then(|v| v.as_str()),
+            Some("error: boom")
+        );
+        assert_eq!(items[1].get("ai"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(items[2].get("ai"), Some(&serde_json::Value::Bool(true)));
+        // Cap honored.
+        assert_eq!(activity_items(2, &p).len(), 2);
     }
 }

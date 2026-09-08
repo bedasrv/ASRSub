@@ -10,6 +10,7 @@ app (control_api_v2.py handlers, default http://127.0.0.1:8080):
 """
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -105,7 +106,9 @@ def main(argv):
         print(json.dumps(body, indent=2))
         sys.exit(0 if code == 200 else 1)
     if cmd in ("wake", "pause", "resume", "run-once"):
-        token = read_token() if cmd != "wake" else None
+        # All control POSTs require the token (the server denies tokenless
+        # writes, including wake).
+        token = read_token()
         code, body = request("POST", "/" + cmd, token=token)
         print(json.dumps(body, indent=2))
         sys.exit(0 if code == 200 else 1)
@@ -120,10 +123,12 @@ def main(argv):
         sys.exit(0 if code == 200 else 1)
     if cmd in ("episode-retry", "episode-skip"):
         if len(argv) < 2:
-            fail(f"usage: pctl {cmd} <sonarrEpisodeId>")
+            fail(f"usage: pctl {cmd} <sonarrEpisodeId|m:<radarrId>|e:<episodeId>>")
         ep = argv[1]
-        if not ep.isdigit():
-            fail(f"episode id must be an integer, got: {ep}")
+        # Plain ids (series) plus m:/e: prefixes (movie/series) pass through
+        # to the server, which routes on the prefix.
+        if not (ep.isdigit() or re.fullmatch(r"[mMeE]:\d+", ep)):
+            fail(f"episode id must be an integer or m:<id>/e:<id>, got: {ep}")
         token = read_token()
         if not token:
             fail("PIPE_TOKEN env or CONTROL_API_KEY in pipeline.env required")

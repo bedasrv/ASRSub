@@ -57,11 +57,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Self-looping daemon (default when no subcommand is given).
-    Daemon {
-        /// Run one pass then keep looping (same as daemon); kept for parity.
-        #[arg(long, default_value_t = false)]
-        loop_: bool,
-    },
+    Daemon,
     /// Single pipeline pass then exit.
     RunOnce,
     /// Transcribe media audio via remote Whisper to SRT.
@@ -163,7 +159,7 @@ async fn load_stack(
 
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.cmd {
-        None | Some(Cmd::Daemon { .. }) => daemon(cli.providers_file).await,
+        None | Some(Cmd::Daemon) => daemon(cli.providers_file).await,
         Some(Cmd::RunOnce) => {
             let (cfg, pool, http) = load_stack(cli.providers_file).await?;
             let pipe = pipeline::Pipeline::new(cfg, pool, http);
@@ -235,14 +231,7 @@ async fn transcribe_cmd(
 ) -> Result<()> {
     let (cfg, pool, _) = load_stack(providers_file).await?;
     let streams = asr::probe_audio(&input.to_string_lossy()).await?;
-    let mapped: Vec<asr::AudioStream> = streams
-        .into_iter()
-        .map(|s| asr::AudioStream {
-            index: s.index,
-            codec: s.codec,
-            language: s.language,
-        })
-        .collect();
+    let mapped: Vec<asr::AudioStream> = streams;
     let choice = match stream {
         Some(i) => asr::AudioChoice {
             stream_index: i,
@@ -259,6 +248,7 @@ async fn transcribe_cmd(
         &choice,
         &key,
         cfg.asr_concurrency,
+        cfg.max_cue_ms,
     )
     .await?;
     let out_path = output
@@ -305,7 +295,6 @@ async fn translate_file_cmd(
             target_lang: target,
             source_lang: source,
             knowledge: &knowledge,
-            context: Vec::new(),
             chunk_size: cfg.translate_chunk,
             fanout: cfg.translate_concurrency,
             skip_guard,
@@ -509,6 +498,11 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
             consecutive_failures = 0;
             continue;
         }
+        // The prompt pass that POST /run-once promises is delivered by its
+        // `wake.notify_one()` (the sleep ends early and the loop runs
+        // immediately). This flag is only the dashboard-visible indicator
+        // (`run_once_requested` in /status); clearing it has no other
+        // behavioral effect in a continuous-loop daemon.
         if app_state.run_once.load(Ordering::Relaxed) {
             app_state.run_once.store(false, Ordering::Relaxed);
         }

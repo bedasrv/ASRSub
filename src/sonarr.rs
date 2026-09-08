@@ -14,10 +14,11 @@ pub struct EpisodeFile {
     pub path: Option<String>,
 }
 
+/// Subset of the Sonarr episode payload the pipeline actually consumes.
+/// Deliberately narrow: `id`/`monitored`/`hasFile` are not read anywhere
+/// (candidate selection comes from Bazarr `wanted`, not Sonarr flags).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Episode {
-    #[serde(default)]
-    pub id: Option<i64>,
     #[serde(rename = "seriesId", default)]
     pub series_id: Option<i64>,
     #[serde(rename = "seasonNumber", default)]
@@ -26,10 +27,6 @@ pub struct Episode {
     pub episode_number: Option<i64>,
     #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
-    pub monitored: Option<bool>,
-    #[serde(rename = "hasFile", default)]
-    pub has_file: Option<bool>,
     #[serde(rename = "episodeFile", default)]
     pub episode_file: Option<EpisodeFile>,
 }
