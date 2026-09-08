@@ -90,8 +90,9 @@ impl Pipeline {
                 });
             }
         }
-        // Jimaku direct (series only): one attempt per stem per daemon
-        // lifetime; ~3 calls per attempt, far below the 25 req/min limit.
+        // Jimaku direct (series only): attempted at most once per
+        // JIMAKU_RETRY_COOLDOWN per stem; ~3 calls per attempt, paced
+        // globally far below the 25 req/min limit.
         if !q.is_movie
             && self.cfg.jimaku_direct_enabled
             && self.jimaku.enabled()
@@ -112,7 +113,10 @@ impl Pipeline {
     /// Direct Jimaku REST candidate: AniList id (cache-first) -> entry search
     /// -> per-episode file listing -> rank -> download -> adequacy gate.
     /// The raw Japanese source lands in `{stem}.ja.hi.srt` (no-clobber) so
-    /// future passes reuse it without network. Never raises.
+    /// future passes reuse it without network. Misses become re-eligible
+    /// after `JIMAKU_RETRY_COOLDOWN` (a sub uploaded next week must still
+    /// land: Bazarr never revisits our `manual` ASR uploads on its own).
+    /// Never raises.
     async fn jimaku_candidate(
         &self,
         series_title: &str,
@@ -123,9 +127,14 @@ impl Pipeline {
     ) -> Option<LadderHit> {
         {
             let mut tried = self.jimaku_tried.lock().unwrap_or_else(|e| e.into_inner());
-            if !tried.insert(stem.to_string()) {
-                return None; // already attempted this daemon lifetime
+            let now = std::time::Instant::now();
+            // Stamped at attempt start (also dedups concurrent workers on
+            // the same stem); a miss therefore costs one cooldown, not a
+            // hot loop, and a restart retries everything.
+            if !jimaku_retry_due(tried.get(stem).copied(), now) {
+                return None;
             }
+            tried.insert(stem.to_string(), now);
         }
         let tag = match season {
             Some(s) => format!("S{s:02}E{episode:02}"),
@@ -276,5 +285,50 @@ impl Pipeline {
             }
         }
         true
+    }
+}
+
+/// Cooldown before a Jimaku-missed stem is probed again. The retired Python
+/// hunt ramped 30min→24h with per-pass budgets, tombstones, and a state
+/// file; this port keeps the one property that matters (misses are
+/// retried, because late uploads must still land) and drops the rest:
+/// - budgets: unnecessary — the shared client paces all calls 500ms apart
+///   against a 25 req/min limit, so probes cannot burst by construction;
+/// - 429 aborts: a limited stem simply misses into the next cooldown;
+/// - tombstones: no upgrade pass means no Sonarr-404 orphans; a hopeless
+///   stem costs ~2 calls/day, cheaper than tombstone bookkeeping;
+/// - backoff ramp: a flat daily probe lands a new upload within ~24h of
+///   appearance, same as the capped end of the old ramp.
+const JIMAKU_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// True when no attempt is recorded, or the last one is older than the
+/// cooldown. Pure (takes `now`) for testability; `Instant` is monotonic so
+/// wall-clock jumps cannot re-arm or stall the schedule.
+fn jimaku_retry_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last {
+        None => true,
+        Some(t) => now.duration_since(t) >= JIMAKU_RETRY_COOLDOWN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_cooldown_fresh_due_stale_due() {
+        let now = std::time::Instant::now();
+        let day = std::time::Duration::from_secs(24 * 3600);
+        // Never attempted: due immediately (bootstrap must not wait a day).
+        assert!(jimaku_retry_due(None, now));
+        // Attempted just now / an hour ago: not due.
+        assert!(!jimaku_retry_due(Some(now), now));
+        assert!(!jimaku_retry_due(
+            Some(now - std::time::Duration::from_secs(3600)),
+            now
+        ));
+        // Older than the cooldown: due again (late uploads still land).
+        assert!(jimaku_retry_due(Some(now - day), now));
+        assert!(jimaku_retry_due(Some(now - 2 * day), now));
     }
 }

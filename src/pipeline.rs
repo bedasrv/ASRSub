@@ -73,9 +73,12 @@ pub struct Pipeline {
     /// Bounds concurrent Bazarr uploads across episodes (Bazarr queues each
     /// upload as an async job; unbounded bursts wedged it in the past).
     pub(crate) upload_sem: Arc<Semaphore>,
-    /// Stems already Jimaku-attempted this daemon lifetime (dedup: one
-    /// attempt per stem; ~3 calls each, far below the 25 req/min limit).
-    pub(crate) jimaku_tried: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Last Jimaku-direct attempt per stem (misses become re-eligible after
+    /// `JIMAKU_RETRY_COOLDOWN`; successes land a sidecar so the ladder never
+    /// asks again). In-memory: a daemon restart retries everything, which is
+    /// the desired backstop, not a bug.
+    pub(crate) jimaku_tried:
+        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl Pipeline {
@@ -109,7 +112,7 @@ impl Pipeline {
             paused: Arc::new(AtomicBool::new(false)),
             processed_total: AtomicU64::new(0),
             upload_sem,
-            jimaku_tried: std::sync::Mutex::new(std::collections::HashSet::new()),
+            jimaku_tried: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
