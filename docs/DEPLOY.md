@@ -3,6 +3,16 @@
 Build and deploy are intentionally separate. `build.sh` never stops containers or deletes images/cache/volumes.
 Production deployment is fail-closed: no mutable `latest` fallback; the release image must be explicitly set via `ASRSUB_IMAGE`.
 
+## What's in the image
+
+Single statically-built `asrsub` Rust binary + ffmpeg + ca-certs on
+Debian slim. **No Python, no model weights, no GPU runtime** — all Whisper
+and LLM inference is remote via `asrsub_providers.json`, which is baked
+into the image at `/app/asrsub_providers.json`:
+keep the repo copy `chmod 600` and be aware the keys ship inside every
+built image (rotate on leak; env-only secrets are a future change).
+The dashboard UI (`assets/dashboard.html`) is served by the daemon itself.
+
 ## Prerequisites
 
 - Secret file present on host (not in repo, not in compose env):
@@ -23,7 +33,7 @@ Production deployment is fail-closed: no mutable `latest` fallback; the release 
   ```bash
   df -T /home/user/.config/asr-pipeline
   mountpoint -q /mnt/nas/share/media && echo "NFS mounted" || echo "NFS missing"
-  ls -lh /home/user/.config/asr-pipeline/webhook_inbox.db*
+  ls -lh /home/user/.config/asr-pipeline/*.jsonl 2>/dev/null || echo "no state ledgers yet (first boot is fine)"
   ```
 
 ## Build (non-destructive, immutable, versioned)
@@ -66,12 +76,14 @@ docker compose --env-file .release.env up -d --no-build   # start/restart withou
 # or: ASRSUB_IMAGE=$ASRSUB_IMAGE docker compose up -d --no-build
 docker compose ps
 curl -sf http://127.0.0.1:8085/health | jq .
-curl -sf http://127.0.0.1:8085/ready | jq .   # readiness per HEALTH.md
+# No /ready endpoint yet (planned, see docs/HEALTH.md); readiness today is
+# "health 200 + /status shows recent last_pass". deploy.sh's /ready probe is
+# best-effort and already tolerates the 404.
 curl -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/status | jq .paused
 ```
 
 Without `ASRSUB_IMAGE`, `docker compose config` and `docker compose up` will error:
-`ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see DEPLOY.md / .release.env)`.
+`ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)`.
 
 ## Rollback (immutable: redeploy previous SHA)
 
@@ -92,16 +104,16 @@ Do NOT use `docker tag ... :latest` — the mutable latest tag is intentionally 
 
 ## Paused Startup
 
-To start paused for inspection:
+Not implemented at boot: the daemon always starts unpaused (no `paused`
+file, no `PAUSED=1` handling — those belonged to the retired Python
+daemon). To hold the backlog for inspection after boot:
+
 ```bash
-touch /home/user/.config/asr-pipeline/paused
-# or
-echo "PAUSED=1" >> /home/user/.config/asr-pipeline/pipeline.env
 ASRSUB_IMAGE=asrsub:$(git rev-parse HEAD) docker compose up -d --no-build
-# or: docker compose --env-file .release.env up -d --no-build
-# then resume via:
+# then immediately pause via:
+curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/pause
+# ...inspect...
 curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/resume
-rm /home/user/.config/asr-pipeline/paused
 ```
 
 ## Notes
