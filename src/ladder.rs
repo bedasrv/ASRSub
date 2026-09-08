@@ -10,7 +10,6 @@
 
 use std::path::Path;
 
-use crate::asr;
 use crate::lang::{normalize_lang, sidecar_paths};
 use crate::pipeline::Pipeline;
 use crate::srt::{self, Cue};
@@ -29,13 +28,15 @@ pub(crate) struct LadderHit {
 /// Ladder lookup key: everything `ladder_source` needs beyond `&self`.
 /// A struct (not 7 positional args) so call sites stay readable.
 pub(crate) struct LadderQuery<'a> {
-    pub(crate) media_path: &'a str,
     pub(crate) stem: &'a str,
     pub(crate) target: &'a str,
     pub(crate) series_title: &'a str,
     pub(crate) season: Option<i64>,
     pub(crate) episode: i64,
     pub(crate) is_movie: bool,
+    /// Container duration from the episode's single ffprobe (span checks
+    /// skip when unknown — never probe here; one spawn per episode).
+    pub(crate) duration_s: Option<f64>,
 }
 
 impl Pipeline {
@@ -61,7 +62,7 @@ impl Pipeline {
                     continue;
                 };
                 let cues = srt::parse_srt(&text);
-                if !self.adequate(&cues, src, q.media_path).await {
+                if !self.adequate(&cues, src, q.duration_s).await {
                     continue;
                 }
                 // Strip a leading AI-marker cue so it is never translated.
@@ -101,7 +102,7 @@ impl Pipeline {
             && q.series_title != "?"
         {
             if let Some(hit) = self
-                .jimaku_candidate(q.series_title, q.season, q.episode, q.stem, q.media_path)
+                .jimaku_candidate(q.series_title, q.season, q.episode, q.stem, q.duration_s)
                 .await
             {
                 return Some(hit);
@@ -123,7 +124,7 @@ impl Pipeline {
         season: Option<i64>,
         episode: i64,
         stem: &str,
-        media_path: &str,
+        duration_s: Option<f64>,
     ) -> Option<LadderHit> {
         {
             let mut tried = self.jimaku_tried.lock().unwrap_or_else(|e| e.into_inner());
@@ -214,7 +215,7 @@ impl Pipeline {
         let text = tokio::fs::read_to_string(&srt_path).await.ok()?;
         let _ = tokio::fs::remove_file(&srt_path).await;
         let cues = srt::parse_srt(&text);
-        if !self.adequate(&cues, "ja", media_path).await {
+        if !self.adequate(&cues, "ja", duration_s).await {
             tracing::info!("ladder: jimaku direct: gate rejected ({tag})");
             return None;
         }
@@ -246,8 +247,9 @@ impl Pipeline {
     }
 
     /// Ladder adequacy gate: cue/char minimums, CJK fraction for Japanese,
-    /// span within tolerance of container duration when known.
-    async fn adequate(&self, cues: &[Cue], src_lang: &str, media_path: &str) -> bool {
+    /// span within tolerance of container duration when known. Duration
+    /// arrives from the caller's single probe — never ffprobe here.
+    async fn adequate(&self, cues: &[Cue], src_lang: &str, duration_s: Option<f64>) -> bool {
         if cues.len() < self.cfg.ladder_min_cues {
             return false;
         }
@@ -274,7 +276,7 @@ impl Pipeline {
             }
         }
         if let (Some(first), Some(last)) = (cues.first(), cues.last()) {
-            if let Some(dur) = asr::media_duration_s(media_path).await {
+            if let Some(dur) = duration_s {
                 if dur > 0.0 {
                     let span = (last.end_ms.saturating_sub(first.start_ms)) as f64 / 1000.0;
                     let tol = self.cfg.ladder_span_tol;

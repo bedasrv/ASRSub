@@ -292,12 +292,13 @@ async fn simulate_library_pass() {
     let stem_s = stem.to_string_lossy().to_string();
     std::fs::write(cfg_dir.join("glossary.json"), "{}").unwrap();
 
-    // Fake ffprobe: canned streams / duration regardless of input.
+    // Fake ffprobe: canned streams / duration regardless of input
+    // (combined query returns both sections, like the real tool).
     write_exe(
         &bin_dir.join("ffprobe"),
         r#"#!/bin/sh
 if printf '%s' "$*" | grep -q "stream=index"; then
-  printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio","tags":{"language":"jpn"}}]}'
+  printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio","tags":{"language":"jpn"}}],"format":{"duration":"300.0"}}'
 else
   printf '{"format":{"duration":"300.0"}}'
 fi

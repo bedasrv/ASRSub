@@ -29,6 +29,31 @@ struct RegistryCommit<'a> {
     media_path: &'a str,
 }
 
+/// Per-language source bundle from phase 1 (ladder hit or shared ASR
+/// cues): everything phase 2 needs to translate + commit one language
+/// without touching shared state.
+struct LangWork {
+    lang: String,
+    src_cues: Vec<Cue>,
+    src_lang: String,
+    needs_translate: bool,
+    reg_source: String,
+    reg_kind: Option<String>,
+}
+
+/// Episode-scoped context shared (by reference) across one episode's
+/// concurrent language tasks: candidate, paths, duration. Keeps per-lang
+/// fn signatures small; everything outlives the phase-2 join.
+#[derive(Clone, Copy)]
+struct EpisodeCtx<'a> {
+    cand: &'a Candidate,
+    kind: &'a str,
+    media_path: &'a str,
+    stem: &'a str,
+    series_title: &'a str,
+    duration_s: Option<f64>,
+}
+
 impl Pipeline {
     /// Process one episode/movie for all its missing languages.
     /// Returns the number of languages completed.
@@ -38,12 +63,17 @@ impl Pipeline {
     /// transcribes it directly with no translation step. ASR cues are shared
     /// across the episode's languages via a per-`asr_lang` cache, so `id`+`en`
     /// targets pay for one Japanese transcription.
-    pub(crate) async fn process_one(&self, cand: &Candidate) -> Result<usize> {
+    pub(crate) async fn process_one(
+        &self,
+        cand: &Candidate,
+        titles: &std::collections::HashMap<i64, String>,
+    ) -> Result<usize> {
         if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(0);
         }
         let kind = if cand.is_movie { "movie" } else { "series" };
         // Resolve media path (+ series identity for the ladder/Jimaku).
+        // `titles` is fetched once per pass by the caller, not per episode.
         let (media_path, series_title, season, ep_num) = if cand.is_movie {
             let path = cand.path.clone().context("movie without path")?;
             (self.cfg.map_path(&path), cand.series_title.clone(), None, 0)
@@ -54,7 +84,6 @@ impl Pipeline {
                 .as_ref()
                 .and_then(|f| f.path.clone())
                 .context("episode has no file")?;
-            let titles = self.sonarr.series_titles().await;
             let title = ep
                 .series_id
                 .and_then(|sid| titles.get(&sid).cloned())
@@ -74,15 +103,17 @@ impl Pipeline {
             .map(|(s, _)| s)
             .unwrap_or(&media_path)
             .to_string();
-        // Probed once for the episode: feeds the timeline span checks
-        // (coverage/gap need the runtime; None skips them, never fails).
-        let duration_s = asr::media_duration_s(&media_path).await;
-        let streams = asr::probe_audio(&media_path).await?;
-        let mapped: Vec<asr::AudioStream> = streams;
+        // Single ffprobe for the episode: streams + duration together.
+        let probe = asr::probe_media(&media_path).await?;
+        let duration_s = probe.duration_s;
+        let mapped: Vec<asr::AudioStream> = probe.streams;
 
+        // Phase 1 (sequential): source per language — ladder fast-path or
+        // remote ASR with a per-asr_lang cache, so id+en share one
+        // transcription. Sequential keeps cache races out by construction.
         let mut asr_cache: std::collections::HashMap<String, Vec<Cue>> =
             std::collections::HashMap::new();
-        let mut completed = 0;
+        let mut works = Vec::with_capacity(cand.missing.len());
         for lang in &cand.missing {
             if sidecar_exists(&stem, lang) {
                 tracing::info!(episode = cand.episode_id, lang = %lang, "skip: sidecar already exists");
@@ -92,13 +123,13 @@ impl Pipeline {
             // direct), falling back to remote ASR.
             let ladder = self
                 .ladder_source(LadderQuery {
-                    media_path: &media_path,
                     stem: &stem,
                     target: lang,
                     series_title: &series_title,
                     season,
                     episode: ep_num,
                     is_movie: cand.is_movie,
+                    duration_s,
                 })
                 .await;
             // (source cues, source lang, needs-translate, registry source, registry kind)
@@ -144,70 +175,43 @@ impl Pipeline {
                     (cues, src, need, "asr".to_string(), None)
                 }
             };
-            let translated: Vec<String> = if !needs_translate {
-                src_cues.iter().map(|c| c.text.clone()).collect()
-            } else {
-                let knowledge = if series_title.is_empty() || series_title == "?" {
-                    String::new()
-                } else {
-                    let texts: Vec<String> = src_cues.iter().map(|c| c.text.clone()).collect();
-                    self.glossary.knowledge_block_for_cues(
-                        &series_title,
-                        &texts,
-                        crate::glossary::MAX_REFS,
-                    )
-                };
-                crate::translate::translate_lines(
-                    &self.pool,
-                    crate::translate::TranslateJob {
-                        lines: src_cues.iter().map(|c| c.text.clone()).collect(),
-                        target_lang: lang,
-                        source_lang: crate::translate::display_source_lang(&src_lang),
-                        knowledge: &knowledge,
-                        chunk_size: self.cfg.translate_chunk,
-                        fanout: self.cfg.translate_concurrency,
-                        skip_guard: normalize_lang(&src_lang) == "en",
-                        placeholders: &self.cfg.sdh_placeholders,
-                    },
-                )
-                .await?
-            };
-            // Assemble cues: translated text keeps SOURCE timing.
-            let out_cues: Vec<Cue> = src_cues
-                .iter()
-                .zip(translated.iter())
-                .map(|(c, t)| Cue::new(c.start_ms, c.end_ms, t.clone()))
-                .collect();
-            let mut merged = srt::cps_merge(
-                out_cues,
-                self.cfg.cps_merge_max,
-                self.cfg.cps_merge_max_chars,
-                self.cfg.cps_merge_max_dur_ms,
-                self.cfg.cps_merge_max_gap_ms,
-            );
-            srt::ensure_contiguous(&mut merged);
-            let violations = srt::validate_timeline(&merged, self.cfg.max_cue_ms, duration_s);
-            if !violations.is_empty() {
-                tracing::warn!(episode = cand.episode_id, lang = %lang, n = violations.len(), "timeline violations after merge");
-            }
-            let srt_text =
-                srt::write_srt(&merged, self.cfg.ai_marker_cue, self.cfg.ai_marker_cue_ms);
-            self.install_and_upload(cand, &media_path, &stem, lang, srt_text.into_bytes())
-                .await?;
-            // Registry + state commit.
-            self.commit_registry(RegistryCommit {
-                stem: &stem,
-                lang,
-                source: &reg_source,
-                source_kind: reg_kind.as_deref(),
-                episode_id: Some(cand.episode_id),
+            works.push(LangWork {
+                lang: lang.clone(),
+                src_cues,
+                src_lang,
+                needs_translate,
+                reg_source,
+                reg_kind,
+            });
+        }
+        // Phase 2 (concurrent): translate + merge + upload + commit per
+        // language. The pool is shared across episodes already, so sharing
+        // across languages is equally sound; failures return Err like the
+        // old sequential `?` (partial per-lang commits persist either way).
+        let mut jobs = Vec::with_capacity(works.len());
+        for w in works {
+            // Reborrow per task: the async move owns `w` but only borrows
+            // the episode locals (all outlive the join below).
+            let ctx = EpisodeCtx {
+                cand,
                 kind,
                 media_path: &media_path,
-            })
-            .await;
-            self.append_state(cand.episode_id, Some(lang.as_str()), "done", "", kind)
-                .await;
-            completed += 1;
+                stem: &stem,
+                series_title: &series_title,
+                duration_s,
+            };
+            jobs.push(async move {
+                let translated: Vec<String> = if !w.needs_translate {
+                    w.src_cues.iter().map(|c| c.text.clone()).collect()
+                } else {
+                    self.translate_lang(ctx.series_title, &w).await?
+                };
+                self.finish_lang(ctx, w, translated).await
+            });
+        }
+        let mut completed = 0;
+        for r in futures::future::join_all(jobs).await {
+            completed += r?;
         }
         self.jellyfin
             .refresh_for(
@@ -217,6 +221,79 @@ impl Pipeline {
             )
             .await;
         Ok(completed)
+    }
+
+    /// Translate one language's source cues (knowledge block included).
+    async fn translate_lang(&self, series_title: &str, w: &LangWork) -> Result<Vec<String>> {
+        let knowledge = if series_title.is_empty() || series_title == "?" {
+            String::new()
+        } else {
+            let texts: Vec<String> = w.src_cues.iter().map(|c| c.text.clone()).collect();
+            self.glossary
+                .knowledge_block_for_cues(series_title, &texts, crate::glossary::MAX_REFS)
+        };
+        crate::translate::translate_lines(
+            &self.pool,
+            crate::translate::TranslateJob {
+                lines: w.src_cues.iter().map(|c| c.text.clone()).collect(),
+                target_lang: &w.lang,
+                source_lang: crate::translate::display_source_lang(&w.src_lang),
+                knowledge: &knowledge,
+                chunk_size: self.cfg.translate_chunk,
+                fanout: self.cfg.translate_concurrency,
+                skip_guard: normalize_lang(&w.src_lang) == "en",
+                placeholders: &self.cfg.sdh_placeholders,
+            },
+        )
+        .await
+    }
+
+    /// Merge, gate, install, upload, and commit one translated language.
+    /// Returns 1 on completion (the caller's completion count).
+    async fn finish_lang(
+        &self,
+        ctx: EpisodeCtx<'_>,
+        w: LangWork,
+        translated: Vec<String>,
+    ) -> Result<usize> {
+        let lang = &w.lang;
+        let cand = ctx.cand;
+        // Assemble cues: translated text keeps SOURCE timing.
+        let out_cues: Vec<Cue> = w
+            .src_cues
+            .iter()
+            .zip(translated.iter())
+            .map(|(c, t)| Cue::new(c.start_ms, c.end_ms, t.clone()))
+            .collect();
+        let mut merged = srt::cps_merge(
+            out_cues,
+            self.cfg.cps_merge_max,
+            self.cfg.cps_merge_max_chars,
+            self.cfg.cps_merge_max_dur_ms,
+            self.cfg.cps_merge_max_gap_ms,
+        );
+        srt::ensure_contiguous(&mut merged);
+        let violations = srt::validate_timeline(&merged, self.cfg.max_cue_ms, ctx.duration_s);
+        if !violations.is_empty() {
+            tracing::warn!(episode = cand.episode_id, lang = %lang, n = violations.len(), "timeline violations after merge");
+        }
+        let srt_text = srt::write_srt(&merged, self.cfg.ai_marker_cue, self.cfg.ai_marker_cue_ms);
+        self.install_and_upload(cand, ctx.media_path, ctx.stem, lang, srt_text.into_bytes())
+            .await?;
+        // Registry + state commit.
+        self.commit_registry(RegistryCommit {
+            stem: ctx.stem,
+            lang,
+            source: &w.reg_source,
+            source_kind: w.reg_kind.as_deref(),
+            episode_id: Some(cand.episode_id),
+            kind: ctx.kind,
+            media_path: ctx.media_path,
+        })
+        .await;
+        self.append_state(cand.episode_id, Some(lang.as_str()), "done", "", ctx.kind)
+            .await;
+        Ok(1)
     }
 
     async fn install_and_upload(

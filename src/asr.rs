@@ -32,13 +32,22 @@ pub struct AudioChoice {
 }
 
 /// ffprobe audio streams for a container.
-pub async fn probe_audio(path: &str) -> Result<Vec<AudioStream>> {
+/// One ffprobe spawn for everything the episode pass needs from the
+/// container: audio streams (source-track choice) + duration (timeline
+/// span checks, ladder adequacy). Previously two spawns plus one more per
+/// ladder adequacy check; ffprobe answers both sections in a single run.
+pub struct MediaProbe {
+    pub streams: Vec<AudioStream>,
+    pub duration_s: Option<f64>,
+}
+
+pub async fn probe_media(path: &str) -> Result<MediaProbe> {
     let out = tokio::process::Command::new("ffprobe")
         .args([
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_name,codec_type:stream_tags=language",
+            "stream=index,codec_name,codec_type:stream_tags=language:format=duration",
             "-of",
             "json",
             path,
@@ -69,7 +78,20 @@ pub async fn probe_audio(path: &str) -> Result<Vec<AudioStream>> {
                 .map(str::to_string),
         });
     }
-    Ok(streams)
+    let duration_s = v
+        .get("format")
+        .and_then(|f| f.get("duration"))
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.parse().ok());
+    Ok(MediaProbe {
+        streams,
+        duration_s,
+    })
+}
+/// Streams-only view for single-shot callers (transcribe CLI); the episode
+/// pass uses `probe_media` to also get the duration from the same spawn.
+pub async fn probe_audio(path: &str) -> Result<Vec<AudioStream>> {
+    Ok(probe_media(path).await?.streams)
 }
 
 /// Source-track choice, mirroring `choose_source` in orchestrator.py.

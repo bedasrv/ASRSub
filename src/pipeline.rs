@@ -137,13 +137,17 @@ impl Pipeline {
         if caps.is_empty() {
             return stats;
         }
+        // Series titles once per pass, not once per episode (same endpoint,
+        // same answer seconds apart).
+        let titles = self.sonarr.series_titles().await;
         let sem = Arc::new(Semaphore::new(self.cfg.episode_concurrency.max(1)));
         let mut jobs = Vec::with_capacity(caps.len());
         for cand in caps {
             let sem = sem.clone();
+            let titles = &titles;
             jobs.push(async move {
                 let _p = sem.acquire_owned().await.expect("semaphore closed");
-                (cand.episode_id, self.process_one(&cand).await)
+                (cand.episode_id, self.process_one(&cand, titles).await)
             });
         }
         for (eid, r) in futures::future::join_all(jobs).await {
@@ -193,8 +197,11 @@ impl Pipeline {
         let verified = verified_targets(&state::load_jsonl::<state::RegistryRow>(
             &self.cfg.registry_file,
         ));
+        // Wanted + movies are independent Bazarr calls: fire together,
+        // latency is the max, not the sum.
+        let (wanted, movies) = tokio::join!(self.bazarr.wanted(), self.bazarr.movies());
         // Series wanted.
-        match self.bazarr.wanted().await {
+        match wanted {
             Ok(items) => {
                 for it in items {
                     if excluded.contains(&it.episode_id) || skip_ids.contains(&it.episode_id) {
@@ -234,7 +241,7 @@ impl Pipeline {
             Err(e) => tracing::warn!(error = %e, "bazarr wanted fetch failed"),
         }
         // Movies (optional; never fails the pass).
-        if let Ok(movies) = self.bazarr.movies().await {
+        if let Ok(movies) = movies {
             for m in movies {
                 let Some(rid) = m.get("radarrId").and_then(|v| v.as_i64()) else {
                     continue;
