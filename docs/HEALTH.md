@@ -11,12 +11,15 @@ authoritative contract for deployment and monitoring.
   {"ok": true}` if the process is running. Does not check external
   dependencies. Use for container liveness probes. (Also at `/api2/health`.)
 - `GET /status` — Daemon state (unauthenticated): `paused`, `uptime_s`,
-  `last_pass{at,scanned,done,failed}`, `current`, `started_at`. This is the
+  `last_pass{at,scanned,done,failed}`, `current`, `started_at`,
+  `run_once_requested`, `media_ok` (NAS media root present — a dead mount
+  no longer looks like "idle"). This is the
   readiness signal today: healthy = 200 + a recent `last_pass.at` (see below).
 - `GET /config` — Merged config with secrets masked.
-- `POST /pause /resume /run-once /wake` — Control (require
-  `X-API-Key: <control key>` from `/run/secrets/control_api_key`;
-  env `CONTROL_API_KEY` is test fallback only). No `X-Control-Key` alias.
+- `POST /pause /resume /run-once /wake /webhook` — Control (require
+  `X-API-Key` (or the `X-Control-Key` alias that media-server notification
+  plugins send): `<control key>` from `/run/secrets/control_api_key`;
+  env `CONTROL_API_KEY` is test fallback only).
 - `/api2/*` — Telemetry + episode actions (same auth rule for POSTs).
 
 There is **no `/ready` endpoint yet** (planned). `deploy.sh`'s `/ready`

@@ -71,7 +71,7 @@ def fail(msg):
 
 def main(argv):
     if not argv:
-        fail("usage: pctl <status|config|wake|pause|resume|run-once|status2|activity|wanted|episode-retry ID|episode-skip ID|config set K=V...|config unset K...>")
+        fail("usage: pctl <status|config|wake|pause|resume|run-once|status2|activity|wanted|episode-retry ID|episode-skip ID|episode-delete ID|episode-exclude ID|episode-unexclude ID|config set K=V...|config unset K...>")
     cmd = argv[0]
     if cmd == "status":
         code, body = request("GET", "/status")
@@ -121,7 +121,7 @@ def main(argv):
         code, body = request("GET", path, host=get_api2_host())
         print(json.dumps(body, indent=2))
         sys.exit(0 if code == 200 else 1)
-    if cmd in ("episode-retry", "episode-skip"):
+    if cmd in ("episode-retry", "episode-skip", "episode-delete", "episode-exclude", "episode-unexclude"):
         if len(argv) < 2:
             fail(f"usage: pctl {cmd} <sonarrEpisodeId|m:<radarrId>|e:<episodeId>>")
         ep = argv[1]
@@ -132,7 +132,7 @@ def main(argv):
         token = read_token()
         if not token:
             fail("PIPE_TOKEN env or CONTROL_API_KEY in pipeline.env required")
-        action = "retry" if cmd == "episode-retry" else "skip"
+        action = cmd.split("-", 1)[1]
         code, body = request("POST", f"/api2/episode/{ep}/{action}", token=token, host=get_api2_host())
         print(json.dumps(body, indent=2))
         sys.exit(0 if code == 200 else 1)
