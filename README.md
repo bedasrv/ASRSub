@@ -15,8 +15,9 @@ src/            Rust binary (daemon + CLI)
 tests/          Rust integration tests (binary boundary) + release-contract
                 tests (stdlib unittest, no pytest needed)
 assets/         dashboard.html, served by the daemon at /
-asrsub_providers.json
+asrsub_providers.json(.example)
                 Remote endpoints for Whisper STT + LLM translation
+                (live file untracked — copy the .example and fill keys)
 Dockerfile / docker-compose.yml / build.sh / deploy.sh / pctl
 docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 (port checklist; the retired Python implementation was
@@ -58,9 +59,12 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | `PROVIDERS_FILE` | Path to `asrsub_providers.json` |
 | `CONTROL_API_KEY_FILE` | Control-token secret (`/run/secrets/control_api_key` in compose) |
 
-Remote endpoints, models, and embedded keys live in `asrsub_providers.json`
+Remote endpoints, models, and keys live in `asrsub_providers.json`
 (LLM list sorted fastest-first with per-endpoint limits + breakers).
-Keep it `chmod 600`; it ships inside the Docker image (see `docs/DEPLOY.md`).
+That file is UNTRACKED (live keys — purged from git history 2026-09-08):
+copy `asrsub_providers.json.example`, fill `api_key` (or export the
+`key_env` vars — empty `api_key` falls back to env), `chmod 600`, never
+commit it. It ships inside the Docker image (see `docs/DEPLOY.md`).
 
 Failover: every LLM chunk races all configured models fastest-first (404
 or error → next model, 3 straight failures → 60 s breaker); Whisper tries

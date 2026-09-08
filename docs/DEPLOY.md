@@ -11,6 +11,10 @@ and LLM inference is remote via `asrsub_providers.json`, which is baked
 into the image at `/app/asrsub_providers.json`:
 keep the repo copy `chmod 600` and be aware the keys ship inside every
 built image (rotate on leak; env-only secrets are a future change).
+The file is untracked — create it from the committed template before
+building (`cp asrsub_providers.json.example asrsub_providers.json` and
+fill keys, or export the `key_env` vars), and never commit the real one
+(live keys were purged from git history 2026-09-08).
 The dashboard UI (`assets/dashboard.html`) is served by the daemon itself.
 
 ## Prerequisites

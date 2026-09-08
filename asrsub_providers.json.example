@@ -1,0 +1,288 @@
+{
+  "generated_note": "TEMPLATE: copy to asrsub_providers.json, set api_key values (or export the key_env vars; empty api_key falls back to $key_env), chmod 600. NEVER commit the real file.",
+  "llm_translation_models": [
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "poolside/laguna-s-2.1:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 1.8,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "minimax/minimax-m3:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 2.7,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "google/gemma-4-31b-it:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 2.9,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "zen",
+      "endpoint": "https://opencode.ai/zen/v1/chat/completions",
+      "base_url": "https://opencode.ai/zen/v1",
+      "model": "laguna-s-2.1-free",
+      "key_env": "OPENCODE_ZEN_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 4.2,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "minimax/minimax-m2.7:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 4.9,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "cohere/north-mini-code:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 5.6,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "dots-studio/dots-3-note-preview:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 10.1,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 16.1,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "commandcode",
+      "endpoint": "https://api.commandcode.ai/provider/v1/chat/completions",
+      "base_url": "https://api.commandcode.ai/provider/v1",
+      "model": "meituan/LongCat-2.0:free",
+      "key_env": "COMMANDCODE_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 16.8,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "nous",
+      "endpoint": "https://inference-api.nousresearch.com/v1/chat/completions",
+      "base_url": "https://inference-api.nousresearch.com/v1",
+      "model": "meituan/longcat-2.0:free",
+      "key_env": "NOUS_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 25.0,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "zen",
+      "endpoint": "https://opencode.ai/zen/v1/chat/completions",
+      "base_url": "https://opencode.ai/zen/v1",
+      "model": "mimo-v2.5-free",
+      "key_env": "OPENCODE_ZEN_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 30.4,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "base_url": "https://openrouter.ai/api/v1",
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
+      "key_env": "OPENROUTER_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 54.7,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    },
+    {
+      "provider": "zen",
+      "endpoint": "https://opencode.ai/zen/v1/chat/completions",
+      "base_url": "https://opencode.ai/zen/v1",
+      "model": "nemotron-3-ultra-free",
+      "key_env": "OPENCODE_ZEN_API_KEY",
+      "api_key": "",
+      "probe_latency_s": 97.0,
+      "thinking_param_accepted": true,
+      "request_shape": {
+        "temperature": 0.3,
+        "thinking": {
+          "type": "enabled",
+          "effort": "max"
+        },
+        "headers": [
+          "Authorization: Bearer <api_key>",
+          "Content-Type: application/json"
+        ]
+      }
+    }
+  ],
+  "whisper_stt": {
+    "provider": "openrouter",
+    "endpoint": "https://openrouter.ai/api/v1/audio/transcriptions",
+    "model": "openai/whisper-large-v3-turbo",
+    "key_env": "OPENROUTER_API_KEY",
+    "api_key": "",
+    "rate_usd_per_audio_sec": 3.33e-06,
+    "via_upstream": "DeepInfra",
+    "request_shape": "multipart/form-data: model, file, response_format=verbose_json"
+  }
+}

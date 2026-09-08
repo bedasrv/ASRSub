@@ -60,7 +60,10 @@ fn cli_run_once_degrades_without_services() {
 
 #[test]
 fn providers_file_shape() {
-    let text = std::fs::read_to_string("asrsub_providers.json").expect("providers file");
+    // Shape contract pins the committed EXAMPLE (the live file is
+    // untracked since 2026-09-08 and may not exist on fresh clones).
+    let text =
+        std::fs::read_to_string("asrsub_providers.json.example").expect("providers example");
     let v: serde_json::Value = serde_json::from_str(&text).expect("valid json");
     assert!(v
         .get("llm_translation_models")
