@@ -243,4 +243,35 @@ mod tests {
         let m = g.matched_entries("s", &["nothing here".to_string()], 15);
         assert_eq!(m.len(), 4);
     }
+
+    #[test]
+    fn knowledge_block_renders_matched_cast() {
+        // Legacy parity (knowledge block rendering): matched cast renders
+        // as ja => en lines with aliases/kinds; unknown series → empty
+        // block (no prompt bloat).
+        let g = Glossary::from_map(
+            [(
+                "Show".to_string(),
+                json!({"entries": [
+                    {"ja": "オカルン", "en": "Okarun", "aliases": ["okk-arun"], "kind": "character"},
+                    {"ja": "東京", "en": "Tokyo", "kind": "place"},
+                    {"ja": "呪い", "en": "curse", "kind": "term"},
+                    {"ja": "モモ", "en": "Momo"},
+                ]}),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let cues = vec![
+            "オカルンと東京へ行く".to_string(),
+            "呪いだ".to_string(),
+            "モモ！".to_string(),
+        ];
+        let block = g.knowledge_block_for_cues("show", &cues, 15);
+        assert!(block.starts_with("KNOWLEDGE"), "{block}");
+        assert!(block.contains("オカルン => Okarun"), "{block}");
+        assert!(block.contains("aliases: okk-arun"), "{block}");
+        assert!(block.contains("東京 => Tokyo (place)"), "{block}");
+        assert!(g.knowledge_block_for_cues("other", &cues, 15).is_empty());
+    }
 }

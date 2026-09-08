@@ -183,6 +183,16 @@ impl Pipeline {
                 })
                 .collect();
         let mut out = Vec::new();
+        // Done state only suppresses a language while the sidecar the
+        // registry points at is still on disk. A `done` row whose file is
+        // gone (user deleted it, NAS hiccup) must resurface as missing —
+        // otherwise the subtitle is lost forever with no signal (legacy
+        // parity: wanted/library never expose stale done). No registry row
+        // at all also resurfaces: registry and state are committed in the
+        // same flow, so a missing row means no verified completion.
+        let verified = verified_targets(&state::load_jsonl::<state::RegistryRow>(
+            &self.cfg.registry_file,
+        ));
         // Series wanted.
         match self.bazarr.wanted().await {
             Ok(items) => {
@@ -196,6 +206,11 @@ impl Pipeline {
                         .filter(|l| self.cfg.target_langs.contains(l))
                         .filter(|l| {
                             !done.contains(&("series".to_string(), it.episode_id, (*l).clone()))
+                                || !verified.contains(&(
+                                    "series".to_string(),
+                                    it.episode_id,
+                                    (*l).clone(),
+                                ))
                         })
                         .cloned()
                         .collect();
@@ -241,7 +256,9 @@ impl Pipeline {
                 let stem = media.rsplit_once('.').map(|(s, _)| s).unwrap_or(&media);
                 let mut missing = Vec::new();
                 for l in &self.cfg.target_langs {
-                    if done.contains(&("movie".to_string(), rid, l.clone())) {
+                    if done.contains(&("movie".to_string(), rid, l.clone()))
+                        && verified.contains(&("movie".to_string(), rid, l.clone()))
+                    {
                         continue;
                     }
                     if sidecar_exists(stem, l) {
@@ -267,5 +284,79 @@ impl Pipeline {
         }
         out.sort_by_key(|c| c.episode_id);
         out
+    }
+}
+
+/// Registry rows whose recorded target sidecar is still on disk, keyed
+/// `(kind, episode_id, lang)`. Pure over the row list (the `is_file` probe
+/// is the only I/O) for testability. `kind` defaults to `series` — series
+/// rows omit it, movies carry `"kind": "movie"` in `extra`.
+fn verified_targets(
+    rows: &[state::RegistryRow],
+) -> std::collections::HashSet<(String, i64, String)> {
+    rows.iter()
+        .filter_map(|r| {
+            let target = r.target_path.as_deref()?;
+            if !Path::new(target).is_file() {
+                return None;
+            }
+            Some((
+                r.extra
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("series")
+                    .to_string(),
+                r.episode_id?,
+                crate::lang::normalize_lang(r.lang.as_deref().unwrap_or("")),
+            ))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_targets_needs_row_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("ep.id.hi.srt");
+        std::fs::write(&live, "x").unwrap();
+        let row = |kind: Option<&str>, id: i64, lang: &str, target: &str| state::RegistryRow {
+            stem: None,
+            lang: Some(lang.to_string()),
+            episode_id: Some(id),
+            source: None,
+            source_kind: None,
+            source_path: None,
+            target_path: Some(target.to_string()),
+            ts: None,
+            extra: kind
+                .map(|k| {
+                    [("kind".to_string(), serde_json::Value::String(k.to_string()))]
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let rows = vec![
+            // Verified: row + file on disk (alias normalized to canonical).
+            row(None, 7, "ind", live.to_str().unwrap()),
+            // Stale: row exists but the file is gone.
+            row(
+                None,
+                7,
+                "en",
+                dir.path().join("gone.en.hi.srt").to_str().unwrap(),
+            ),
+            // Movie row without kind defaults to series, not movie.
+            row(None, 100, "id", live.to_str().unwrap()),
+            row(Some("movie"), 100, "id", live.to_str().unwrap()),
+        ];
+        let v = verified_targets(&rows);
+        assert!(v.contains(&("series".to_string(), 7, "id".to_string())));
+        assert!(!v.contains(&("series".to_string(), 7, "en".to_string())));
+        assert!(v.contains(&("series".to_string(), 100, "id".to_string())));
+        assert!(v.contains(&("movie".to_string(), 100, "id".to_string())));
     }
 }

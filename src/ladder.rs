@@ -292,13 +292,13 @@ impl Pipeline {
 /// hunt ramped 30min→24h with per-pass budgets, tombstones, and a state
 /// file; this port keeps the one property that matters (misses are
 /// retried, because late uploads must still land) and drops the rest:
-/// - budgets: unnecessary — the shared client paces all calls 500ms apart
-///   against a 25 req/min limit, so probes cannot burst by construction;
-/// - 429 aborts: a limited stem simply misses into the next cooldown;
-/// - tombstones: no upgrade pass means no Sonarr-404 orphans; a hopeless
-///   stem costs ~2 calls/day, cheaper than tombstone bookkeeping;
-/// - backoff ramp: a flat daily probe lands a new upload within ~24h of
-///   appearance, same as the capped end of the old ramp.
+///   - budgets: unnecessary — the shared client paces all calls 500ms apart
+///     against a 25 req/min limit, so probes cannot burst by construction;
+///   - 429 aborts: a limited stem simply misses into the next cooldown;
+///   - tombstones: no upgrade pass means no Sonarr-404 orphans; a hopeless
+///     stem costs ~2 calls/day, cheaper than tombstone bookkeeping;
+///   - backoff ramp: a flat daily probe lands a new upload within ~24h of
+///     appearance, same as the capped end of the old ramp.
 const JIMAKU_RETRY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 /// True when no attempt is recorded, or the last one is older than the

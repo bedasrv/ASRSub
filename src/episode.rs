@@ -74,6 +74,9 @@ impl Pipeline {
             .map(|(s, _)| s)
             .unwrap_or(&media_path)
             .to_string();
+        // Probed once for the episode: feeds the timeline span checks
+        // (coverage/gap need the runtime; None skips them, never fails).
+        let duration_s = asr::media_duration_s(&media_path).await;
         let streams = asr::probe_audio(&media_path).await?;
         let mapped: Vec<asr::AudioStream> = streams;
 
@@ -159,11 +162,7 @@ impl Pipeline {
                     crate::translate::TranslateJob {
                         lines: src_cues.iter().map(|c| c.text.clone()).collect(),
                         target_lang: lang,
-                        source_lang: if normalize_lang(&src_lang) == "en" {
-                            "English"
-                        } else {
-                            "Japanese"
-                        },
+                        source_lang: crate::translate::display_source_lang(&src_lang),
                         knowledge: &knowledge,
                         chunk_size: self.cfg.translate_chunk,
                         fanout: self.cfg.translate_concurrency,
@@ -187,7 +186,7 @@ impl Pipeline {
                 self.cfg.cps_merge_max_gap_ms,
             );
             srt::ensure_contiguous(&mut merged);
-            let violations = srt::validate_timeline(&merged, self.cfg.max_cue_ms);
+            let violations = srt::validate_timeline(&merged, self.cfg.max_cue_ms, duration_s);
             if !violations.is_empty() {
                 tracing::warn!(episode = cand.episode_id, lang = %lang, n = violations.len(), "timeline violations after merge");
             }
@@ -381,4 +380,21 @@ pub(crate) fn sidecar_exists(stem: &str, lang: &str) -> bool {
     crate::lang::replaceable_target_sidecar_paths(stem, lang)
         .iter()
         .any(|p| std::path::PathBuf::from(p).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_exists_covers_alias_variants() {
+        // Adoption ladder (row 5): a legacy `jpn` sidecar satisfies a `ja`
+        // target without reprocessing — and vice versa.
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("ep").to_string_lossy().to_string();
+        assert!(!sidecar_exists(&stem, "ja"));
+        std::fs::write(format!("{stem}.jpn.srt"), "x").unwrap();
+        assert!(sidecar_exists(&stem, "ja"));
+        assert!(sidecar_exists(&stem, "jpn"));
+    }
 }

@@ -49,6 +49,18 @@ struct ChatMsgIn {
     content: Option<String>,
 }
 
+/// Display name for a normalized source code, for prompts and payloads.
+/// The ladder/ASR only ever produce `ja`/`en` sources, so this mapping is
+/// exact for the reachable domain (anything non-English is Japanese);
+/// `attempt_chunk` additionally accepts a raw `"ja"`.
+pub(crate) fn display_source_lang(src_lang: &str) -> &'static str {
+    if crate::lang::normalize_lang(src_lang) == "en" {
+        "English"
+    } else {
+        "Japanese"
+    }
+}
+
 fn system_prompt(target: &str, source: &str, knowledge: &str) -> String {
     let mut s = format!(
         "You are a professional anime subtitle translator. Translate the provided {source} \
@@ -509,5 +521,49 @@ mod tests {
         let (out, pending) = stitch_chunks(3, &results);
         assert_eq!(out, vec!["A", "B", "C"]);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn prompt_carries_actual_source_and_target() {
+        // Legacy parity (test_translation_source_language.py): the prompt
+        // must name the real source language, not a hardcoded one — the
+        // ladder passes English through for `en` sources.
+        let p = system_prompt("Indonesian", display_source_lang("en"), "");
+        assert!(p.contains("English"), "{p}");
+        assert!(p.contains("Indonesian"), "{p}");
+        assert_eq!(display_source_lang("ja"), "Japanese");
+        assert_eq!(display_source_lang("jpn"), "Japanese");
+        assert_eq!(display_source_lang("en"), "English");
+    }
+
+    #[tokio::test]
+    async fn persistent_failure_emits_empty_lines() {
+        // Legacy parity (dry_tests per_line_fallback): with no usable
+        // provider, every line — chunk and per-line fallback — resolves to
+        // empty text, and output length still equals input length.
+        let pool = ProviderPool::new(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+        );
+        let out = translate_lines(
+            &pool,
+            TranslateJob {
+                lines: vec!["first line".to_string(), "second line".to_string()],
+                target_lang: "id",
+                source_lang: "English",
+                knowledge: "",
+                chunk_size: 10,
+                fanout: 2,
+                skip_guard: false,
+                placeholders: &[],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, vec!["", ""]);
     }
 }

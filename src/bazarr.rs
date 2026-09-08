@@ -176,8 +176,11 @@ impl Bazarr {
     }
 
     /// Returns the HTTP status on success-path; retries 3x with backoff.
-    /// A `204` means Bazarr queued the job; the caller then verifies the
-    /// on-disk sidecar (Bazarr's async job can crash and never land it).
+    /// A `204` means Bazarr accepted the bytes we just wrote to the
+    /// canonical sidecar — no post-upload read-back: the sidecar on disk
+    /// is authoritative (written before the upload), and staleness is
+    /// caught at the next `discover` via registry-target verification,
+    /// not here.
     /// Single upload attempt (no retry loop): the caller
     /// (`pipeline::install_and_upload`) retries with backoff OUTSIDE the
     /// upload semaphore, so a dead Bazarr never wedges the pool under a
@@ -311,5 +314,22 @@ impl Bazarr {
                 Err(e) => tracing::warn!(task = job, error = %e, "bazarr wanted refill failed"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_aliases_normalize_before_ordering() {
+        // Legacy parity: Bazarr `code2` aliases (jpn/jp/ind/enm/eng) must
+        // collapse to canonical codes here, so discover ordering and the
+        // done-set comparison never see raw aliases.
+        let v = serde_json::json!({"missing_subtitles": [
+            {"code2": "jpn"}, {"code2": "enm"}, {"code2": "id"}, {"code2": "eng"},
+        ]});
+        assert_eq!(Bazarr::missing_of(&v), vec!["ja", "en", "id", "en"]);
+        assert!(Bazarr::missing_of(&serde_json::json!({})).is_empty());
     }
 }

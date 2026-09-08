@@ -132,7 +132,17 @@ async fn h_status(State(s): State<Arc<AppState>>) -> Json<Value> {
         "last_pass": {"at": last.at, "scanned": last.scanned, "done": last.done, "failed": last.failed},
         "current": current,
         "started_at": s.started_at,
+        // Readiness remainder (row 15): the one automatable legacy check —
+        // media root present — as an additive boolean. A vanished NAS no
+        // longer looks identical to "idle" (done=0 naps); full btrfs/ledger
+        // gates belonged to the retired Python boot, not this daemon.
+        "media_ok": media_present(),
     }))
+}
+
+/// The NAS media root `map_path` points `/data/` at still exists.
+fn media_present() -> bool {
+    std::path::Path::new(crate::config::NAS_MEDIA_PREFIX).is_dir()
 }
 
 async fn h_api2_status(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -615,5 +625,26 @@ mod tests {
             &hdr(axum::http::HeaderName::from_static("x-api-key"), "wrong")
         ));
         assert!(!check_token(&cfg, &HeaderMap::new()));
+    }
+
+    #[tokio::test]
+    async fn status_exposes_media_readiness() {
+        // Row 15 wiring: /status carries the media-root signal so a dead
+        // NAS mount is distinguishable from an idle daemon.
+        let cfg = crate::config::Config::load().expect("config loads");
+        let http = reqwest::Client::new();
+        let pool = crate::providers::ProviderPool::new(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            http.clone(),
+        );
+        let pipe = std::sync::Arc::new(crate::pipeline::Pipeline::new(cfg.clone(), pool, http));
+        let st = AppState::new(cfg, pipe);
+        let body = h_status(State(st)).await.0;
+        assert_eq!(body.get("paused"), Some(&serde_json::Value::Bool(false)));
+        assert!(body.get("media_ok").and_then(|v| v.as_bool()).is_some());
     }
 }

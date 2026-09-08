@@ -477,4 +477,17 @@ mod tests {
         assert!(!raw.0.contains_key("ASRSUB_TEST_BOGUS_XYZ"));
         assert_eq!(raw.0.get("TARGET_LANGS").map(String::as_str), Some("id"));
     }
+
+    #[test]
+    fn map_path_rewrites_container_prefix_only() {
+        // Row 11 remainder: no sweep root chain exists (no sweep feature —
+        // webhook paths are sender-provided), but the /data/ → NAS mapping
+        // that every movie/series path flows through is pinned here.
+        let cfg = Config::load().expect("config loads");
+        assert_eq!(
+            cfg.map_path("/data/Shows/Ep.mkv"),
+            format!("{NAS_MEDIA_PREFIX}/Shows/Ep.mkv")
+        );
+        assert_eq!(cfg.map_path("/mnt/x/Ep.mkv"), "/mnt/x/Ep.mkv");
+    }
 }

@@ -9,7 +9,7 @@ from pathlib import Path
 import unittest
 
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 BUILD = REPO / "build.sh"
 DEPLOY = REPO / "deploy.sh"
 

@@ -11,11 +11,11 @@ import re
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 COMPOSE = REPO / "docker-compose.yml"
 BUILD = REPO / "build.sh"
 DEPLOY = REPO / "deploy.sh"
-DEPLOY_MD = REPO / "DEPLOY.md"
+DEPLOY_MD = REPO / "docs" / "DEPLOY.md"
 
 
 class TestComposeImmutableRelease(unittest.TestCase):
@@ -60,7 +60,6 @@ class TestComposeImmutableRelease(unittest.TestCase):
         required_mounts = [
             "/home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline",
             "/home/user/.cache/asr-pipeline:/home/user/.cache/asr-pipeline",
-            "/home/user/.cache/huggingface:/home/user/.cache/huggingface",
             "/mnt/nas/share/media:/mnt/nas/share/media",
         ]
         for m in required_mounts:
@@ -71,11 +70,17 @@ class TestComposeImmutableRelease(unittest.TestCase):
         # restart policy preserved
         self.assertIn("restart: unless-stopped", self.compose)
         self.assertIn("network_mode: host", self.compose)
-        self.assertIn("runtime: nvidia", self.compose)
+        # Rust rewrite is remote-only inference: no local weights, so no
+        # huggingface cache mount and no nvidia runtime (regression guard:
+        # re-adding either means dragging local inference back in).
+        self.assertNotIn("huggingface", self.compose)
+        self.assertNotIn("runtime: nvidia", self.compose)
 
     def test_compose_preserves_service_commands(self):
-        self.assertIn("orchestrator.py", self.compose)
-        self.assertIn("dashboard.py", self.compose)
+        # Rust binary entrypoint (was: orchestrator.py / dashboard.py).
+        self.assertIn("command: [daemon]", self.compose)
+        self.assertNotIn("orchestrator.py", self.compose)
+        self.assertNotIn("dashboard.py", self.compose)
 
 
 class TestBuildReleaseMetadata(unittest.TestCase):

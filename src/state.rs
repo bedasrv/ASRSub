@@ -308,6 +308,26 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_appends_serialize_without_loss() {
+        // fd-lock evidence (row 4): 8 threads × 25 rows; every row present
+        // and parseable afterwards — no torn writes, no lost updates.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("c.jsonl");
+        std::thread::scope(|s| {
+            let pref = &p;
+            for t in 0..8 {
+                s.spawn(move || {
+                    for i in 0..25 {
+                        append_jsonl(pref, &serde_json::json!({"t": t, "i": i})).unwrap();
+                    }
+                });
+            }
+        });
+        let v: Vec<serde_json::Value> = load_jsonl(&p);
+        assert_eq!(v.len(), 200);
+    }
+
+    #[test]
     fn consume_drains_and_truncates_atomically() {
         // Tail-preserving drain: records present at read time are returned
         // exactly once; garbage lines are skipped; later appends survive.
