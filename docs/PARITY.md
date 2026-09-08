@@ -27,7 +27,7 @@
 | # | Area | Legacy source (cases) | Rust coverage | Status | Notes |
 |---|---|---|---|---|---|
 | 1 | Release contract (compose/build/deploy/rollback docs) | `test_immutable_release_contract` (18), `test_release_descriptor_execution` (3) | Scripts unchanged and still used; Rust side has 4 CLI boundary tests only, no compose/build assertions | PARTIAL | Behavior preserved, enforcement missing. Low risk. Port the text-shape assertions or waive. |
-| 2 | Jimaku client (ranking, 429, cache, AniList) | `test_jimaku_api` (32) | `src/jimaku.rs` has **zero** tests; sim never touches Jimaku | GAP | Untested port of the most intricate ranking logic. Highest-value port target. |
+| 2 | Jimaku client (ranking, 429, cache, AniList) | `test_jimaku_api` (32) | 13 tests in `src/jimaku.rs`: shapes, pick_entry, full rank corpus, cache-key pin, stub-server auth/params/429/snippet/download/anilist-hit-miss-failure | COVERED | Resolved 2026-09-08. Fixed en route: unexpected shape now errors (was silent empty), HTTP errors carry status+snippet, 429 carries reset_after, download uses legacy `.part` naming + cleans up on failure, cache merge writes `fetched_at`. Recorded folds: typed `JimakuRateLimited` → anyhow message (no caller branches); strict `S##E##` tag kept over loose regex (pre-existing, reasoned); `download()` returns `()` (callers use the known dest); `JIMAKU_API_KEY` env fallback lives in config layer. |
 | 3 | Jimaku hunt scheduling (budget, backoff, tombstone, state-file) | `test_jimaku_hunt` (43) | Simplified by design: direct-hit + per-daemon-lifetime `jimaku_tried` dedup (`src/pipeline.rs:76`); no budget/backoff/tombstone | DIVERGED | Misses are never retried on later passes. Confirm this simplification is accepted; if so, waive with rationale. |
 | 4 | Registry core (upsert/delete/reconcile/locking) | reconciliation ×3 files (7), `test_registry_lock_and_tmp_ladder` (3), `test_registry_write_serialization` (1) | `src/state.rs` (4): roundtrip, consume, delete scoping, kind | PARTIAL | Hash-trust cases (~10) are obsolete by design (hashes removed in `2d4afd6`). fd-lock serialization untested. |
 | 5 | Language aliases/compat (jpn/jp/ind, canonical rows) | adversarial 1–7 + compat + alias_gaps (~30) | `src/lang.rs` (3), delete scoping, `m:/e:` routing | PARTIAL | Core normalization covered; stale-row/legacy-alias adoption ladders untested. |
@@ -50,7 +50,7 @@
 ## Port queue (highest value first)
 
 1. Row 7 — verify webhook auth/dedup threat model; port or fix. ✅ done 2026-09-08
-2. Row 2 — port `test_jimaku_api` ranking/error/cache cases to `src/jimaku.rs`.
+2. Row 2 — port `test_jimaku_api` ranking/error/cache cases to `src/jimaku.rs`. ✅ done 2026-09-08
 3. Row 3 — decision: accept hunt simplification (waive with rationale) or re-add backoff.
 4. Row 18 — movie phase in `src/sim.rs`.
 5. Rows 9, 12, 10 — small pure-function ports (timeline gate, API semantics, source-lang).
