@@ -1,0 +1,42 @@
+name: asrsub
+
+services:
+  orchestrator:
+    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see DEPLOY.md / .release.env)}
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TZ=Asia/Jakarta
+      - ASR_BACKEND=whisper
+      - EMO_ENABLED=1
+      - CONTROL_API_KEY_FILE=/run/secrets/control_api_key
+    secrets:
+      - control_api_key
+    network_mode: host
+    volumes:
+      - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline
+      - /home/user/.cache/asr-pipeline:/home/user/.cache/asr-pipeline
+      - /home/user/.cache/huggingface:/home/user/.cache/huggingface
+      - /mnt/nas/share/media:/mnt/nas/share/media
+    restart: unless-stopped
+    command: [python, orchestrator.py]
+
+  dashboard:
+    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see DEPLOY.md / .release.env)}
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TZ=Asia/Jakarta
+      - CONTROL_API_KEY_FILE=/run/secrets/control_api_key
+    secrets:
+      - control_api_key
+    volumes:
+      - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline:ro
+      - /mnt/nas/share/media:/mnt/nas/share/media:ro
+    restart: unless-stopped
+    command: [python, dashboard.py]
+
+secrets:
+  control_api_key:
+    file: ${CONTROL_API_KEY_FILE_HOST:-/home/user/.config/asr-pipeline/secrets/control_api_key}

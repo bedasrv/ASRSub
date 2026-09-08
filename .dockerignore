@@ -1,0 +1,17 @@
+.git
+__pycache__
+*.pyc
+venv/
+.venv/
+*.srt
+*.wav
+*.ass
+state*.jsonl
+*.lock
+tmp/
+outputs/
+episodes/
+ground_truth/
+docker-compose.yml
+build.sh
+PLAN.md

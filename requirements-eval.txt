@@ -1,0 +1,23 @@
+# Eval-harness dependencies -- install into ~/benchmark/venvs/eval:
+#   python3 -m venv ~/benchmark/venvs/eval
+#   ~/benchmark/venvs/eval/bin/pip install -r requirements-eval.txt
+# Core harness
+datasets
+jiwer
+sacrebleu
+sentencepiece
+soundfile
+pyarrow
+requests
+numpy
+scipy
+# NLLB-200 baseline (ctranslate2) -- needs transformers for its tokenizer
+ctranslate2
+transformers
+# COMET -- torch is large; install only if you want COMET scoring:
+#   pip install --no-deps torch==2.13.0+cu130 --index-url https://download.pytorch.org/whl/cu130
+#   pip install unbabel-comet
+#   pip install "setuptools<81"   (py3.14 pkg_resources shim)
+# NOTE: eval_asr.py runs from the existing faster-whisper venv
+# (~/benchmark/venvs/fw, faster-whisper 1.2.1); that venv also needs `jiwer`
+# for metric computation.
