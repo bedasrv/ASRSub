@@ -10,6 +10,8 @@
 //! * LLM endpoints are sorted fastest-first (`probe_latency_s`) and raced
 //!   through a shared [`ProviderPool`] with per-endpoint semaphores so no
 //!   single free-tier key is hammered.
+//! * Whisper tries `whisper_stt` first, then `whisper_stt_fallbacks` in
+//!   order, with the same per-endpoint semaphores.
 //! * Consecutive failures trip a short circuit-breaker (60 s) instead of
 //!   burning the pass on a dead endpoint.
 
@@ -77,6 +79,12 @@ pub struct ProvidersFile {
     pub llm_translation_models: Vec<LlmProvider>,
     #[serde(default)]
     pub whisper_stt: Option<WhisperProvider>,
+    /// Optional Whisper failover endpoints, same shape as `whisper_stt`,
+    /// attempted in order after the primary (primary first, then these).
+    /// Absent in older files: fully backward compatible (fails over to
+    /// nothing, exactly like before).
+    #[serde(default)]
+    pub whisper_stt_fallbacks: Vec<WhisperProvider>,
 }
 
 impl ProvidersFile {
@@ -198,8 +206,8 @@ pub struct ProviderPool {
 struct PoolInner {
     providers: Vec<LlmProvider>,
     health: Vec<EndpointHealth>,
-    whisper: Option<WhisperProvider>,
-    whisper_health: EndpointHealth,
+    whisper: Vec<WhisperProvider>,
+    whisper_health: Vec<EndpointHealth>,
     http: reqwest::Client,
 }
 
@@ -214,17 +222,25 @@ impl ProviderPool {
             .iter()
             .map(|_| EndpointHealth::new(per_endpoint))
             .collect();
+        let whisper_permits: usize = std::env::var("WHISPER_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4);
+        // Primary first, then fallbacks (may be empty: fully backward
+        // compatible with files carrying only `whisper_stt`).
+        let mut whisper = Vec::with_capacity(1 + file.whisper_stt_fallbacks.len());
+        whisper.extend(file.whisper_stt);
+        whisper.extend(file.whisper_stt_fallbacks);
+        let whisper_health = whisper
+            .iter()
+            .map(|_| EndpointHealth::new(whisper_permits))
+            .collect();
         Self {
             inner: Arc::new(PoolInner {
                 providers: file.llm_translation_models,
                 health,
-                whisper: file.whisper_stt,
-                whisper_health: EndpointHealth::new(
-                    std::env::var("WHISPER_CONCURRENCY")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(4),
-                ),
+                whisper,
+                whisper_health,
                 http,
             }),
         }
@@ -234,8 +250,9 @@ impl ProviderPool {
         self.inner.providers.len()
     }
 
-    pub fn whisper(&self) -> Option<&WhisperProvider> {
-        self.inner.whisper.as_ref()
+    /// Number of configured Whisper endpoints (primary + fallbacks).
+    pub fn whisper_len(&self) -> usize {
+        self.inner.whisper.len()
     }
 
     pub fn http(&self) -> &reqwest::Client {
@@ -291,9 +308,8 @@ impl ProviderPool {
         self.inner.health[idx].record_failure(Self::now_ms());
     }
 
-    pub async fn acquire_whisper(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.inner
-            .whisper_health
+    pub async fn acquire_whisper(&self, idx: usize) -> tokio::sync::OwnedSemaphorePermit {
+        self.inner.whisper_health[idx]
             .semaphore
             .clone()
             .acquire_owned()
@@ -301,16 +317,48 @@ impl ProviderPool {
             .expect("semaphore closed")
     }
 
+    /// Whisper endpoints in attempt order (primary first), skipping
+    /// circuit-broken entries. Falls back to the full list when all are
+    /// broken, mirroring [`Self::ordered`].
+    pub fn ordered_whisper(&self) -> Vec<(usize, WhisperProvider)> {
+        let now = Self::now_ms();
+        let mut v: Vec<(usize, WhisperProvider)> = self
+            .inner
+            .whisper
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !self.inner.whisper_health[*i].banned(now))
+            .map(|(i, p)| (i, p.clone()))
+            .collect();
+        if v.is_empty() {
+            v = self
+                .inner
+                .whisper
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (i, p.clone()))
+                .collect();
+        }
+        v
+    }
+
+    /// True when Whisper is configured but every endpoint is circuit-broken.
+    /// Callers fail fast on this instead of burning timeouts.
     pub fn whisper_banned(&self) -> bool {
-        self.inner.whisper_health.banned(Self::now_ms())
+        !self.inner.whisper.is_empty()
+            && self
+                .inner
+                .whisper_health
+                .iter()
+                .all(|h| h.banned(Self::now_ms()))
     }
 
-    pub fn record_whisper_success(&self) {
-        self.inner.whisper_health.record_success();
+    pub fn record_whisper_success(&self, idx: usize) {
+        self.inner.whisper_health[idx].record_success();
     }
 
-    pub fn record_whisper_failure(&self) {
-        self.inner.whisper_health.record_failure(Self::now_ms());
+    pub fn record_whisper_failure(&self, idx: usize) {
+        self.inner.whisper_health[idx].record_failure(Self::now_ms());
     }
 
     /// Deadline for one LLM attempt: bounded so a hung free-tier endpoint
@@ -350,6 +398,35 @@ mod tests {
         assert_eq!(f.llm_translation_models[0].model, "ma");
         assert_eq!(f.llm_translation_models[0].api_key(), "k");
         assert!(f.whisper_stt.is_some());
+    }
+
+    #[test]
+    fn legacy_file_without_fallbacks_parses_empty() {
+        // Backward compat: files predating `whisper_stt_fallbacks` parse
+        // with an empty failover list (primary-only, like before).
+        let f = ProvidersFile::load_str(SAMPLE).unwrap();
+        assert!(f.whisper_stt_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn whisper_fallbacks_keep_file_order_primary_first() {
+        let text = r#"{
+          "llm_translation_models": [],
+          "whisper_stt": {"provider":"p0","endpoint":"https://w0/t","model":"m0","key_env":"","api_key":"k0"},
+          "whisper_stt_fallbacks": [
+            {"provider":"p1","endpoint":"https://w1/t","model":"m1","key_env":"","api_key":"k1"},
+            {"provider":"p2","endpoint":"https://w2/t","model":"m2","key_env":"","api_key":"k2"}
+          ]
+        }"#;
+        let f = ProvidersFile::load_str(text).unwrap();
+        assert_eq!(f.whisper_stt_fallbacks.len(), 2);
+        let http = reqwest::Client::builder().build().unwrap();
+        let pool = ProviderPool::new(f, http);
+        assert_eq!(pool.whisper_len(), 3);
+        let order: Vec<String> =
+            pool.ordered_whisper().into_iter().map(|(_, w)| w.model).collect();
+        assert_eq!(order, vec!["m0", "m1", "m2"]);
+        assert_eq!(order[0], "m0");
     }
 
     #[test]

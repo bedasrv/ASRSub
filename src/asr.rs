@@ -189,51 +189,75 @@ fn whisper_form(
         .part("file", part))
 }
 
+/// One transcription request against every configured Whisper endpoint in
+/// order (primary, then `whisper_stt_fallbacks`): per-endpoint semaphore,
+/// per-endpoint breaker records. Transport errors and non-2xx fall through
+/// to the next endpoint; the last error surfaces when all fail.
+async fn whisper_request(
+    pool: &ProviderPool,
+    bytes: Vec<u8>,
+    filename: String,
+    lang: &str,
+) -> Result<serde_json::Value> {
+    let endpoints = pool.ordered_whisper();
+    if endpoints.is_empty() {
+        anyhow::bail!("no whisper_stt provider configured");
+    }
+    let mut last_err = String::from("no whisper endpoints attempted");
+    for (idx, wp) in endpoints {
+        if wp.api_key().is_empty() {
+            tracing::debug!(endpoint = %wp.endpoint, "whisper: skipping keyless endpoint");
+            continue;
+        }
+        let _permit = pool.acquire_whisper(idx).await;
+        let form = whisper_form(&wp.model, lang, bytes.clone(), filename.clone())?;
+        // The reqwest-level timeout is the single deadline (no outer
+        // tokio::time::timeout wrapper): one mechanism, both paths.
+        let resp = pool
+            .http()
+            .post(&wp.endpoint)
+            .header("Authorization", format!("Bearer {}", wp.api_key()))
+            .multipart(form)
+            .timeout(ProviderPool::whisper_timeout())
+            .send()
+            .await;
+        let resp = match resp {
+            Err(e) => {
+                pool.record_whisper_failure(idx);
+                last_err = format!("{}: transport: {e:#}", wp.endpoint);
+                continue;
+            }
+            Ok(r) => r,
+        };
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            pool.record_whisper_failure(idx);
+            last_err = format!(
+                "{}: HTTP {code}: {}",
+                wp.endpoint,
+                body.chars().take(200).collect::<String>()
+            );
+            continue;
+        }
+        pool.record_whisper_success(idx);
+        return resp.json().await.context("decode whisper response");
+    }
+    anyhow::bail!("all whisper endpoints failed; last: {last_err}")
+}
+
 async fn transcribe_file(pool: &ProviderPool, file: &Path, lang: &str) -> Result<Vec<Cue>> {
     if pool.whisper_banned() {
-        // Fail fast while the breaker is open instead of burning timeouts.
+        // Fail fast while every breaker is open instead of burning timeouts.
         anyhow::bail!("whisper circuit open (recent failures); deferring");
     }
-    let whisper = pool
-        .whisper()
-        .context("no whisper_stt provider configured")?
-        .clone();
-    let _permit = pool.acquire_whisper().await;
     let bytes = tokio::fs::read(file).await?;
     let name = file
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("audio.mp3")
         .to_string();
-    let form = whisper_form(&whisper.model, lang, bytes, name)?;
-    // The reqwest-level timeout below is the single deadline (no outer
-    // tokio::time::timeout wrapper): one mechanism, both paths.
-    let resp = match pool
-        .http()
-        .post(&whisper.endpoint)
-        .header("Authorization", format!("Bearer {}", whisper.api_key()))
-        .multipart(form)
-        .timeout(ProviderPool::whisper_timeout())
-        .send()
-        .await
-    {
-        Err(e) => {
-            pool.record_whisper_failure();
-            return Err(e.into());
-        }
-        Ok(r) => r,
-    };
-    if !resp.status().is_success() {
-        let code = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        pool.record_whisper_failure();
-        anyhow::bail!(
-            "whisper HTTP {code}: {}",
-            body.chars().take(300).collect::<String>()
-        );
-    }
-    pool.record_whisper_success();
-    let v: serde_json::Value = resp.json().await?;
+    let v = whisper_request(pool, bytes, name, lang).await?;
     Ok(cues_from_verbose(&v, 0))
 }
 
@@ -396,39 +420,8 @@ async fn transcribe_chunk(
     if pool.whisper_banned() {
         anyhow::bail!("whisper circuit open (recent failures); deferring");
     }
-    let whisper = pool
-        .whisper()
-        .context("no whisper_stt provider configured")?
-        .clone();
-    let _permit = pool.acquire_whisper().await;
     let bytes = tokio::fs::read(file).await?;
-    let form = whisper_form(&whisper.model, lang, bytes, "part.mp3".to_string())?;
-    let resp = pool
-        .http()
-        .post(&whisper.endpoint)
-        .header("Authorization", format!("Bearer {}", whisper.api_key()))
-        .multipart(form)
-        .timeout(ProviderPool::whisper_timeout())
-        .send()
-        .await;
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            pool.record_whisper_failure();
-            return Err(e.into());
-        }
-    };
-    if !resp.status().is_success() {
-        let code = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        pool.record_whisper_failure();
-        anyhow::bail!(
-            "whisper chunk HTTP {code}: {}",
-            body.chars().take(200).collect::<String>()
-        );
-    }
-    pool.record_whisper_success();
-    let v: serde_json::Value = resp.json().await?;
+    let v = whisper_request(pool, bytes, "part.mp3".to_string(), lang).await?;
     Ok(cues_from_verbose(&v, offset_ms))
 }
 

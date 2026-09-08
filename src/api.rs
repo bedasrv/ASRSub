@@ -138,7 +138,7 @@ async fn h_api2_status(State(s): State<Arc<AppState>>) -> Json<Value> {
         "last_pass": last,
         "target_langs": s.cfg.target_langs,
         "episode_concurrency": s.cfg.episode_concurrency,
-        "providers": {"llm": s.pipeline.pool.len(), "whisper": s.pipeline.pool.whisper().is_some()},
+        "providers": {"llm": s.pipeline.pool.len(), "whisper_endpoints": s.pipeline.pool.whisper_len()},
     }))
 }
 

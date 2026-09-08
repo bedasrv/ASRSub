@@ -36,6 +36,7 @@ use tokio::sync::Mutex;
 struct Stubs {
     uploads: Mutex<Vec<String>>,
     whisper_hits: Mutex<u32>,
+    whisper_broken_hits: Mutex<u32>,
     llm_hits: Mutex<u32>,
     refill_hits: Mutex<u32>,
 }
@@ -122,6 +123,15 @@ async fn whisper_stt(State(cx): State<StubCx>, _body: Bytes) -> impl IntoRespons
     }))
 }
 
+/// Broken Whisper stub: always 500 (failover drill target).
+async fn whisper_broken(State(cx): State<StubCx>, _body: Bytes) -> impl IntoResponse {
+    *cx.stubs.whisper_broken_hits.lock().await += 1;
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "drill failure"})),
+    )
+}
+
 fn router(cx: StubCx) -> axum::Router {
     axum::Router::new()
         .route("/episode/:id", get(sonarr_episode))
@@ -133,6 +143,7 @@ fn router(cx: StubCx) -> axum::Router {
         .route("/system/tasks", post(bazarr_refill))
         .route("/chat/completions", post(llm_chat))
         .route("/audio/transcriptions", post(whisper_stt))
+        .route("/audio-broken", post(whisper_broken))
         .with_state(cx)
 }
 
@@ -282,7 +293,7 @@ exit 0
 
     let http = reqwest::Client::builder().build().unwrap();
     let file = |p: &str| cfg_dir.join(p);
-    let cfg = crate::config::Config {
+    let _cfg = crate::config::Config {
         raw: HashMap::new(),
         sonarr_url: base.clone(),
         sonarr_api_key: "t".into(),
@@ -348,10 +359,11 @@ exit 0
                 via_upstream: None,
                 request_shape: None,
             }),
+            whisper_stt_fallbacks: vec![],
         },
         http.clone(),
     );
-    let pipe = crate::pipeline::Pipeline::new(cfg, pool, http);
+    let pipe = crate::pipeline::Pipeline::new(_cfg.clone(), pool, http.clone());
 
     // ---- Phase A: ASR path (no ja sidecar) ----
     let stats = pipe.run_pass().await;
@@ -423,4 +435,60 @@ exit 0
     // Actions consumed: next pass sees the missing language again.
     let stats = pipe.run_pass().await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
+
+    // ---- Phase D: whisper failover (primary 500s, fallback serves) ----
+    std::fs::remove_file(&pipe.cfg.state_file).ok();
+    std::fs::remove_file(&pipe.cfg.registry_file).ok();
+    for lang in ["id", "en", "ja"] {
+        std::fs::remove_file(format!("{stem_s}.{lang}.srt")).ok();
+        std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
+    }
+    stubs.uploads.lock().await.clear();
+    let whisper_before = *stubs.whisper_hits.lock().await;
+    let failover_pool = crate::providers::ProviderPool::new(
+        crate::providers::ProvidersFile {
+            llm_translation_models: vec![crate::providers::LlmProvider {
+                provider: "stub".into(),
+                endpoint: format!("{base}/chat/completions"),
+                base_url: base.clone(),
+                model: "stub".into(),
+                key_env: String::new(),
+                api_key: "x".into(),
+                probe_latency_s: 0.01,
+                thinking_param_accepted: false,
+                request_shape: None,
+            }],
+            whisper_stt: Some(crate::providers::WhisperProvider {
+                provider: "stub-broken".into(),
+                endpoint: format!("{base}/audio-broken"),
+                model: "stub".into(),
+                key_env: String::new(),
+                api_key: "x".into(),
+                rate_usd_per_audio_sec: None,
+                via_upstream: None,
+                request_shape: None,
+            }),
+            whisper_stt_fallbacks: vec![crate::providers::WhisperProvider {
+                provider: "stub".into(),
+                endpoint: format!("{base}/audio/transcriptions"),
+                model: "stub".into(),
+                key_env: String::new(),
+                api_key: "x".into(),
+                rate_usd_per_audio_sec: None,
+                via_upstream: None,
+                request_shape: None,
+            }],
+        },
+        http.clone(),
+    );
+    let pipe2 = crate::pipeline::Pipeline::new(pipe.cfg.clone(), failover_pool, http);
+    let stats = pipe2.run_pass().await;
+    assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
+    // Primary attempted (and failed) first, fallback served the shared
+    // transcription — one serving hit, not two.
+    assert_eq!(*stubs.whisper_broken_hits.lock().await, 1);
+    assert_eq!(*stubs.whisper_hits.lock().await, whisper_before + 1);
+    let mut ups = stubs.uploads.lock().await.clone();
+    ups.sort();
+    assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
 }

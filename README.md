@@ -58,6 +58,12 @@ Remote endpoints, models, and embedded keys live in `asrsub_providers.json`
 (LLM list sorted fastest-first with per-endpoint limits + breakers).
 Keep it `chmod 600`; it ships inside the Docker image (see `docs/DEPLOY.md`).
 
+Failover: every LLM chunk races all configured models fastest-first (404
+or error → next model, 3 straight failures → 60 s breaker); Whisper tries
+`whisper_stt` then `whisper_stt_fallbacks` in order with the same
+per-endpoint breakers. (There is no `TRANSLATE_FALLBACK_MODELS` knob —
+the whole model list already *is* the fallback list.)
+
 ## Control API
 
 GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
