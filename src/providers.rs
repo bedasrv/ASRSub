@@ -385,13 +385,30 @@ mod tests {
         assert_eq!(f.llm_translation_models[0].api_key(), "k");
         assert!(f.whisper_stt.is_some());
     }
-
     #[test]
     fn legacy_file_without_fallbacks_parses_empty() {
         // Backward compat: files predating `whisper_stt_fallbacks` parse
         // with an empty failover list (primary-only, like before).
         let f = ProvidersFile::load_str(SAMPLE).unwrap();
         assert!(f.whisper_stt_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn empty_api_key_falls_back_to_env() {
+        // The secret-free setup: no embedded key in the file, key comes
+        // from $key_env at call time (unique var: parallel-safe).
+        std::env::set_var("ASRSUB_TEST_FALLBACK_XYZ", "env-secret");
+        let p = LlmProvider {
+            endpoint: "https://x".into(),
+            model: "m".into(),
+            key_env: "ASRSUB_TEST_FALLBACK_XYZ".into(),
+            api_key: String::new(),
+            probe_latency_s: 1.0,
+            thinking_param_accepted: false,
+        };
+        assert_eq!(p.api_key(), "env-secret");
+        std::env::remove_var("ASRSUB_TEST_FALLBACK_XYZ");
+        assert_eq!(p.api_key(), "");
     }
 
     #[test]
