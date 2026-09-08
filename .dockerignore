@@ -12,9 +12,7 @@ tmp/
 outputs/
 episodes/
 ground_truth/
-# Retired Python implementation, docs, eval harness, and tests:
-# not part of the Rust runtime image.
-legacy/
+# Dev-only files, docs, and tests: not part of the Rust runtime image.
 docs/
 tests/
 *.log

@@ -11,7 +11,7 @@ import re
 import unittest
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[1]
 COMPOSE = REPO / "docker-compose.yml"
 BUILD = REPO / "build.sh"
 DEPLOY = REPO / "deploy.sh"

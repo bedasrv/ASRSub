@@ -12,16 +12,17 @@ via `asrsub_providers.json`. See `docs/` for deploy and health contracts.
 
 ```
 src/            Rust binary (daemon + CLI)
-tests/          Rust integration tests (binary boundary)
+tests/          Rust integration tests (binary boundary) + release-contract
+                tests (stdlib unittest, no pytest needed)
 assets/         dashboard.html, served by the daemon at /
 asrsub_providers.json
                 Remote endpoints for Whisper STT + LLM translation
 Dockerfile / docker-compose.yml / build.sh / deploy.sh / pctl
-docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical)
-legacy/         Retired Python implementation (reference only — rollback
-                is redeploying the previous SHA image per docs/DEPLOY.md),
-                eval harness, frozen Python suite (run: cd legacy && pytest tests/).
-                Parity checklist: docs/PARITY.md
+docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
+                (port checklist; the retired Python implementation was
+                deleted 2026-09-08 after all 20 rows cleared — rollback is
+                redeploying the previous SHA image per docs/DEPLOY.md;
+                reference code survives in git history)
 ```
 
 ## Quickstart

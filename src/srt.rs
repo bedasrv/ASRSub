@@ -295,13 +295,13 @@ pub fn cps_merge(
 /// Structural timeline gate: per-cue sanity plus the file-level checks the
 /// retired Python `validate_srt_timeline` pinned (Dungeon People S01E09: a
 /// retime collapsed 9 cues onto one timestamp after a 326 s hole and the
-/// file was written anyway):
-/// - starts non-decreasing ("monotonic"), at most `MAX_PILEUP` cues sharing
-///   one identical start ("pileup");
-/// - with a known video duration: span covers `MIN_COVERAGE` of it
-///   ("coverage"), no single inter-cue gap exceeds `MAX_GAP_FRAC` ("gap").
-/// Thresholds are the legacy-verified defaults, now consts (the env knobs
-/// were pruned as dead). Returns violation strings; empty means clean.
+/// file was written anyway). Starts must be non-decreasing ("monotonic")
+/// with at most `MAX_PILEUP` cues sharing one identical start ("pileup");
+/// with a known video duration the span must cover `MIN_COVERAGE` of it
+/// ("coverage") with no single inter-cue gap exceeding `MAX_GAP_FRAC`
+/// ("gap"). Thresholds are the legacy-verified defaults, now consts (the
+/// env knobs were pruned as dead). Returns violation strings; empty means
+/// clean.
 pub fn validate_timeline(cues: &[Cue], max_cue_ms: u32, duration_s: Option<f64>) -> Vec<String> {
     const MAX_PILEUP: u32 = 2;
     const MIN_COVERAGE: f64 = 0.80;

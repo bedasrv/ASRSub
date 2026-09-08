@@ -104,9 +104,8 @@ curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/s
 ## Verification (local)
 
 ```bash
-# From repo root (Python sources live under legacy/):
-python -m py_compile legacy/orchestrator.py legacy/webhook_ledger.py legacy/control_api_v2.py
 cargo test            # Rust suite (offline; includes full-program simulation)
+python3 -m unittest tests.test_immutable_release_contract tests.test_release_descriptor_execution
 curl -sf http://127.0.0.1:8085/health | jq .
 curl -sf http://127.0.0.1:8085/status | jq '{paused, last_pass}'
 # Authenticated config (secrets masked):

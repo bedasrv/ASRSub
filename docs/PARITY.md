@@ -2,8 +2,11 @@
 
 **Question this answers:** when is `legacy/` safe to delete?
 **Answer:** the checklist is complete (2026-09-08) — every row is COVERED,
-DIVERGED-with-rationale, or explicitly waived. Deletion is approved whenever
-you want it; git history preserves the code regardless.
+DIVERGED-with-rationale, or explicitly waived. The `legacy/` working-tree
+copy was deleted the same day (criterion met); the two release-contract
+suites were relocated to `tests/` and stay green. Reference code survives
+in git history (`git show <sha>:legacy/...`); this file preserves the
+*decisions*.
 
 ## Method
 
@@ -29,7 +32,7 @@ you want it; git history preserves the code regardless.
 
 | # | Area | Legacy source (cases) | Rust coverage | Status | Notes |
 |---|---|---|---|---|---|
-| 1 | Release contract (compose/build/deploy/rollback docs) | `test_immutable_release_contract` (18), `test_release_descriptor_execution` (3) | Oracle repaired AND live: fixed stale `legacy/`-relative paths (reorg breakage), evolved 2 Python-era pins to the rewrite contract (no huggingface mount / nvidia runtime — remote-only; `command: [daemon]`); **21/21 green via stdlib unittest** | COVERED | Resolved 2026-09-08. Run: `python3 -m unittest legacy.tests.test_immutable_release_contract legacy.tests.test_release_descriptor_execution`. |
+| 1 | Release contract (compose/build/deploy/rollback docs) | `test_immutable_release_contract` (18), `test_release_descriptor_execution` (3) | Oracle repaired AND live: fixed stale `legacy/`-relative paths (reorg breakage), evolved 2 Python-era pins to the rewrite contract (no huggingface mount / nvidia runtime — remote-only; `command: [daemon]`); **21/21 green via stdlib unittest** | COVERED | Resolved 2026-09-08. Run: `python3 -m unittest tests.test_immutable_release_contract tests.test_release_descriptor_execution`. |
 | 2 | Jimaku client (ranking, 429, cache, AniList) | `test_jimaku_api` (32) | 13 tests in `src/jimaku.rs`: shapes, pick_entry, full rank corpus, cache-key pin, stub-server auth/params/429/snippet/download/anilist-hit-miss-failure | COVERED | Resolved 2026-09-08. Fixed en route: unexpected shape now errors (was silent empty), HTTP errors carry status+snippet, 429 carries reset_after, download uses legacy `.part` naming + cleans up on failure, cache merge writes `fetched_at`. Recorded folds: typed `JimakuRateLimited` → anyhow message (no caller branches); strict `S##E##` tag kept over loose regex (pre-existing, reasoned); `download()` returns `()` (callers use the known dest); `JIMAKU_API_KEY` env fallback lives in config layer. |
 | 3 | Jimaku hunt scheduling (budget, backoff, tombstone, state-file) | `test_jimaku_hunt` (43) | Middle path: per-stem 24h retry cooldown (`jimaku_tried` now maps stem→Instant; restart retries everything), predicate unit-tested | COVERED | Resolved 2026-09-08. Decision, not a port: budgets unnecessary (global 500ms pacing guards the rate limit by construction), 429s miss into the next cooldown, tombstones pointless with no upgrade pass (no Sonarr-404 orphans; a hopeless stem costs ~2 calls/day), flat-daily lands uploads within ~24h like the capped ramp did. Rationale recorded on `JIMAKU_RETRY_COOLDOWN`. |
 | 4 | Registry core (upsert/delete/reconcile/locking) | reconciliation ×3 files (7), `test_registry_lock_and_tmp_ladder` (3), `test_registry_write_serialization` (1) | `src/state.rs` (6): roundtrip, consume, delete scoping, kind, **concurrent-appends serialization**, verified-targets | COVERED | Resolved 2026-09-08. Hash-trust/reconcile-by-hash obsolete by design (no hashes). Lock upgrade/tmp-ladder semantics replaced by fd-lock + atomic renames (pinned by the concurrency test). |
@@ -61,8 +64,12 @@ you want it; git history preserves the code regardless.
 7. Rows 19, 14, 4-locking, 11-roots, 15, 16 — verify-and-waive or port. ✅ done 2026-09-08
 8. Rows 1, 8, 20 — sign-off decisions (release assertions, retime removal, eval strategy). ✅ done 2026-09-08
 
-## Deletion criterion for `legacy/`
+## Deletion criterion for `legacy/` — MET 2026-09-08, deleted same day
 
-Delete the working-tree copy when every row above is COVERED, DIVERGED-with-rationale,
-or explicitly waived — and the waivers are recorded in this file. Git history
-preserves the code regardless; this file preserves the *decisions*.
+~~Delete the working-tree copy when~~ every row above is COVERED,
+DIVERGED-with-rationale, or explicitly waived — and the waivers are recorded
+in this file. Git history preserves the code regardless (`git show
+<sha>:legacy/orchestrator.py`); this file preserves the *decisions*. The
+release-contract oracle moved to `tests/test_immutable_release_contract.py`
++ `tests/test_release_descriptor_execution.py` (run: `python3 -m unittest
+tests.test_immutable_release_contract tests.test_release_descriptor_execution`).
