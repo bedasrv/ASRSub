@@ -83,8 +83,8 @@ All checks run from repo root or container; none require secrets in output.
 ## Verification (local)
 
 ```bash
-# From repo root:
-python -m py_compile orchestrator.py webhook_ledger.py control_api_v2.py
+# From repo root (Python sources live under legacy/):
+python -m py_compile legacy/orchestrator.py legacy/webhook_ledger.py legacy/control_api_v2.py
 curl -sf http://127.0.0.1:8085/health | jq .
 curl -sf http://127.0.0.1:8085/ready | jq .
 # Authenticated status:

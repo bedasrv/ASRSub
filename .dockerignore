@@ -12,6 +12,9 @@ tmp/
 outputs/
 episodes/
 ground_truth/
-docker-compose.yml
-build.sh
-PLAN.md
+# Retired Python implementation, docs, eval harness, and tests:
+# not part of the Rust runtime image.
+legacy/
+docs/
+tests/
+*.log

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
     && groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub
 COPY --from=build /asrsub /usr/local/bin/asrsub
 COPY asrsub_providers.json /app/asrsub_providers.json
+COPY assets/dashboard.html /app/assets/dashboard.html
 WORKDIR /app
 USER asrsub
 ENTRYPOINT ["asrsub"]

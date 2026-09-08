@@ -14,7 +14,7 @@ from fastapi.security import APIKeyHeader
 import control_api_v2
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HTML_FILE = os.path.join(BASE_DIR, "dashboard.html")
+HTML_FILE = os.path.normpath(os.path.join(BASE_DIR, "..", "assets", "dashboard.html"))
 
 api2 = control_api_v2.ControlAPIv2()
 app = FastAPI(

@@ -2,7 +2,7 @@ name: asrsub
 
 services:
   orchestrator:
-    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see DEPLOY.md / .release.env)}
+    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)}
     # No GPU runtime: all inference is remote (asrsub_providers.json).
     environment:
       - TZ=Asia/Jakarta
@@ -18,7 +18,7 @@ services:
     command: [daemon]
 
   dashboard:
-    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see DEPLOY.md / .release.env)}
+    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)}
     network_mode: host
     environment:
       - TZ=Asia/Jakarta

@@ -29,7 +29,7 @@ echo "This will restart the stack with an explicit immutable image. Data mounts 
 echo "  Release image: \${ASRSUB_IMAGE:?set ASRSUB_IMAGE to release tag (e.g. asrsub:<git-sha>) or ensure ${RELEASE_ENV} exists}"
 echo "  Secret file: \${CONTROL_API_KEY_FILE_HOST:-/home/user/.config/asr-pipeline/secrets/control_api_key} -> /run/secrets/control_api_key"
 echo "  Config: /home/user/.config/asr-pipeline/pipeline.env (non-control settings only)"
-echo "  State: local btrfs at /home/user/.config/asr-pipeline (see HEALTH.md)"
+echo "  State: local btrfs at /home/user/.config/asr-pipeline (see docs/HEALTH.md)"
 echo "  Media: NFS /mnt/nas/share/media (must be mounted)"
 echo "  Release descriptor: ${RELEASE_ENV} / release.json (non-secret)"
 echo ""
@@ -69,7 +69,7 @@ if [[ ! -f "$SECRET_HOST" ]]; then
 fi
 
 # Verify health prerequisites
-echo "==> Health prerequisites (see HEALTH.md)"
+echo "==> Health prerequisites (see docs/HEALTH.md)"
 if ! mountpoint -q /mnt/nas/share/media 2>/dev/null && ! grep -q " /mnt/nas/share/media " /proc/mounts 2>/dev/null; then
   echo "WARNING: NFS media mount /mnt/nas/share/media not detected; continue anyway? (y/N)"
   read -p "> " ans2
@@ -89,4 +89,4 @@ docker compose ps
 echo ""
 echo "==> Health"
 curl -sf http://127.0.0.1:8085/health || echo "health check failed (orchestrator may be starting)"
-curl -sf http://127.0.0.1:8085/ready 2>/dev/null || echo "ready check: /ready not yet available (see HEALTH.md)"
+curl -sf http://127.0.0.1:8085/ready 2>/dev/null || echo "ready check: /ready not yet available (see docs/HEALTH.md)"

@@ -148,8 +148,14 @@ async fn h_health() -> Json<Value> {
 
 async fn h_index() -> impl axum::response::IntoResponse {
     // Serve the operator dashboard when the HTML ships alongside the binary
-    // (Docker image copies it to /app); otherwise report the API surface.
-    for cand in ["dashboard.html", "/app/dashboard.html"] {
+    // (repo layout: assets/; Docker image: /app/assets/). Legacy fallbacks
+    // cover older checkouts with dashboard.html at the root.
+    for cand in [
+        "assets/dashboard.html",
+        "/app/assets/dashboard.html",
+        "dashboard.html",
+        "/app/dashboard.html",
+    ] {
         if let Ok(html) = tokio::fs::read_to_string(cand).await {
             return axum::response::Response::builder()
                 .header("content-type", "text/html; charset=utf-8")

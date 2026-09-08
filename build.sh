@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Immutable release build — non-destructive, versioned, fail-closed.
 # Retains data mounts and never stops/removes containers, images, or builder cache.
-# Deployment is separate and explicit: see DEPLOY.md or deploy.sh.
+# Deployment is separate and explicit: see docs/DEPLOY.md or deploy.sh.
 # Emits a non-secret release descriptor (.release.env + release.json) for deploy.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -56,4 +56,4 @@ echo "    Release descriptor: ${RELEASE_ENV} and ${RELEASE_JSON} (non-secret, sa
 echo "    Contents:"
 cat "${RELEASE_ENV}"
 echo "    Inspect: docker images | grep asrsub"
-echo "    Deploy explicitly when ready: ASRSUB_IMAGE=${IMAGE} ./deploy.sh  OR  ./deploy.sh (loads ${RELEASE_ENV}) — see DEPLOY.md (requires manual confirmation)"
+echo "    Deploy explicitly when ready: ASRSUB_IMAGE=${IMAGE} ./deploy.sh  OR  ./deploy.sh (loads ${RELEASE_ENV}) — see docs/DEPLOY.md (requires manual confirmation)"
