@@ -13,8 +13,19 @@ use crate::lang::{normalize_lang, replaceable_target_sidecar_paths};
 use crate::pipeline::Pipeline;
 use crate::state::{self, StateEntry};
 
+/// One operator retry for same-pass reprocessing: what to regenerate,
+/// independent of what Bazarr currently reports missing.
+pub(crate) struct RetrySpec {
+    pub(crate) episode_id: i64,
+    /// Normalized `"series"` / `"movie"`.
+    pub(crate) kind: String,
+    /// Resolved target languages (null scope expanded).
+    pub(crate) langs: Vec<String>,
+}
+
 impl Pipeline {
-    /// Process pending actions once per pass; returns ids to skip this pass.
+    /// Process pending actions once per pass; returns ids to skip this pass
+    /// plus retry specs for SAME-pass reprocessing (see `run_pass`).
     ///
     /// Mirrors `consume_actions` in orchestrator.py:
     ///
@@ -28,11 +39,12 @@ impl Pipeline {
     ///
     /// `kind` (`series` default / `movie`) routes each record; unknown
     /// episode ids (non-integer) are ignored.
-    pub(crate) async fn consume_actions(&self) -> std::collections::HashSet<i64> {
+    pub(crate) async fn consume_actions(&self) -> (std::collections::HashSet<i64>, Vec<RetrySpec>) {
         let mut skip_ids = std::collections::HashSet::new();
+        let no_retries = Vec::new();
         let records = state::consume_actions(&self.cfg.actions_file);
         if records.is_empty() {
-            return skip_ids;
+            return (skip_ids, no_retries);
         }
         // Group retry/delete by (id -> kinds + langs) like Python.
         let mut retry: std::collections::HashMap<
@@ -147,7 +159,24 @@ impl Pipeline {
         for eid in sorted_set(&skip_ids) {
             tracing::info!("action: skip episode {eid} (excluded this pass)");
         }
-        skip_ids
+        // Retry specs for same-pass reprocessing (resolved by `run_pass`):
+        // one per (id, kind), languages expanded (null = all targets).
+        // Skips/exclusions are applied at resolution, not here, so the
+        // deletions above stay exactly as before.
+        let mut specs = Vec::new();
+        for eid in sorted_keys(&retry) {
+            let (kinds, langs) = &retry[&eid];
+            let mut kinds: Vec<&String> = kinds.iter().collect();
+            kinds.sort();
+            for kind in kinds {
+                specs.push(RetrySpec {
+                    episode_id: eid,
+                    kind: kind.clone(),
+                    langs: self.target_langs_or(lang_scope(langs)),
+                });
+            }
+        }
+        (skip_ids, specs)
     }
 
     /// Jellyfin refresh after a delete action (series and/or movie item).

@@ -123,11 +123,25 @@ impl Pipeline {
     /// semaphore. Skipped ids from `consume_actions` filter candidates
     /// before the `MAX_EPS_PER_RUN` cap is applied.
     pub async fn run_pass(&self) -> PassStats {
-        let skip_ids = self.consume_actions().await;
+        let (skip_ids, retries) = self.consume_actions().await;
         // Discover (Bazarr) and series titles (Sonarr) are independent:
         // fire together, latency is the max, not the sum.
-        let (candidates, titles) =
+        let (mut candidates, titles) =
             tokio::join!(self.discover(&skip_ids), self.sonarr.series_titles());
+        // Inline retries: reprocess THIS pass instead of waiting for Bazarr
+        // to rescan (minutes) and a later pass to notice. Resolution mirrors
+        // discover's filters — skips and exclusions win over retries, and an
+        // episode Bazarr already reports missing is processed once (the
+        // inline copy wins; same work either way, never double-transcribed).
+        if !retries.is_empty() {
+            let inline = self.resolve_retries(&retries, &skip_ids).await;
+            if !inline.is_empty() {
+                let keys: std::collections::HashSet<(bool, i64)> =
+                    inline.iter().map(|c| (c.is_movie, c.episode_id)).collect();
+                candidates.retain(|c| !keys.contains(&(c.is_movie, c.episode_id)));
+                candidates.splice(..0, inline);
+            }
+        }
         let mut stats = PassStats {
             scanned: candidates.len(),
             ..Default::default()
@@ -165,6 +179,81 @@ impl Pipeline {
             }
         }
         stats
+    }
+
+    /// Resolve operator retries into same-pass candidates (see `run_pass`).
+    /// Skips, exclusions, and unresolvable ids drop the spec (logged);
+    /// resolution never fails the pass.
+    async fn resolve_retries(
+        &self,
+        retries: &[crate::actions::RetrySpec],
+        skip_ids: &std::collections::HashSet<i64>,
+    ) -> Vec<Candidate> {
+        if retries.is_empty() {
+            return Vec::new();
+        }
+        let excluded = state::parse_exclusions(&self.cfg.exclusions_file);
+        // One movies listing shared by all movie retries (retry passes only).
+        let need_movies = retries.iter().any(|r| r.kind == "movie");
+        let movies: Vec<serde_json::Value> = if need_movies {
+            self.bazarr.movies().await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut out = Vec::new();
+        for r in retries {
+            if skip_ids.contains(&r.episode_id) || excluded.contains(&r.episode_id) {
+                continue;
+            }
+            if r.kind == "movie" {
+                let found = movies
+                    .iter()
+                    .find(|m| m.get("radarrId").and_then(|v| v.as_i64()) == Some(r.episode_id));
+                let Some(m) = found else {
+                    tracing::warn!(
+                        episode = r.episode_id,
+                        "action: retry movie not in library, skipping"
+                    );
+                    continue;
+                };
+                let path = m.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                if path.is_empty() || !Path::new(&self.cfg.map_path(path)).is_file() {
+                    tracing::warn!(
+                        episode = r.episode_id,
+                        "action: retry movie file missing, skipping"
+                    );
+                    continue;
+                }
+                out.push(Candidate {
+                    episode_id: r.episode_id,
+                    series_id: None,
+                    series_title: m
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("?")
+                        .to_string(),
+                    path: Some(path.to_string()),
+                    missing: r.langs.clone(),
+                    is_movie: true,
+                });
+            } else {
+                match self.sonarr.episode(r.episode_id).await {
+                    Ok(ep) => out.push(Candidate {
+                        episode_id: r.episode_id,
+                        series_id: ep.series_id,
+                        // Title resolved from the pass titles map in process_one.
+                        series_title: "?".to_string(),
+                        path: None,
+                        missing: r.langs.clone(),
+                        is_movie: false,
+                    }),
+                    Err(e) => {
+                        tracing::warn!(episode = r.episode_id, error = %e, "action: retry episode lookup failed, skipping")
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Wanted (series) + movie sweep, minus exclusions / done state / skips.

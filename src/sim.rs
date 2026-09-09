@@ -49,6 +49,7 @@ struct Stubs {
     llm_hits: Mutex<u32>,
     refill_hits: Mutex<u32>,
     movie_on: AtomicBool,
+    wanted_id_missing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -77,14 +78,19 @@ async fn sonarr_series() -> impl IntoResponse {
 }
 
 /// Bazarr `/episodes/wanted`: episode 7 missing id+en.
-async fn bazarr_wanted() -> impl IntoResponse {
+async fn bazarr_wanted(State(cx): State<StubCx>) -> impl IntoResponse {
+    let mut missing = vec![];
+    if cx.stubs.wanted_id_missing.load(Ordering::Relaxed) {
+        missing.push(serde_json::json!({"code2": "id"}));
+    }
+    missing.push(serde_json::json!({"code2": "en"}));
     Json(serde_json::json!({
         "total": 1,
         "data": [{
             "sonarrEpisodeId": 7,
             "seriesId": 11,
             "seriesTitle": "TestShow",
-            "missing_subtitles": [{"code2": "id"}, {"code2": "en"}],
+            "missing_subtitles": missing,
         }],
     }))
 }
@@ -327,6 +333,7 @@ exit 0
 
     // One stub server for every remote dependency.
     let stubs = Arc::new(Stubs::default());
+    stubs.wanted_id_missing.store(true, Ordering::Relaxed);
     let movie = media_dir.join("movie.mkv");
     let cx = StubCx {
         stubs: stubs.clone(),
@@ -464,7 +471,10 @@ exit 0
         .all(|r| r.source_kind.as_deref() == Some("external")));
 
     // ---- Phase C: actions round-trip ----
-    // Retry(id) regenerates just that language.
+    // Retry(id) regenerates IN THE SAME PASS even though Bazarr does not
+    // report id missing (the production win: no waiting for Bazarr's
+    // rescan + a later pass — the retry resolves straight from Sonarr).
+    stubs.wanted_id_missing.store(false, Ordering::Relaxed);
     std::fs::write(
         &pipe.cfg.actions_file,
         "{\"type\":\"retry\",\"episode_id\":7,\"kind\":\"series\",\"language\":\"id\"}\n",
@@ -472,6 +482,7 @@ exit 0
     .unwrap();
     let stats = pipe.run_pass().await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
+    stubs.wanted_id_missing.store(true, Ordering::Relaxed);
     let rows = state_rows(&pipe.cfg.state_file);
     assert!(rows
         .iter()

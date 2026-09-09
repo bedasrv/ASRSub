@@ -90,8 +90,9 @@ GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
   header line; uploads are `hi=true` manual uploads of the sidecar written
   just before (that on-disk file is authoritative — staleness is caught at
   the next `discover`, not by post-upload read-back).
-- `retry` clears state **and** deletes sidecars (Bazarr only re-wants missing
-  files); `delete` additionally refreshes Jellyfin.
+- `retry` clears state **and** deletes sidecars, then reprocesses inline in
+  the same pass (resolved straight from Sonarr/Radarr — no waiting for
+  Bazarr's rescan); `delete` additionally refreshes Jellyfin.
 - Only 204/transport-error/429/5xx Bazarr outcomes retry; 400/401/404 fail fast.
 - Untagged audio tracks transcribe as Japanese (anime-library default).
 - No `/ready` endpoint and no paused-boot yet — see `docs/HEALTH.md`.
