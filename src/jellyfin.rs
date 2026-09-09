@@ -34,6 +34,12 @@ impl Jellyfin {
         !self.key.is_empty() && !self.base.is_empty()
     }
 
+    /// Path-based item identity: exact match or same filename (robust
+    /// against Sonarr-vs-Jellyfin title drift). Shared by all three lookups.
+    fn path_matches(p: &str, jelly_path: &str, filename: &str) -> bool {
+        p == jelly_path || p.ends_with(&format!("/{filename}"))
+    }
+
     /// Fire-and-forget refresh for one media file. `item_type` is `"Episode"`
     /// (series) or `"Movie"` (radarr track).
     pub async fn refresh_for(&self, media_path: &str, title: &str, item_type: &str) {
@@ -169,17 +175,14 @@ impl Jellyfin {
             .iter()
             .find(|ep| {
                 let p = ep.get("Path").and_then(|x| x.as_str()).unwrap_or("");
-                p == jelly_path || p.ends_with(&format!("/{filename}"))
+                Self::path_matches(p, jelly_path, filename)
             })
             .cloned()
     }
 
     /// Movie lookup by filename stem, gated on path match.
     async fn find_movie(&self, filename: &str, jelly_path: &str) -> Option<serde_json::Value> {
-        let stem = filename
-            .rsplit_once('.')
-            .map(|(s, _)| s)
-            .unwrap_or(filename);
+        let stem = crate::lang::stem_of(filename);
         if stem.is_empty() {
             return None;
         }
@@ -193,7 +196,7 @@ impl Jellyfin {
         .into_iter()
         .find(|it| {
             let p = it.get("Path").and_then(|x| x.as_str()).unwrap_or("");
-            p == jelly_path || p.ends_with(&format!("/{filename}"))
+            Self::path_matches(p, jelly_path, filename)
         })
     }
 
@@ -213,10 +216,7 @@ impl Jellyfin {
                 }
             }
         }
-        let stem = filename
-            .rsplit_once('.')
-            .map(|(s, _)| s)
-            .unwrap_or(filename);
+        let stem = crate::lang::stem_of(filename);
         if !stem.is_empty() && stem != terms[0] {
             terms.push(stem);
         }
@@ -232,7 +232,7 @@ impl Jellyfin {
                 .unwrap_or_default();
             if let Some(hit) = items.into_iter().find(|it| {
                 let p = it.get("Path").and_then(|x| x.as_str()).unwrap_or("");
-                p == jelly_path || p.ends_with(&format!("/{filename}"))
+                Self::path_matches(p, jelly_path, filename)
             }) {
                 return Some(hit);
             }

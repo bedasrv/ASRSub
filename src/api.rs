@@ -327,8 +327,9 @@ async fn h_exclusions(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"exclusions": ids}))
 }
 
-async fn authed(
-    State(s): State<Arc<AppState>>,
+/// Token check for control POSTs (deny-by-default when unconfigured).
+async fn authed_state(
+    s: &Arc<AppState>,
     headers: HeaderMap,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     if check_token(&s.cfg, &headers) {
@@ -345,7 +346,7 @@ async fn h_pause(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     s.paused.store(true, Ordering::Relaxed);
     Ok(Json(json!({"ok": true, "paused": true})))
 }
@@ -354,7 +355,7 @@ async fn h_resume(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     s.paused.store(false, Ordering::Relaxed);
     s.wake.notify_one();
     Ok(Json(json!({"ok": true, "paused": false})))
@@ -364,7 +365,7 @@ async fn h_run_once(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     s.run_once.store(true, Ordering::Relaxed);
     s.wake.notify_one();
     Ok(Json(json!({"ok": true})))
@@ -374,7 +375,7 @@ async fn h_wake(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     s.wake.notify_one();
     Ok(Json(json!({"ok": true})))
 }
@@ -438,20 +439,35 @@ fn body_kind_lang(body: &Option<Json<Value>>, path_kind: &'static str) -> (Strin
     (kind, lang)
 }
 
+/// Shared retry/skip/delete handler: id routing, optional body kind/lang
+/// override, action enqueue, wake. `skip` passes no body and no wake.
+async fn id_action(
+    s: &Arc<AppState>,
+    headers: HeaderMap,
+    raw: &str,
+    body: &Option<Json<Value>>,
+    typ: &str,
+    wake: bool,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authed_state(s, headers).await?;
+    let (id, path_kind) =
+        parse_episode_id(raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
+    let (kind, lang) = body_kind_lang(body, path_kind);
+    enqueue_action(&s.cfg, typ, id, &kind, lang)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
+    if wake {
+        s.wake.notify_one();
+    }
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn h_retry(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(raw): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
-    let (id, path_kind) =
-        parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
-    let (kind, lang) = body_kind_lang(&body, path_kind);
-    enqueue_action(&s.cfg, "retry", id, &kind, lang)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
-    s.wake.notify_one();
-    Ok(Json(json!({"ok": true})))
+    id_action(&s, headers, &raw, &body, "retry", true).await
 }
 
 async fn h_skip(
@@ -459,12 +475,7 @@ async fn h_skip(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
-    let (id, path_kind) =
-        parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
-    enqueue_action(&s.cfg, "skip", id, path_kind, None)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
-    Ok(Json(json!({"ok": true})))
+    id_action(&s, headers, &raw, &None, "skip", false).await
 }
 
 async fn h_delete(
@@ -473,14 +484,7 @@ async fn h_delete(
     Path(raw): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
-    let (id, path_kind) =
-        parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
-    let (kind, lang) = body_kind_lang(&body, path_kind);
-    enqueue_action(&s.cfg, "delete", id, &kind, lang)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))))?;
-    s.wake.notify_one();
-    Ok(Json(json!({"ok": true})))
+    id_action(&s, headers, &raw, &body, "delete", true).await
 }
 
 async fn h_exclude(
@@ -488,7 +492,7 @@ async fn h_exclude(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     let (id, _) =
         parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     let rec =
@@ -507,7 +511,7 @@ async fn h_unexclude(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed(State(s.clone()), headers).await?;
+    authed_state(&s, headers).await?;
     let (id, _) =
         parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     #[derive(serde::Deserialize, serde::Serialize)]

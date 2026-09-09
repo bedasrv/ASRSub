@@ -129,10 +129,7 @@ async fn post_chat_once(
     if code != 200 {
         let body = resp.text().await.unwrap_or_default();
         pool.record_failure(idx);
-        anyhow::bail!(
-            "llm HTTP {code}: {}",
-            body.chars().take(200).collect::<String>()
-        );
+        anyhow::bail!("llm HTTP {code}: {}", crate::srt::snippet(&body));
     }
     let parsed: ChatResp = resp.json().await?;
     pool.record_success(idx);
@@ -176,8 +173,7 @@ async fn chat_across_providers(
 }
 
 fn echo_hit(text: &str) -> bool {
-    text.chars()
-        .any(|c| ('\u{3040}'..='\u{30ff}').contains(&c) || ('\u{3400}'..='\u{9fff}').contains(&c))
+    text.chars().any(crate::lang::is_cjk)
 }
 
 /// True when a translated line is one of the configured SDH placeholders

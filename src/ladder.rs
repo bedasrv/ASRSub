@@ -66,10 +66,7 @@ impl Pipeline {
                     continue;
                 }
                 // Strip a leading AI-marker cue so it is never translated.
-                let cues: Vec<Cue> = cues
-                    .into_iter()
-                    .filter(|c| !srt::has_ai_marker_text(&c.text))
-                    .collect();
+                let cues: Vec<Cue> = srt::strip_marker(cues);
                 if cues.is_empty() {
                     continue;
                 }
@@ -219,10 +216,7 @@ impl Pipeline {
             tracing::info!("ladder: jimaku direct: gate rejected ({tag})");
             return None;
         }
-        let cues: Vec<Cue> = cues
-            .into_iter()
-            .filter(|c| !srt::has_ai_marker_text(&c.text))
-            .collect();
+        let cues: Vec<Cue> = srt::strip_marker(cues);
         if cues.is_empty() {
             return None;
         }
@@ -261,10 +255,7 @@ impl Pipeline {
             let cjk: usize = cues
                 .iter()
                 .flat_map(|c| c.text.chars())
-                .filter(|c| {
-                    matches!(c,
-                    '\u{3040}'..='\u{30ff}' | '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
-                })
+                .filter(|c| crate::lang::is_cjk(*c))
                 .count();
             let total: usize = cues
                 .iter()

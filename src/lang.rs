@@ -20,6 +20,24 @@ pub fn normalize_lang(value: &str) -> String {
     }
 }
 
+/// Stem of a media/sidecar path: everything before the last `.`
+/// (`/m/ep.mkv` → `/m/ep`). No extension → the whole path.
+pub fn stem_of(path: &str) -> &str {
+    path.rsplit_once('.').map(|(s, _)| s).unwrap_or(path)
+}
+
+/// Hiragana/katakana block (`3040-30FF`), per the pipeline's long-standing
+/// convention shared by the srt guard, echo probe, and ladder gate.
+pub fn is_kana(c: char) -> bool {
+    ('\u{3040}'..='\u{30ff}').contains(&c)
+}
+
+/// Any CJK character (kana + `3400-4DBF` + `4E00-9FFF`): the single
+/// definition shared by the foreign-script guard (`srt`), the echo probe
+/// (`translate`), and the ladder adequacy gate.
+pub fn is_cjk(c: char) -> bool {
+    is_kana(c) || ('\u{3400}'..='\u{4dbf}').contains(&c) || ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
 /// Aliases carrying the same content for one canonical language.
 /// Unknown languages yield an empty slice (callers fall back to the
 /// normalized code itself).
@@ -34,15 +52,8 @@ pub fn sidecar_aliases(lang: &str) -> &'static [&'static str] {
 
 /// All on-disk sidecar candidates for `{stem}.{lang}[.hi|.forced...].srt`.
 pub fn sidecar_paths(stem: &str, lang: &str) -> Vec<String> {
-    // NB: the `_` fallback above returns a 'static slice but borrows `lang`;
-    // handle unknown languages without borrowing issues.
     let norm = normalize_lang(lang);
-    let aliases: &[&str] = match norm.as_str() {
-        "ja" => &["ja", "jpn", "jp"],
-        "id" => &["id", "ind"],
-        "en" => &["en", "eng", "enm"],
-        _ => &[],
-    };
+    let aliases = sidecar_aliases(&norm);
     if aliases.is_empty() {
         return ["", ".hi", ".forced", ".hi.forced", ".forced.hi"]
             .iter()
@@ -106,6 +117,15 @@ mod tests {
             canonical_target_sidecar("/m/ep.mkv-stem", "id"),
             "/m/ep.mkv-stem.id.hi.srt"
         );
+    }
+
+    #[test]
+    fn stem_and_cjk_helpers() {
+        assert_eq!(stem_of("/m/ep.mkv"), "/m/ep");
+        assert_eq!(stem_of("noext"), "noext");
+        assert!(is_kana('あ') && is_cjk('あ'));
+        assert!(is_cjk('漢') && !is_kana('漢'));
+        assert!(!is_cjk('a'));
     }
 
     #[test]

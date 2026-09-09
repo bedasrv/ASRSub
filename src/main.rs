@@ -307,11 +307,7 @@ async fn translate_file_cmd(
         },
     )
     .await?;
-    let out_cues: Vec<Cue> = cues
-        .iter()
-        .zip(lines.iter())
-        .map(|(c, t)| Cue::new(c.start_ms, c.end_ms, t.clone()))
-        .collect();
+    let out_cues: Vec<Cue> = srt::retime(&cues, &lines);
     let out_path = output
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| translate_output_path(input, target));
@@ -617,7 +613,7 @@ async fn extract_embedded(media: &str) -> Result<()> {
         .output()
         .await?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    let stem = media.rsplit_once('.').map(|(s, _)| s).unwrap_or(media);
+    let stem = lang::stem_of(media);
     for s in v
         .get("streams")
         .and_then(|x| x.as_array())

@@ -78,6 +78,34 @@ fn lock_for(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Create the ledger's parent dir (no-op for bare filenames).
+pub(crate) fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Open (creating) the `.lock` sidecar for read+write. Shared by the append
+/// and rewrite paths; the drain path stays best-effort (a missing ledger is
+/// not an error there).
+fn open_lock(path: &Path) -> Result<std::fs::File> {
+    let lock_path = lock_for(path);
+    // Ensure the lock file exists without truncating the ledger.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .with_context(|| format!("open lock {lock_path:?}"))?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open lock {lock_path:?}"))
+}
+
 /// Read JSONL dicts, skipping blank/garbage lines.
 pub fn load_jsonl<T>(path: &Path) -> Vec<T>
 where
@@ -103,22 +131,8 @@ pub fn append_jsonl<T>(path: &Path, value: &T) -> Result<()>
 where
     T: Serialize,
 {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let lock_path = lock_for(path);
-    // Ensure the lock file exists without truncating the ledger.
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lock_path)
-        .with_context(|| format!("open lock {lock_path:?}"))?;
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
+    ensure_parent(path)?;
+    let lock_file = open_lock(path)?;
     let mut guard = RwLock::new(lock_file);
     let _w = guard.write()?;
     let mut line = serde_json::to_string(value)?;
@@ -138,20 +152,8 @@ pub fn rewrite_jsonl<T>(path: &Path, rows: &[T]) -> Result<()>
 where
     T: Serialize,
 {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    let lock_path = lock_for(path);
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lock_path)?;
-    let lock_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
+    ensure_parent(path)?;
+    let lock_file = open_lock(path)?;
     let mut guard = RwLock::new(lock_file);
     let _w = guard.write()?;
     let tmp = path.with_extension("jsonl.tmp");

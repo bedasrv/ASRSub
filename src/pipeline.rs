@@ -349,7 +349,7 @@ impl Pipeline {
                 if !Path::new(&media).is_file() {
                     continue;
                 }
-                let stem = media.rsplit_once('.').map(|(s, _)| s).unwrap_or(&media);
+                let stem = crate::lang::stem_of(&media);
                 let mut missing = Vec::new();
                 for l in &self.cfg.target_langs {
                     if done.contains(&("movie".to_string(), rid, l.clone()))

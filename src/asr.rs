@@ -259,7 +259,7 @@ async fn whisper_request(
             last_err = format!(
                 "{}: HTTP {code}: {}",
                 wp.endpoint,
-                body.chars().take(200).collect::<String>()
+                crate::srt::snippet(&body)
             );
             continue;
         }

@@ -125,29 +125,29 @@ impl ProvidersFile {
     }
 }
 
+/// API key: embedded value wins, otherwise `$key_env` at call time so
+/// rotated keys apply without restart. Shared by LLM and Whisper entries.
+fn resolve_key(api_key: &str, key_env: &str) -> String {
+    if !api_key.is_empty() {
+        return api_key.to_string();
+    }
+    if !key_env.is_empty() {
+        return std::env::var(key_env).unwrap_or_default();
+    }
+    String::new()
+}
+
 impl LlmProvider {
     /// API key: embedded value wins, otherwise `$key_env` at call time so
     /// rotated keys apply without restart.
     pub fn api_key(&self) -> String {
-        if !self.api_key.is_empty() {
-            return self.api_key.clone();
-        }
-        if !self.key_env.is_empty() {
-            return std::env::var(&self.key_env).unwrap_or_default();
-        }
-        String::new()
+        resolve_key(&self.api_key, &self.key_env)
     }
 }
 
 impl WhisperProvider {
     pub fn api_key(&self) -> String {
-        if !self.api_key.is_empty() {
-            return self.api_key.clone();
-        }
-        if !self.key_env.is_empty() {
-            return std::env::var(&self.key_env).unwrap_or_default();
-        }
-        String::new()
+        resolve_key(&self.api_key, &self.key_env)
     }
 }
 

@@ -188,6 +188,46 @@ impl Bazarr {
         (&self.base, &self.key)
     }
 
+    /// Shared subtitle POST: multipart `sub.srt`, `forced=false&hi=true`.
+    /// `what` is `"episode"`/`"movie"` (log labels only).
+    async fn post_subtitles(
+        &self,
+        url: &str,
+        key: &str,
+        query: &[(&str, String)],
+        srt: Vec<u8>,
+        what: &str,
+    ) -> Result<Option<u16>> {
+        let form = reqwest::multipart::Form::new().part(
+            "file",
+            reqwest::multipart::Part::bytes(srt)
+                .file_name("sub.srt")
+                .mime_str("application/x-subrip")?,
+        );
+        let r = self
+            .http
+            .post(url)
+            .query(query)
+            .header("X-API-KEY", key)
+            .multipart(form)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await;
+        match r {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if code != 204 {
+                    tracing::warn!(code, "bazarr {what} upload non-204");
+                }
+                Ok(Some(code))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "bazarr {what} upload error");
+                Ok(None)
+            }
+        }
+    }
+
     /// Returns the HTTP status on success-path; retries 3x with backoff.
     /// A `204` means Bazarr accepted the bytes we just wrote to the
     /// canonical sidecar — no post-upload read-back: the sidecar on disk
@@ -212,40 +252,20 @@ impl Bazarr {
             return Ok(None);
         }
         let url = format!("{base}/episodes/subtitles");
-        let form = reqwest::multipart::Form::new().part(
-            "file",
-            reqwest::multipart::Part::bytes(srt)
-                .file_name("sub.srt")
-                .mime_str("application/x-subrip")?,
-        );
-        let r = self
-            .http
-            .post(&url)
-            .query(&[
+        self.post_subtitles(
+            &url,
+            key,
+            &[
                 ("seriesid", series_id.to_string()),
                 ("episodeid", episode_id.to_string()),
                 ("language", lang.clone()),
                 ("forced", "false".to_string()),
                 ("hi", "true".to_string()),
-            ])
-            .header("X-API-KEY", key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(120))
-            .send()
-            .await;
-        match r {
-            Ok(resp) => {
-                let code = resp.status().as_u16();
-                if code != 204 {
-                    tracing::warn!(code, "bazarr episode upload non-204");
-                }
-                Ok(Some(code))
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "bazarr episode upload error");
-                Ok(None)
-            }
-        }
+            ],
+            srt,
+            "episode",
+        )
+        .await
     }
 
     /// Single upload attempt (no retry loop — see `upload_episode`).
@@ -261,39 +281,19 @@ impl Bazarr {
             return Ok(None);
         }
         let url = format!("{base}/movies/subtitles");
-        let form = reqwest::multipart::Form::new().part(
-            "file",
-            reqwest::multipart::Part::bytes(srt)
-                .file_name("sub.srt")
-                .mime_str("application/x-subrip")?,
-        );
-        let r = self
-            .http
-            .post(&url)
-            .query(&[
+        self.post_subtitles(
+            &url,
+            key,
+            &[
                 ("radarrid", radarr_id.to_string()),
                 ("language", lang.clone()),
                 ("forced", "false".to_string()),
                 ("hi", "true".to_string()),
-            ])
-            .header("X-API-KEY", key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(120))
-            .send()
-            .await;
-        match r {
-            Ok(resp) => {
-                let code = resp.status().as_u16();
-                if code != 204 {
-                    tracing::warn!(code, "bazarr movie upload non-204");
-                }
-                Ok(Some(code))
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "bazarr movie upload error");
-                Ok(None)
-            }
-        }
+            ],
+            srt,
+            "movie",
+        )
+        .await
     }
 
     /// Best-effort: nudge Bazarr instances to run their "Search for Missing

@@ -131,7 +131,7 @@ impl Pipeline {
         }
         // Deletes first (files + registry + refresh), then retries (files +
         // registry + wanted refill so they re-enter `wanted` immediately).
-        for eid in sorted_keys(&delete) {
+        for eid in sorted_ids(delete.keys().copied()) {
             let (kinds, langs) = &delete[&eid];
             let lang_list = lang_scope(langs);
             if kinds.contains("series") {
@@ -144,7 +144,7 @@ impl Pipeline {
             }
             self.refresh_for_action(eid, kinds).await;
         }
-        for eid in sorted_keys(&retry) {
+        for eid in sorted_ids(retry.keys().copied()) {
             let (kinds, langs) = &retry[&eid];
             let lang_list = lang_scope(langs);
             if kinds.contains("series") {
@@ -156,7 +156,7 @@ impl Pipeline {
                 tracing::info!("action: retry movie {eid} (state cleared, {n} SRTs removed)");
             }
         }
-        for eid in sorted_set(&skip_ids) {
+        for eid in sorted_ids(skip_ids.iter().copied()) {
             tracing::info!("action: skip episode {eid} (excluded this pass)");
         }
         // Retry specs for same-pass reprocessing (resolved by `run_pass`):
@@ -164,7 +164,7 @@ impl Pipeline {
         // Skips/exclusions are applied at resolution, not here, so the
         // deletions above stay exactly as before.
         let mut specs = Vec::new();
-        for eid in sorted_keys(&retry) {
+        for eid in sorted_ids(retry.keys().copied()) {
             let (kinds, langs) = &retry[&eid];
             let mut kinds: Vec<&String> = kinds.iter().collect();
             kinds.sort();
@@ -217,98 +217,86 @@ impl Pipeline {
         }
     }
 
+    /// Remove `{stem}.{lang}` sidecars + registry rows + tmp copies for one
+    /// id. `media` is the mapped path when the lookup resolved to a file on
+    /// disk (`None`: tmp cleanup only). Shared by the series/movie deleters.
+    async fn remove_subtitles_for(&self, media: Option<&str>, id: i64, langs: &[String]) -> usize {
+        let mut removed = 0;
+        if let Some(media) = media {
+            let stem = crate::lang::stem_of(media);
+            for l in langs {
+                for cand in replaceable_target_sidecar_paths(stem, l) {
+                    if tokio::fs::remove_file(&cand).await.is_ok() {
+                        removed += 1;
+                    }
+                }
+                state::registry_delete(&self.cfg.registry_file, Some(stem), Some(id), l);
+            }
+        }
+        for l in langs {
+            let tmp = self.cfg.tmp_dir.join(format!("{id}_{l}.srt"));
+            if tokio::fs::remove_file(&tmp).await.is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Remove every `{stem}.{lang}[.hi].srt` variant + tmp copies for one
     /// series episode; drops matching registry rows; nudges Bazarr wanted.
     /// Returns the number of files removed. Never raises.
     async fn delete_episode_subtitles(&self, episode_id: i64, langs: Option<Vec<String>>) -> usize {
         let langs = self.target_langs_or(langs);
-        let mut removed = 0;
-        if let Ok(ep) = self.sonarr.episode(episode_id).await {
-            if let Some(p) = ep.episode_file.and_then(|f| f.path) {
-                let media = self.cfg.map_path(&p);
-                if Path::new(&media).is_file() {
-                    let stem = media.rsplit_once('.').map(|(s, _)| s).unwrap_or(&media);
-                    for l in &langs {
-                        for cand in replaceable_target_sidecar_paths(stem, l) {
-                            if tokio::fs::remove_file(&cand).await.is_ok() {
-                                removed += 1;
-                            }
-                        }
-                        state::registry_delete(
-                            &self.cfg.registry_file,
-                            Some(stem),
-                            Some(episode_id),
-                            l,
-                        );
-                    }
-                }
+        let media = match self.sonarr.episode(episode_id).await {
+            Ok(ep) => ep
+                .episode_file
+                .and_then(|f| f.path)
+                .map(|p| self.cfg.map_path(&p))
+                .filter(|m| Path::new(m).is_file()),
+            Err(_) => {
+                tracing::warn!(
+                    "action: delete: episode {episode_id} not in Sonarr; tmp cleanup only"
+                );
+                None
             }
-        } else {
-            tracing::warn!("action: delete: episode {episode_id} not in Sonarr; tmp cleanup only");
-        }
-        for l in &langs {
-            let tmp = self.cfg.tmp_dir.join(format!("{episode_id}_{l}.srt"));
-            if tokio::fs::remove_file(&tmp).await.is_ok() {
-                removed += 1;
-            }
-        }
+        };
+        let n = self
+            .remove_subtitles_for(media.as_deref(), episode_id, &langs)
+            .await;
         self.bazarr.wanted_refill("series").await;
-        removed
+        n
     }
 
     /// Movie counterpart of [`Pipeline::delete_episode_subtitles`] (path
     /// resolved via Bazarr/Radarr; movies are not in Sonarr).
     async fn delete_movie_subtitles(&self, movie_id: i64, langs: Option<Vec<String>>) -> usize {
         let langs = self.target_langs_or(langs);
-        let mut removed = 0;
-        if let Ok(movies) = self.bazarr.movies().await {
-            if let Some(m) = movies
+        let media = if let Ok(movies) = self.bazarr.movies().await {
+            movies
                 .iter()
                 .find(|m| m.get("radarrId").and_then(|v| v.as_i64()) == Some(movie_id))
-            {
-                if let Some(p) = m.get("path").and_then(|v| v.as_str()) {
-                    let media = self.cfg.map_path(p);
-                    if Path::new(&media).is_file() {
-                        let stem = media.rsplit_once('.').map(|(s, _)| s).unwrap_or(&media);
-                        for l in &langs {
-                            for cand in replaceable_target_sidecar_paths(stem, l) {
-                                if tokio::fs::remove_file(&cand).await.is_ok() {
-                                    removed += 1;
-                                }
-                            }
-                            state::registry_delete(
-                                &self.cfg.registry_file,
-                                Some(stem),
-                                Some(movie_id),
-                                l,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        for l in &langs {
-            let tmp = self.cfg.tmp_dir.join(format!("{movie_id}_{l}.srt"));
-            if tokio::fs::remove_file(&tmp).await.is_ok() {
-                removed += 1;
-            }
-        }
+                .and_then(|m| m.get("path").and_then(|v| v.as_str()))
+                .map(|p| self.cfg.map_path(p))
+                .filter(|m| Path::new(m).is_file())
+        } else {
+            None
+        };
+        let n = self
+            .remove_subtitles_for(media.as_deref(), movie_id, &langs)
+            .await;
         self.bazarr.wanted_refill("movie").await;
-        removed
+        n
     }
 }
 
-/// Sorted ids of an action group map (deterministic log/apply order).
-fn sorted_keys<V>(map: &std::collections::HashMap<i64, V>) -> Vec<i64> {
-    let mut ids: Vec<i64> = map.keys().copied().collect();
-    ids.sort_unstable();
-    ids
-}
-
-fn sorted_set(set: &std::collections::HashSet<i64>) -> Vec<i64> {
-    let mut ids: Vec<i64> = set.iter().copied().collect();
-    ids.sort_unstable();
-    ids
+/// Sorted ids of an action group map or set (deterministic log/apply order).
+fn sorted_ids<I>(ids: I) -> Vec<i64>
+where
+    I: IntoIterator<Item = i64>,
+{
+    let mut v: Vec<i64> = ids.into_iter().collect();
+    v.sort_unstable();
+    v
 }
 
 /// Language scope for a retry/delete group: `None` (null language present)

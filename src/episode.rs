@@ -98,11 +98,7 @@ impl Pipeline {
         if !Path::new(&media_path).is_file() {
             anyhow::bail!("media not on disk: {media_path}");
         }
-        let stem = media_path
-            .rsplit_once('.')
-            .map(|(s, _)| s)
-            .unwrap_or(&media_path)
-            .to_string();
+        let stem = crate::lang::stem_of(&media_path).to_string();
         // Single ffprobe for the episode: streams + duration together.
         let probe = asr::probe_media(&media_path).await?;
         let duration_s = probe.duration_s;
@@ -266,12 +262,7 @@ impl Pipeline {
         let lang = &w.lang;
         let cand = ctx.cand;
         // Assemble cues: translated text keeps SOURCE timing.
-        let out_cues: Vec<Cue> = w
-            .src_cues
-            .iter()
-            .zip(translated.iter())
-            .map(|(c, t)| Cue::new(c.start_ms, c.end_ms, t.clone()))
-            .collect();
+        let out_cues: Vec<Cue> = srt::retime(&w.src_cues, &translated);
         let mut merged = srt::cps_merge(
             out_cues,
             self.cfg.cps_merge_max,

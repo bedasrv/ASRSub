@@ -109,6 +109,17 @@ impl Jimaku {
         !self.key.is_empty()
     }
 
+    /// Rate-limit reset delay shared by the JSON and download paths (legacy
+    /// parity: the delay rides in the error message).
+    fn reset_after(headers: &reqwest::header::HeaderMap) -> String {
+        headers
+            .get("x-ratelimit-reset-after")
+            .or_else(|| headers.get("retry-after"))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
     fn auth(&self, b: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         b.header("Authorization", &self.key)
             .header("Accept", "application/json")
@@ -168,13 +179,7 @@ impl Jimaku {
             .with_context(|| format!("{what}: request failed"))?;
         let status = r.status();
         if status.as_u16() == 429 {
-            let reset_after = r
-                .headers()
-                .get("x-ratelimit-reset-after")
-                .or_else(|| r.headers().get("retry-after"))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
+            let reset_after = Self::reset_after(r.headers());
             anyhow::bail!("{what}: HTTP 429 rate limited reset_after={reset_after}");
         }
         let body = r
@@ -182,8 +187,7 @@ impl Jimaku {
             .await
             .with_context(|| format!("{what}: read body"))?;
         if !status.is_success() {
-            let snippet = String::from_utf8_lossy(&body);
-            let snippet = snippet.chars().take(200).collect::<String>();
+            let snippet = crate::srt::snippet(&String::from_utf8_lossy(&body));
             anyhow::bail!("{what}: HTTP {status}: {snippet}");
         }
         let v: serde_json::Value =
@@ -216,13 +220,7 @@ impl Jimaku {
             .await
             .context("jimaku download: request failed")?;
         if r.status().as_u16() == 429 {
-            let reset_after = r
-                .headers()
-                .get("x-ratelimit-reset-after")
-                .or_else(|| r.headers().get("retry-after"))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
+            let reset_after = Self::reset_after(r.headers());
             anyhow::bail!("jimaku download: HTTP 429 rate limited reset_after={reset_after}");
         }
         if let Err(e) = r.error_for_status_ref() {
