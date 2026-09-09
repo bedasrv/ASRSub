@@ -15,7 +15,9 @@ ENV HOME=/home/user DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub
 COPY --from=build /asrsub /usr/local/bin/asrsub
-COPY asrsub_providers.json /app/asrsub_providers.json
+# Provider template baked keyless: images never carry keys. At runtime leave
+# api_key empty and export the key_env vars (see docs/DEPLOY.md).
+COPY asrsub_providers.json.example /app/asrsub_providers.json
 COPY assets/dashboard.html /app/assets/dashboard.html
 WORKDIR /app
 USER asrsub

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Immutable release build — non-destructive, versioned, fail-closed.
 # Retains data mounts and never stops/removes containers, images, or builder cache.
-# Deployment is separate and explicit: see docs/DEPLOY.md or deploy.sh.
-# Emits a non-secret release descriptor (.release.env + release.json) for deploy.
+# Local/dev builds only: image pushes happen exclusively in CI
+# (.github/workflows/release.yml). Deployment is pull-based: set ASRSUB_IMAGE
+# to a GHCR tag and `docker compose pull && docker compose up -d --no-build`
+# (see docs/DEPLOY.md). Emits a non-secret release descriptor
+# (.release.env + release.json) for reference.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -21,11 +24,11 @@ if [[ ! "${GIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-IMAGE="asrsub:${GIT_SHA}"
+IMAGE="${ASRSUB_REGISTRY:-ghcr.io/bedasrv}/asrsub:${GIT_SHA}"
 RELEASE_ENV=".release.env"
 RELEASE_JSON="release.json"
 
-echo "==> Building immutable release ${IMAGE} (build-only, non-destructive)"
+echo "==> Building immutable release ${IMAGE} (build-only, non-destructive, no push)"
 echo "    - No 'docker compose down', no 'docker rmi', no 'builder prune', no 'up -d'"
 echo "    - Data mounts retained: /home/user/.config/asr-pipeline, /home/user/.cache/asr-pipeline, /mnt/nas/share/media"
 echo "    - Dashboard/orchestrator state conflict prevented: dashboard mounts config read-only (see docker-compose.yml)"
@@ -51,9 +54,9 @@ cat > "${RELEASE_JSON}" <<EOF
 EOF
 
 echo ""
-echo "==> Built ${IMAGE}"
+echo "==> Built ${IMAGE} (local only — CI owns GHCR pushes)"
 echo "    Release descriptor: ${RELEASE_ENV} and ${RELEASE_JSON} (non-secret, safe to commit in CI artifacts)"
 echo "    Contents:"
 cat "${RELEASE_ENV}"
 echo "    Inspect: docker images | grep asrsub"
-echo "    Deploy explicitly when ready: ASRSUB_IMAGE=${IMAGE} ./deploy.sh  OR  ./deploy.sh (loads ${RELEASE_ENV}) — see docs/DEPLOY.md (requires manual confirmation)"
+echo "    Deploy from GHCR when ready: ASRSUB_IMAGE=${IMAGE} docker compose pull && ASRSUB_IMAGE=${IMAGE} docker compose up -d --no-build — see docs/DEPLOY.md"

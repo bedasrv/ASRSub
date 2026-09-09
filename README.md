@@ -18,7 +18,8 @@ assets/         dashboard.html, served by the daemon at /
 asrsub_providers.json(.example)
                 Remote endpoints for Whisper STT + LLM translation
                 (live file untracked — copy the .example and fill keys)
-Dockerfile / docker-compose.yml / build.sh / deploy.sh / pctl
+Dockerfile / docker-compose.yml / build.sh / pctl / .github/workflows
+                 (CI gates; release workflow pushes GHCR SHA-tagged images)
 docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 (port checklist; the retired Python implementation was
                 deleted 2026-09-08 and removed from `main` 2026-09-09 —

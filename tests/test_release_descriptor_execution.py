@@ -1,4 +1,4 @@
-"""Release metadata execution tests — verify build emits correct descriptor and deploy fails closed."""
+"""Release metadata execution tests — verify build emits correct descriptor."""
 import os
 import json
 import re
@@ -11,7 +11,6 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 BUILD = REPO / "build.sh"
-DEPLOY = REPO / "deploy.sh"
 
 
 class TestReleaseDescriptorEmission(unittest.TestCase):
@@ -64,7 +63,7 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
         self.assertTrue(release_env.is_file(), msg=".release.env must be emitted")
         self.assertTrue(release_json.is_file(), msg="release.json must be emitted")
         env_text = release_env.read_text()
-        self.assertIn(f"ASRSUB_IMAGE=asrsub:{self.sha}", env_text)
+        self.assertIn(f"ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:{self.sha}", env_text)
         self.assertIn(f"GIT_SHA={self.sha}", env_text)
         self.assertRegex(env_text, r"BUILD_TIME=")
         # No secrets in descriptor
@@ -72,7 +71,7 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
             self.assertNotIn(secret, env_text)
         self.assertNotIn(secret, release_json.read_text())
         j = json.loads(release_json.read_text())
-        self.assertEqual(j["asrsub_image"], f"asrsub:{self.sha}")
+        self.assertEqual(j["asrsub_image"], f"ghcr.io/bedasrv/asrsub:{self.sha}")
         self.assertEqual(j["git_sha"], self.sha)
         self.assertIn("build_time", j)
 
@@ -85,31 +84,13 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, msg="build.sh must fail on short SHA")
         self.assertIn("40-char", result.stderr + result.stdout)
 
-    def test_deploy_fails_closed_without_ASRSUB_IMAGE(self):
-        # Deploy without image should exit non-zero before prompt
-        # Stub docker and secret file
-        tmp2 = tempfile.mkdtemp(prefix="asrsub-deploy-fail-")
-        try:
-            bin2 = os.path.join(tmp2, "bin")
-            os.makedirs(bin2, exist_ok=True)
-            docker_stub = os.path.join(bin2, "docker")
-            with open(docker_stub, "w") as fh:
-                fh.write("#!/usr/bin/env bash\nexit 0\n")
-            os.chmod(docker_stub, 0o755)
-            # Copy deploy.sh and compose stub
-            repo2 = os.path.join(tmp2, "repo")
-            os.makedirs(repo2, exist_ok=True)
-            shutil.copy2(DEPLOY, os.path.join(repo2, "deploy.sh"))
-            # Minimal compose file to avoid docker compose errors before ASRSUB_IMAGE check
-            # But deploy checks ASRSUB_IMAGE first, so no need
-            env = os.environ.copy()
-            env["PATH"] = bin2 + ":" + env.get("PATH", "")
-            # Ensure no .release.env
-            if (Path(repo2) / ".release.env").exists():
-                os.remove(Path(repo2) / ".release.env")
-            env.pop("ASRSUB_IMAGE", None)
-            result = subprocess.run(["bash", "deploy.sh"], cwd=repo2, env=env, capture_output=True, text=True, input="n\n")
-            self.assertNotEqual(result.returncode, 0, msg="deploy.sh must fail closed without ASRSUB_IMAGE")
-            self.assertRegex(result.stdout + result.stderr, r"ASRSUB_IMAGE.*must be set")
-        finally:
-            shutil.rmtree(tmp2, ignore_errors=True)
+    def test_build_registry_override(self):
+        # ASRSUB_REGISTRY redirects the tag (mirrors, forks) without
+        # touching the SHA-immutable scheme.
+        env = os.environ.copy()
+        env["PATH"] = self.bin_dir + ":" + env.get("PATH", "")
+        env["ASRSUB_REGISTRY"] = "example.com/x"
+        result = subprocess.run(["bash", "build.sh"], cwd=self.repo_dir, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, msg=f"build.sh failed: stdout={result.stdout} stderr={result.stderr}")
+        env_text = Path(self.repo_dir, ".release.env").read_text()
+        self.assertIn(f"ASRSUB_IMAGE=example.com/x/asrsub:{self.sha}", env_text)

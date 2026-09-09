@@ -4,7 +4,8 @@ Covers:
 - docker-compose.yml must use explicit ${ASRSUB_IMAGE:?} and must NOT contain build: or :latest fallback.
 - Secrets and all existing mounts/state must be preserved.
 - build.sh must build a full 40-char git-SHA tag and emit a non-secret release descriptor/env.
-- deploy.sh must require the explicit release image and use --no-build.
+- Release images come from CI into GHCR (full-SHA tags, no latest);
+  deploy is pull-based and deploy.sh is deleted.
 """
 import os
 import re
@@ -22,7 +23,6 @@ class TestComposeImmutableRelease(unittest.TestCase):
     def setUp(self):
         self.compose = COMPOSE.read_text(encoding="utf-8")
         self.build = BUILD.read_text(encoding="utf-8")
-        self.deploy = DEPLOY.read_text(encoding="utf-8")
         self.deploy_md = DEPLOY_MD.read_text(encoding="utf-8") if DEPLOY_MD.exists() else ""
 
     def test_compose_has_no_build_directive(self):
@@ -117,34 +117,38 @@ class TestBuildReleaseMetadata(unittest.TestCase):
         self.assertRegex(self.build, r"asrsub:\$\{?GIT_SHA", msg="build.sh must tag image as asrsub:${GIT_SHA}")
 
 
-class TestDeployRequiresExplicitImage(unittest.TestCase):
+class TestCICDGHCRContract(unittest.TestCase):
+    """Release path is CI-built GHCR images, pull-deployed; deploy.sh is gone."""
+
     def setUp(self):
-        self.deploy = DEPLOY.read_text(encoding="utf-8")
+        self.release = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+        self.ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.md = DEPLOY_MD.read_text(encoding="utf-8") if DEPLOY_MD.exists() else ""
 
-    def test_deploy_requires_ASRSUB_IMAGE_set(self):
-        self.assertIn("ASRSUB_IMAGE", self.deploy, msg="deploy.sh must reference ASRSUB_IMAGE")
-        # Fail-closed check: aborts if ASRSUB_IMAGE empty/unset.
-        self.assertRegex(self.deploy, r"ASRSUB_IMAGE.*:?-|ASRSUB_IMAGE.*\?|if.*ASRSUB_IMAGE|ASRSUB_IMAGE.*must be set|ASRSUB_IMAGE.*required", msg="deploy.sh must fail closed if ASRSUB_IMAGE is not set")
+    def test_deploy_script_removed_and_docs_describe_pull_flow(self):
+        self.assertFalse(DEPLOY.exists(), msg="deploy.sh is deleted; deploy is pull-based (see docs/DEPLOY.md)")
+        self.assertIn("ghcr.io", self.md, msg="DEPLOY.md must document the GHCR image")
+        self.assertIn("docker compose pull", self.md, msg="DEPLOY.md must document pull-based deploy")
 
-    def test_deploy_uses_no_build(self):
-        self.assertIn("--no-build", self.deploy, msg="deploy.sh must use 'docker compose ... --no-build' to avoid rebuilding mutable image")
+    def test_release_workflow_pushes_full_sha_tag_to_ghcr(self):
+        self.assertIn("ghcr.io/bedasrv/asrsub", self.release)
+        self.assertRegex(self.release, r"tags:\s*ghcr\.io/bedasrv/asrsub:\$\{\{\s*github\.sha\s*\}\}",
+                         msg="release must tag the full 40-char github.sha (immutable, no latest)")
+        self.assertIn("packages: write", self.release, msg="release needs packages:write (least privilege)")
+        self.assertIn("GITHUB_TOKEN", self.release, msg="GHCR auth via GITHUB_TOKEN, no long-lived PAT")
 
-    def test_deploy_does_not_implicitly_build(self):
-        # Must not run bare 'docker compose build' or 'docker compose up' without --no-build.
-        # Allow 'docker compose up -d --no-build' only.
-        # Check that every 'docker compose up' has --no-build.
-        for line in self.deploy.splitlines():
-            stripped = line.strip()
-            if "docker compose up" in stripped and not stripped.startswith("#"):
-                self.assertIn("--no-build", stripped, msg=f"deploy.sh 'up' must include --no-build: {stripped!r}")
+    def test_release_path_has_no_mutable_latest(self):
+        build = (REPO / "build.sh").read_text(encoding="utf-8")
+        for name, text in (("release.yml", self.release), ("build.sh", build)):
+            self.assertNotIn("asrsub:latest", text, msg=f"{name} must not reference mutable asrsub:latest")
 
-    def test_deploy_supports_release_env_file(self):
-        # Should load or reference the release env file emitted by build.sh.
-        self.assertRegex(self.deploy, r"\.release\.env|release\.env|ASRSUB_IMAGE", msg="deploy.sh must consume the release descriptor/env from build.sh")
+    def test_release_triggers_on_main(self):
+        self.assertRegex(self.release, r"(?s)on:.*?branches:\s*\[main\]",
+                         msg="release must trigger on pushes to main")
 
-    def test_deploy_preserves_secret_and_mount_checks(self):
-        self.assertIn("CONTROL_API_KEY_FILE_HOST", self.deploy, msg="deploy.sh must preserve secret file verification")
-        self.assertIn("/mnt/nas/share/media", self.deploy, msg="deploy.sh must preserve NFS mount check")
+    def test_ci_workflow_gates_on_tests(self):
+        for needle in ("cargo test", "clippy", "cargo fmt", "unittest"):
+            self.assertIn(needle, self.ci, msg=f"ci.yml must run {needle}")
 
 
 class TestDeployDocsMatch(unittest.TestCase):

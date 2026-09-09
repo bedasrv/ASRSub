@@ -22,8 +22,7 @@ authoritative contract for deployment and monitoring.
   env `CONTROL_API_KEY` is test fallback only).
 - `/api2/*` — Telemetry + episode actions (same auth rule for POSTs).
 
-There is **no `/ready` endpoint yet** (planned). `deploy.sh`'s `/ready`
-probe is best-effort and tolerates the 404; gate releases on `/health`
+There is **no `/ready` endpoint yet** (planned). Gate releases on `/health`
 plus `/status` instead:
 
 ```bash
@@ -93,7 +92,7 @@ curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/s
 
 - **No secret values** appear in health/readiness responses, logs, or dashboards. `CONTROL_API_KEY` is loaded from `/run/secrets/control_api_key` (or `CONTROL_API_KEY_FILE`); `pipeline.env` at `/home/user/.config/asr-pipeline/pipeline.env` holds non-control settings (BAZARR_URL, SONARR_URL, etc.) and is mounted as a volume, not injected as environment variables.
 - **Dashboard vs orchestrator**: Dashboard mounts the state volume read-only (`:ro`) to prevent unintended state writes. Both services share the immutable `${ASRSUB_IMAGE}` (`asrsub:<full-git-sha>`) image but use distinct commands; the compose file retains all data mounts and fails closed if `ASRSUB_IMAGE` is unset.
-- **Build vs deploy**: `build.sh` is build-only and immutable (`asrsub:<full-40-char-git-sha>` via `docker build`) and emits a non-secret release descriptor (`.release.env` / `release.json` with `ASRSUB_IMAGE`/`GIT_SHA`). It never runs `down`, `rmi`, or `builder prune` and never tags `latest`. Deployment is explicit via `deploy.sh` (requires `ASRSUB_IMAGE` and uses `--no-build`) or `DEPLOY.md`.
+- **Build vs deploy**: images are built by CI and pushed to GHCR as immutable `ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (`build.sh` is local/dev builds only and never pushes); deploy pulls an explicit tag (`docker compose pull`, then `up -d --no-build`). The compose file fails closed if `ASRSUB_IMAGE` is unset. Deployment detail lives in `DEPLOY.md`.
 - **Probes** (orchestrator `:8085`; dashboard replica on `:8080` serves the same):
   ```yaml
   healthcheck:
