@@ -1,5 +1,11 @@
 # ASRSub v2 — Parallel Track Contract (2026-08-07)
 
+> **Historical note (2026-09):** this plan governed the Python-era parallel
+> tracks (eval / rewrite / dashboard worktrees). The pipeline has since been
+> rewritten in Rust (`src/`, remote-only inference) and the repo reorganized
+> (`docs/`, `assets/`, `legacy/`). Kept as-is for provenance — the live
+> contracts are `README.md` and `docs/HEALTH.md`.
+
 Repo: `~/benchmark/pipeline` on PC (user@10.10.20.208), origin `bedasrv/ASRSub`.
 Base: `main` @ f7394af. Three parallel worktrees, each on its own branch, all
 merge into `main` when their track is done and verified.

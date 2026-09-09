@@ -1,3 +1,7 @@
+# Rust
+/target/
+**/*.rs.bk
+
 # Python
 __pycache__/
 *.py[cod]
@@ -11,12 +15,21 @@ env/
 .env
 *.env
 !*.env.example
+!.release.env
+!release.env
+!release.json
 pipeline.env
+# Live provider keys: copy asrsub_providers.json.example and fill in.
+# The real file must never be committed (purged from history 2026-09-08).
+asrsub_providers.json
+!asrsub_providers.json.example
 *.key
 *.pem
 
 # Runtime state & data
 *.lock
+# ...but keep the Rust dependency lockfile (binary crate: reproducible builds)
+!Cargo.lock
 state.jsonl
 state*.jsonl
 tmp/

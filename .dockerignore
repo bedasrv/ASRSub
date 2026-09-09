@@ -12,6 +12,7 @@ tmp/
 outputs/
 episodes/
 ground_truth/
-docker-compose.yml
-build.sh
-PLAN.md
+# Dev-only files, docs, and tests: not part of the Rust runtime image.
+docs/
+tests/
+*.log
