@@ -2,9 +2,11 @@
 
 > **Historical note (2026-09):** this plan governed the Python-era parallel
 > tracks (eval / rewrite / dashboard worktrees). The pipeline has since been
-> rewritten in Rust (`src/`, remote-only inference) and the repo reorganized
-> (`docs/`, `assets/`, `legacy/`). Kept as-is for provenance — the live
-> contracts are `README.md` and `docs/HEALTH.md`.
+> rewritten in Rust (`src/`, remote-only inference), the repo reorganized
+> (`docs/`, `assets/`), the pre-rewrite Python deleted (rewrite branch
+> `legacy/` 2026-09-08, `main` 2026-09-09 — which now carries the Rust
+> tree), and the parallel branches closed. Kept as-is for provenance —
+> the live contracts are `README.md` and `docs/HEALTH.md`.
 
 Repo: `~/benchmark/pipeline` on PC (user@10.10.20.208), origin `bedasrv/ASRSub`.
 Base: `main` @ f7394af. Three parallel worktrees, each on its own branch, all

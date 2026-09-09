@@ -21,16 +21,16 @@ asrsub_providers.json(.example)
 Dockerfile / docker-compose.yml / build.sh / deploy.sh / pctl
 docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 (port checklist; the retired Python implementation was
-                deleted 2026-09-08 after all 20 rows cleared — rollback is
-                redeploying the previous SHA image per docs/DEPLOY.md;
-                reference code survives in git history)
+                deleted 2026-09-08 and removed from `main` 2026-09-09 —
+                rollback is redeploying the previous SHA image per
+                docs/DEPLOY.md; reference code survives in git history)
 ```
 
 ## Quickstart
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 35 unit + 4 integration (offline simulation incl.)
+cargo test                     # 72 unit + 4 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt

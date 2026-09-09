@@ -1,19 +1,22 @@
 # Rust port parity checklist
 
-**Question this answers:** when is `legacy/` safe to delete?
+**Question this answers:** when is the pre-rewrite Python safe to delete?
 **Answer:** the checklist is complete (2026-09-08) — every row is COVERED,
-DIVERGED-with-rationale, or explicitly waived. The `legacy/` working-tree
-copy was deleted the same day (criterion met); the two release-contract
-suites were relocated to `tests/` and stay green. Reference code survives
-in git history (`git show <sha>:legacy/...`); this file preserves the
-*decisions*.
+DIVERGED-with-rationale, or explicitly waived. The rewrite-branch `legacy/`
+copy was deleted the same day (criterion met); the remaining Python on
+`main` was removed 2026-09-09 when the Rust tree landed there. The two
+release-contract suites were relocated to `tests/` and stay green.
+Reference code survives in git history (`main` history holds the old
+root-level files, e.g. `git show <sha>:orchestrator.py`; the `legacy/`
+tree survives on the `backup/pc-208-20260907` branch); this file preserves
+the *decisions*.
 
 ## Method
 
 - Legacy oracle: `legacy/tests/` (45 files, ~293 cases) + `legacy/pipeline/dry_tests.py`
   (109 cases) ≈ **~400 pinned behaviors**, inventoried 2026-09-08.
-- Rust coverage: 69 unit `#[test]` + 1 `#[tokio::test]` sim (40+ asserts across
-  phases A–G) + 4 binary-boundary integration tests + 21 stdlib-unittest
+- Rust coverage: 72 unit `#[test]` (incl. the full-program sim, 40+ asserts
+  across phases A–G) + 4 binary-boundary integration tests + 21 stdlib-unittest
   release-contract cases.
 - Each row maps one legacy behavior area to its Rust status. Live contracts
   remain `README.md` + `docs/HEALTH.md`; `docs/PLAN.md` is provenance only.
@@ -44,7 +47,7 @@ in git history (`git show <sha>:legacy/...`); this file preserves the
 | 10 | Translation guards/stitch/fallback/source-language | lirik_fix (4), source-language (5), dry_tests merge/echo/tail/per-line (~8) | `src/translate.rs` (6): guards, stitch order/oversize, prompt source pin, empty-on-persistent-failure | COVERED | Resolved 2026-09-08. `display_source_lang` extracted (ladder/ASR domain is exactly ja/en, so the mapping is exact, now pinned). "Fallback preserves source language" meant the `source_lang` parameter propagates through per-line retries (pinned), with `""` output on persistent failure (pinned) — not source-text output. |
 | 11 | ASR track selection + embedded sweep roots | `test_embedded_target_languages` (5), `test_embedded_srt_sweep_root` (4) | `src/asr.rs` (3); webhook `extract_embedded` + `map_path` pinned; sweep-root chain waived (no sweep feature — webhook paths are sender-provided, `map_path` is the only mapping) | COVERED | Resolved 2026-09-08. Embedded-adoption semantics (canonical outputs, no false missing) hold via `sidecar_exists` replaceable variants, pinned in row 5. |
 | 12 | Control API semantics (stale-done, false positives, wanted/library) | stale_done (2), false_positive_paths (3), source_target_registry (1), dry_tests status/library/activity (~8) | Fixed + pinned: `discover` verifies done rows against registry targets on disk (`verified_targets`, unit-tested) for series AND movies — feeds run_pass, wanted, and library together; sim Phase F proves stale-done self-heals end-to-end; Bazarr alias normalization pinned (`missing_of` test) | COVERED | Resolved 2026-09-08. Late-marker pathless-row guard waived: nothing reads the registry for claim decisions (provenance display only), so there is no claim path for a marker to hijack — marker handling is cue-level and tested. |
-| 13 | Actions retry/skip round-trip | action_normalization (1), dry_tests actions/state (~8) | Consume unit test + sim Phase C | COVERED | Closest to full. Remaining: language-scoped delete via actions. |
+| 13 | Actions retry/skip round-trip | action_normalization (1), dry_tests actions/state (~8) | Consume unit test + sim Phase C | COVERED | Language scoping (`null` = whole episode, else explicit list) applies to both retry and delete; retries additionally reprocess inline the same pass (resolved from Sonarr/Radarr, skips/exclusions win). |
 | 14 | In-memory job queue | `test_job_registry` (9) | No counterpart: loop daemon uses semaphores; dashboard queue widgets degrade gracefully (`data.queue \|\| {}`, empty job list); `current` shows the in-flight pass | DIVERGED | Resolved 2026-09-08. Rationale: the queue existed to schedule webhook workers; with wake+extract inline there is nothing to schedule. |
 | 15 | Readiness (media check → not-ready) | `test_readiness` (1) | Adapted: `/status` now carries additive `media_ok` (NAS root present), pinned by a wiring test — a dead mount no longer looks like "idle" | COVERED | Resolved 2026-09-08. Full btrfs/ledger/paused-boot gates belonged to the retired Python boot (no paused boot, no ledger DB here); container healthcheck still hits `/health`. |
 | 16 | Glossary v2/knowledge-block/cast | dry_tests glossary/knowledge/cast (~5) | `src/glossary.rs` (3): flat-map migration, few-match fallback, **knowledge-block rendering** (matched cast, aliases, kinds, empty-for-unknown) | COVERED | Resolved 2026-09-08. |
@@ -64,12 +67,13 @@ in git history (`git show <sha>:legacy/...`); this file preserves the
 7. Rows 19, 14, 4-locking, 11-roots, 15, 16 — verify-and-waive or port. ✅ done 2026-09-08
 8. Rows 1, 8, 20 — sign-off decisions (release assertions, retime removal, eval strategy). ✅ done 2026-09-08
 
-## Deletion criterion for `legacy/` — MET 2026-09-08, deleted same day
+## Deletion criterion for the pre-rewrite Python — MET 2026-09-08, deleted same day; `main` cleared 2026-09-09
 
 ~~Delete the working-tree copy when~~ every row above is COVERED,
 DIVERGED-with-rationale, or explicitly waived — and the waivers are recorded
-in this file. Git history preserves the code regardless (`git show
-<sha>:legacy/orchestrator.py`); this file preserves the *decisions*. The
+in this file. Git history preserves the code regardless (`main` history
+holds the old root-level files; the `legacy/` tree is on the
+`backup/pc-208-20260907` branch); this file preserves the *decisions*. The
 release-contract oracle moved to `tests/test_immutable_release_contract.py`
 + `tests/test_release_descriptor_execution.py` (run: `python3 -m unittest
 tests.test_immutable_release_contract tests.test_release_descriptor_execution`).
