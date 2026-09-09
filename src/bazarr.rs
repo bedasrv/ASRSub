@@ -73,7 +73,22 @@ impl Bazarr {
                 r.error_for_status()?.json::<serde_json::Value>().await
             }
         };
-        let primary: serde_json::Value = fetch(&self.base, &self.key).await?;
+        // Primary + secondary profiles fetch concurrently (merge below is
+        // pure). On primary failure the secondary result is discarded with
+        // the same Err as before — one wasted LAN call on a path that was
+        // already failing.
+        let primary_fut = fetch(&self.base, &self.key);
+        let secondary_fut = async {
+            match self.base2.clone() {
+                Some(b2) => fetch(&b2, &self.key2).await.ok(),
+                None => None,
+            }
+        };
+        let (primary, extra): (
+            Result<serde_json::Value, reqwest::Error>,
+            Option<serde_json::Value>,
+        ) = tokio::join!(primary_fut, secondary_fut);
+        let primary = primary?;
         // Merge secondary profile (id/en) missing langs by episode id.
         let mut by_id: std::collections::HashMap<i64, serde_json::Value> = Default::default();
         for it in primary
@@ -86,46 +101,44 @@ impl Bazarr {
                 by_id.insert(eid, it);
             }
         }
-        if let (Some(b2),) = (self.base2.clone(),) {
-            if let Ok(extra) = fetch(&b2, &self.key2).await {
-                for it in extra
-                    .get("data")
-                    .and_then(|d| d.as_array())
-                    .cloned()
-                    .unwrap_or_default()
-                {
-                    let Some(eid) = it.get("sonarrEpisodeId").and_then(|v| v.as_i64()) else {
-                        continue;
-                    };
-                    match by_id.get_mut(&eid) {
-                        None => {
-                            by_id.insert(eid, it);
-                        }
-                        Some(prev) => {
-                            let mut have: std::collections::HashSet<String> =
-                                Self::missing_of(prev).into_iter().collect();
-                            let mut merged = prev
-                                .get("missing_subtitles")
-                                .and_then(|m| m.as_array())
-                                .cloned()
-                                .unwrap_or_default();
-                            for m in it
-                                .get("missing_subtitles")
-                                .and_then(|m| m.as_array())
-                                .cloned()
-                                .unwrap_or_default()
-                            {
-                                if let Some(c) = m.get("code2").and_then(|v| v.as_str()) {
-                                    let c = crate::lang::normalize_lang(c);
-                                    if have.insert(c.clone()) {
-                                        let mut m = m.clone();
-                                        m["code2"] = serde_json::Value::String(c);
-                                        merged.push(m);
-                                    }
+        if let Some(extra) = extra {
+            for it in extra
+                .get("data")
+                .and_then(|d| d.as_array())
+                .cloned()
+                .unwrap_or_default()
+            {
+                let Some(eid) = it.get("sonarrEpisodeId").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                match by_id.get_mut(&eid) {
+                    None => {
+                        by_id.insert(eid, it);
+                    }
+                    Some(prev) => {
+                        let mut have: std::collections::HashSet<String> =
+                            Self::missing_of(prev).into_iter().collect();
+                        let mut merged = prev
+                            .get("missing_subtitles")
+                            .and_then(|m| m.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        for m in it
+                            .get("missing_subtitles")
+                            .and_then(|m| m.as_array())
+                            .cloned()
+                            .unwrap_or_default()
+                        {
+                            if let Some(c) = m.get("code2").and_then(|v| v.as_str()) {
+                                let c = crate::lang::normalize_lang(c);
+                                if have.insert(c.clone()) {
+                                    let mut m = m.clone();
+                                    m["code2"] = serde_json::Value::String(c);
+                                    merged.push(m);
                                 }
                             }
-                            prev["missing_subtitles"] = serde_json::Value::Array(merged);
                         }
+                        prev["missing_subtitles"] = serde_json::Value::Array(merged);
                     }
                 }
             }
@@ -296,15 +309,20 @@ impl Bazarr {
         if let Some(b2) = self.base2.clone() {
             targets.push((b2, self.key2.clone()));
         }
+        // Both instances concurrently; logging per target is unchanged.
+        let mut jobs = Vec::with_capacity(targets.len());
         for (base, key) in targets {
-            let r = self
-                .http
-                .post(format!("{base}/system/tasks"))
-                .query(&[("taskid", job)])
-                .header("X-API-KEY", key)
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await;
+            let http = self.http.clone();
+            jobs.push(async move {
+                http.post(format!("{base}/system/tasks"))
+                    .query(&[("taskid", job)])
+                    .header("X-API-KEY", key)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+            });
+        }
+        for r in futures::future::join_all(jobs).await {
             match r {
                 Ok(resp) => tracing::info!(
                     task = job,

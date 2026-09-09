@@ -124,7 +124,10 @@ impl Pipeline {
     /// before the `MAX_EPS_PER_RUN` cap is applied.
     pub async fn run_pass(&self) -> PassStats {
         let skip_ids = self.consume_actions().await;
-        let candidates = self.discover(&skip_ids).await;
+        // Discover (Bazarr) and series titles (Sonarr) are independent:
+        // fire together, latency is the max, not the sum.
+        let (candidates, titles) =
+            tokio::join!(self.discover(&skip_ids), self.sonarr.series_titles());
         let mut stats = PassStats {
             scanned: candidates.len(),
             ..Default::default()
@@ -137,9 +140,6 @@ impl Pipeline {
         if caps.is_empty() {
             return stats;
         }
-        // Series titles once per pass, not once per episode (same endpoint,
-        // same answer seconds apart).
-        let titles = self.sonarr.series_titles().await;
         let sem = Arc::new(Semaphore::new(self.cfg.episode_concurrency.max(1)));
         let mut jobs = Vec::with_capacity(caps.len());
         for cand in caps {
