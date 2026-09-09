@@ -39,6 +39,8 @@ pub struct AudioChoice {
 pub struct MediaProbe {
     pub streams: Vec<AudioStream>,
     pub duration_s: Option<f64>,
+    /// Container bit rate (b/s) for audio-size estimation; often absent.
+    pub bit_rate: Option<u64>,
 }
 
 pub async fn probe_media(path: &str) -> Result<MediaProbe> {
@@ -47,7 +49,7 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
             "-v",
             "error",
             "-show_entries",
-            "stream=index,codec_name,codec_type:stream_tags=language:format=duration",
+            "stream=index,codec_name,codec_type:stream_tags=language:format=duration,bit_rate",
             "-of",
             "json",
             path,
@@ -83,17 +85,20 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
         .and_then(|f| f.get("duration"))
         .and_then(|d| d.as_str())
         .and_then(|d| d.parse().ok());
+    let bit_rate = v
+        .get("format")
+        .and_then(|f| f.get("bit_rate"))
+        .and_then(|b| {
+            b.as_str()
+                .and_then(|s| s.parse().ok())
+                .or_else(|| b.as_u64())
+        });
     Ok(MediaProbe {
         streams,
         duration_s,
+        bit_rate,
     })
 }
-/// Streams-only view for single-shot callers (transcribe CLI); the episode
-/// pass uses `probe_media` to also get the duration from the same spawn.
-pub async fn probe_audio(path: &str) -> Result<Vec<AudioStream>> {
-    Ok(probe_media(path).await?.streams)
-}
-
 /// Source-track choice, mirroring `choose_source` in orchestrator.py.
 ///
 /// Called once per target language: an `en` target with an English-tagged
@@ -306,39 +311,42 @@ fn cues_from_verbose(v: &serde_json::Value, offset_ms: u32) -> Vec<Cue> {
     cues
 }
 
-/// Duration via ffprobe (seconds), None on failure.
-pub async fn media_duration_s(path: &str) -> Option<f64> {
-    let out = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "json",
-            path,
-        ])
-        .output()
-        .await
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("format")?.get("duration")?.as_str()?.parse().ok()
-}
-
 /// Full ASR for one episode: extract -> (chunked) remote transcribe ->
 /// contiguous `<=max_cue_ms` cues. Temp audio is removed on every path,
 /// including transcription failures (a `Drop` guard owns the cleanup, not
 /// the tail). `fanout` bounds concurrent piece transcriptions (the shared
 /// whisper semaphore + breaker apply on top).
-pub async fn transcribe_episode(
-    pool: &ProviderPool,
-    tmp_dir: &Path,
-    media_path: &str,
-    choice: &AudioChoice,
-    episode_key: &str,
-    fanout: usize,
-    max_cue_ms: u32,
-) -> Result<Vec<Cue>> {
+///
+/// Routing avoids a wasted full transcode: when the probe already shows
+/// the audio exceeds `CHUNK_BYTES`, pieces split straight from the media
+/// (the full.mp3 extract would be transcoded and deleted unused). The
+/// estimate only ever skips work that is provably redundant — unknown or
+/// borderline sizes take the old extract-then-measure path, and the chunk
+/// layout uses the probed duration (no third ffprobe).
+pub struct TranscribeJob<'a> {
+    pub tmp_dir: &'a Path,
+    pub media_path: &'a str,
+    pub choice: &'a AudioChoice,
+    pub episode_key: &'a str,
+    /// Probed container duration (piece layout; 1 h fallback like before).
+    pub duration_s: Option<f64>,
+    /// Estimated audio bytes from the probe (chunk routing; None measures).
+    pub audio_bytes: Option<u64>,
+    pub fanout: usize,
+    pub max_cue_ms: u32,
+}
+
+/// Estimated audio bytes from probe facts; None when unknowable. Pure and
+/// unit-tested: the estimate routes, never decides correctness.
+pub fn est_audio_bytes(duration_s: Option<f64>, bit_rate: Option<u64>) -> Option<u64> {
+    let dur = duration_s.filter(|d| *d > 0.0)?;
+    let rate = bit_rate.filter(|b| *b > 0)?;
+    Some((dur * rate as f64 / 8.0) as u64)
+}
+
+pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> Result<Vec<Cue>> {
+    let (tmp_dir, media_path, choice, episode_key) =
+        (job.tmp_dir, job.media_path, job.choice, job.episode_key);
     let base = tmp_dir.join(format!("asr-{episode_key}"));
     tokio::fs::create_dir_all(&base).await?;
     // Scope guard: best-effort temp cleanup even when `?` early-returns.
@@ -350,18 +358,55 @@ pub async fn transcribe_episode(
     }
     let _cleanup = TempDir(&base);
     let full = base.join("full.mp3");
-    extract_audio(media_path, choice.stream_index, &full).await?;
-    let size = tokio::fs::metadata(&full)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let mut cues = if size <= CHUNK_BYTES {
-        transcribe_file(pool, &full, &choice.asr_lang).await?
+    // Skip the full extract when the probe already proves chunking: the
+    // extract would be transcoded and deleted without ever being read.
+    let mut cues = if !job.audio_bytes.is_some_and(|b| b > CHUNK_BYTES) {
+        extract_audio(media_path, choice.stream_index, &full).await?;
+        let size = tokio::fs::metadata(&full)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if size <= CHUNK_BYTES {
+            transcribe_file(pool, &full, &choice.asr_lang).await?
+        } else {
+            transcribe_pieces(
+                pool,
+                &base,
+                media_path,
+                choice,
+                job.duration_s.unwrap_or(3600.0),
+                job.fanout,
+            )
+            .await?
+        }
     } else {
-        // Split by duration into ~10 min pieces, at most 24. ffmpeg splits
-        // run under a small semaphore (disk/CPU bound); transcription of the
-        // pieces goes through the shared whisper semaphore + breaker.
-        let dur = media_duration_s(media_path).await.unwrap_or(3600.0);
+        transcribe_pieces(
+            pool,
+            &base,
+            media_path,
+            choice,
+            job.duration_s.unwrap_or(3600.0),
+            job.fanout,
+        )
+        .await?
+    };
+    ensure_contiguous(&mut cues);
+    Ok(split_long_cues(cues, job.max_cue_ms))
+}
+
+/// Split-by-duration piece transcription shared by both routing paths.
+async fn transcribe_pieces(
+    pool: &ProviderPool,
+    base: &Path,
+    media_path: &str,
+    choice: &AudioChoice,
+    dur: f64,
+    fanout: usize,
+) -> Result<Vec<Cue>> {
+    // Split by duration into ~10 min pieces, at most 24. ffmpeg splits
+    // run under a small semaphore (disk/CPU bound); transcription of the
+    // pieces goes through the shared whisper semaphore + breaker.
+    {
         let piece = 600.0;
         let n = ((dur / piece).ceil() as usize).clamp(2, 24);
         let split_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
@@ -424,10 +469,8 @@ pub async fn transcribe_episode(
         for v in futures::future::try_join_all(tjobs).await? {
             all.extend(v);
         }
-        all
-    };
-    ensure_contiguous(&mut cues);
-    Ok(split_long_cues(cues, max_cue_ms))
+        Ok(all)
+    }
 }
 
 async fn transcribe_chunk(
@@ -480,5 +523,17 @@ mod tests {
     #[test]
     fn empty_streams_choose_nothing() {
         assert!(choose_source(&[], "id").is_none());
+    }
+
+    #[test]
+    fn size_estimate_routes_only_when_provable() {
+        // 24 MB threshold: provably-big skips the full extract, everything
+        // else measures (the estimate routes, never decides correctness).
+        assert!(est_audio_bytes(Some(3600.0), Some(64000)).unwrap() > 24 * 1024 * 1024);
+        assert!(est_audio_bytes(Some(300.0), Some(64000)).unwrap() < 24 * 1024 * 1024);
+        assert_eq!(est_audio_bytes(None, Some(64000)), None);
+        assert_eq!(est_audio_bytes(Some(300.0), None), None);
+        assert_eq!(est_audio_bytes(Some(0.0), Some(64000)), None);
+        assert_eq!(est_audio_bytes(Some(300.0), Some(0)), None);
     }
 }

@@ -230,8 +230,9 @@ async fn transcribe_cmd(
     stream: Option<u32>,
 ) -> Result<()> {
     let (cfg, pool, _) = load_stack(providers_file).await?;
-    let streams = asr::probe_audio(&input.to_string_lossy()).await?;
-    let mapped: Vec<asr::AudioStream> = streams;
+    let input_s = input.to_string_lossy().to_string();
+    let probe = asr::probe_media(&input_s).await?;
+    let mapped: Vec<asr::AudioStream> = probe.streams;
     let choice = match stream {
         Some(i) => asr::AudioChoice {
             stream_index: i,
@@ -243,12 +244,16 @@ async fn transcribe_cmd(
     let key = format!("cli-{}", std::process::id());
     let cues = asr::transcribe_episode(
         &pool,
-        &cfg.tmp_dir,
-        &input.to_string_lossy(),
-        &choice,
-        &key,
-        cfg.asr_concurrency,
-        cfg.max_cue_ms,
+        asr::TranscribeJob {
+            tmp_dir: &cfg.tmp_dir,
+            media_path: &input_s,
+            choice: &choice,
+            episode_key: &key,
+            duration_s: probe.duration_s,
+            audio_bytes: asr::est_audio_bytes(probe.duration_s, probe.bit_rate),
+            fanout: cfg.asr_concurrency,
+            max_cue_ms: cfg.max_cue_ms,
+        },
     )
     .await?;
     let out_path = output

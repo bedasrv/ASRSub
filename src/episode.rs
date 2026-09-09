@@ -158,12 +158,19 @@ impl Pipeline {
                             let key = format!("ep{}_{}", cand.episode_id, choice.asr_lang);
                             let fresh = asr::transcribe_episode(
                                 &self.pool,
-                                &self.cfg.tmp_dir,
-                                &media_path,
-                                &choice,
-                                &key,
-                                self.cfg.asr_concurrency,
-                                self.cfg.max_cue_ms,
+                                asr::TranscribeJob {
+                                    tmp_dir: &self.cfg.tmp_dir,
+                                    media_path: &media_path,
+                                    choice: &choice,
+                                    episode_key: &key,
+                                    duration_s: probe.duration_s,
+                                    audio_bytes: asr::est_audio_bytes(
+                                        probe.duration_s,
+                                        probe.bit_rate,
+                                    ),
+                                    fanout: self.cfg.asr_concurrency,
+                                    max_cue_ms: self.cfg.max_cue_ms,
+                                },
                             )
                             .await?;
                             asr_cache.insert(choice.asr_lang.clone(), fresh.clone());
