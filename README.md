@@ -31,7 +31,9 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
 cargo test                     # 72 unit + 4 integration (offline simulation incl.)
-asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
+python3 -m unittest tests.test_immutable_release_contract tests.test_release_descriptor_execution
+asrsub daemon                  # self-looping daemon (also the default with no subcommand;
+                               # control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
 asrsub translate-file -i EP.ja.srt -t id
@@ -56,6 +58,11 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | `ASR_CONCURRENCY` / `TRANSLATE_CONCURRENCY` / `UPLOAD_CONCURRENCY` | Stage fan-outs |
 | `TRANSLATE_CHUNK` | Lines per LLM request (default 10) |
 | `MAX_CUE_MS` | Max cue duration in ms (default 8000) |
+| `WEBHOOK_PORT` | Control API port (default 8085) |
+| `LLM_TIMEOUT_S` / `WHISPER_TIMEOUT_S` | Per-attempt deadlines, clamped (LLM 30–900, default 300; Whisper 60–1800, default 600) |
+| `JIMAKU_TIMEOUT` / `ANILIST_TIMEOUT` | Jimaku API / AniList deadlines in s (default 30/30) |
+| `AI_MARKER_CUE` / `AI_MARKER_CUE_MS` | Provenance first-cue on/off + length (default on/1500 ms) |
+| `GLOSSARY_FILE` | Series-term knowledge for translation prompts |
 | `PROVIDERS_FILE` | Path to `asrsub_providers.json` |
 | `CONTROL_API_KEY_FILE` | Control-token secret (`/run/secrets/control_api_key` in compose) |
 
