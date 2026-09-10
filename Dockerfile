@@ -1,18 +1,21 @@
 # asrsub (Rust): remote-API subtitle pipeline — no local models, no GPU.
 # Multi-stage: build static-ish release binary, ship ffmpeg + ca-certs only.
-# RUST_VERSION must satisfy Cargo.toml's rust-version (deps in Cargo.lock
-# require >= 1.88); keep it in sync or the CI `docker` job fails.
+# RUST_VERSION must satisfy Cargo.toml's rust-version; keep it in sync or
+# the CI `docker` job fails.
+# cmake is a build-time-only dep of aws-lc-rs (reqwest 0.13 rustls provider).
 ARG RUST_VERSION=1.98
-FROM rust:${RUST_VERSION}-slim-bookworm AS build
+FROM rust:${RUST_VERSION}-slim-trixie AS build
 WORKDIR /build
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates gcc libc6-dev cmake \
+    && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release && cp target/release/asrsub /asrsub
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 ENV HOME=/home/user DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1000 asrsub && useradd -m -u 1000 -g 1000 -d /home/user asrsub

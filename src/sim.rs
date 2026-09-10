@@ -185,7 +185,7 @@ async fn whisper_broken(State(cx): State<StubCx>, _body: Bytes) -> impl IntoResp
 
 fn router(cx: StubCx) -> axum::Router {
     axum::Router::new()
-        .route("/episode/:id", get(sonarr_episode))
+        .route("/episode/{id}", get(sonarr_episode))
         .route("/series", get(sonarr_series))
         .route("/episodes/wanted", get(bazarr_wanted))
         .route("/movies", get(bazarr_movies))
