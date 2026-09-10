@@ -48,8 +48,13 @@ The dashboard UI (`assets/dashboard.html`) is served by the daemon itself.
 ## Build (CI-owned, immutable, versioned)
 
 Every push to `main` triggers `.github/workflows/release.yml`: it builds
-the image and pushes `ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>`,
-emitting the non-secret release descriptor as a workflow artifact
+the image and pushes **two tags** to GHCR:
+`ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (immutable, authoritative)
+and `ghcr.io/bedasrv/asrsub:latest` (a convenience alias tracking the
+newest `main` build, so public pulls get the current Rust image — it
+previously held the retired Python image). Production must still pin the
+SHA tag; compose requires an explicit `${ASRSUB_IMAGE}`. The workflow
+emits the non-secret release descriptor as an artifact
 (`release.json`: `asrsub_image` / `git_sha` / `build_time` — no secrets).
 
 `build.sh` remains for local/dev builds only: it tags the same

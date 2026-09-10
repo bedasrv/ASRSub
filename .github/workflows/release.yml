@@ -1,8 +1,12 @@
 name: Release
 
-# The only path that publishes images. Every push to main builds one
-# immutable image tagged with the full 40-char git SHA and pushes it to
-# GHCR. No mutable `latest` tag exists by design (see docs/DEPLOY.md).
+# The only path that publishes images. Every push to main builds the image
+# once and pushes two tags to GHCR:
+#   * ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>  — immutable, authoritative
+#   * ghcr.io/bedasrv/asrsub:latest                  — convenience alias for
+#     the newest main build (so public pulls get the current Rust image)
+# Production deploys must still pin the immutable SHA: docker-compose.yml
+# requires an explicit ${ASRSUB_IMAGE} and never falls back to `latest`.
 # NOTE: the image name is hardcoded lowercase — github.repository would
 # expand to bedasrv/ASRSub, which GHCR rejects (must be lowercase).
 
@@ -35,7 +39,9 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/bedasrv/asrsub:${{ github.sha }}
+          tags: |
+            ghcr.io/bedasrv/asrsub:${{ github.sha }}
+            ghcr.io/bedasrv/asrsub:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Emit non-secret release descriptor

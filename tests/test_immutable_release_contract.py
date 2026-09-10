@@ -132,15 +132,23 @@ class TestCICDGHCRContract(unittest.TestCase):
 
     def test_release_workflow_pushes_full_sha_tag_to_ghcr(self):
         self.assertIn("ghcr.io/bedasrv/asrsub", self.release)
-        self.assertRegex(self.release, r"tags:\s*ghcr\.io/bedasrv/asrsub:\$\{\{\s*github\.sha\s*\}\}",
-                         msg="release must tag the full 40-char github.sha (immutable, no latest)")
+        # The full 40-char SHA tag is the authoritative immutable release tag.
+        self.assertRegex(self.release, r"ghcr\.io/bedasrv/asrsub:\$\{\{\s*github\.sha\s*\}\}",
+                         msg="release must push the full 40-char github.sha tag")
         self.assertIn("packages: write", self.release, msg="release needs packages:write (least privilege)")
         self.assertIn("GITHUB_TOKEN", self.release, msg="GHCR auth via GITHUB_TOKEN, no long-lived PAT")
 
-    def test_release_path_has_no_mutable_latest(self):
+    def test_release_publishes_latest_as_convenience_alias(self):
+        # `latest` must track main so public pulls get the current Rust
+        # image (it used to hold the retired Python image). The SHA tag
+        # stays the authoritative, immutable deploy target.
+        self.assertIn("ghcr.io/bedasrv/asrsub:latest", self.release)
+
+    def test_compose_and_build_never_use_latest(self):
         build = (REPO / "build.sh").read_text(encoding="utf-8")
-        for name, text in (("release.yml", self.release), ("build.sh", build)):
-            self.assertNotIn("asrsub:latest", text, msg=f"{name} must not reference mutable asrsub:latest")
+        compose = COMPOSE.read_text(encoding="utf-8")
+        for name, text in (("docker-compose.yml", compose), ("build.sh", build)):
+            self.assertNotIn("asrsub:latest", text, msg=f"{name} must not use mutable latest")
 
     def test_release_triggers_on_main(self):
         self.assertRegex(self.release, r"(?s)on:.*?branches:\s*\[main\]",
@@ -160,9 +168,15 @@ class TestDeployDocsMatch(unittest.TestCase):
         self.assertIn("--no-build", self.md, msg="DEPLOY.md must document --no-build")
 
     def test_docs_rollback_uses_previous_sha_not_latest(self):
-        # Rollback must use explicit SHA tag, not latest.
-        self.assertNotIn("asrsub:latest", self.md, msg="DEPLOY.md rollback must not use asrsub:latest")
-        self.assertRegex(self.md, r"asrsub:[0-9a-f]{7,40}|ASRSUB_IMAGE", msg="DEPLOY.md rollback must reference explicit SHA-tagged image")
+        # The Rollback section must pin an explicit previous SHA; no deploy
+        # command may target the moving latest alias.
+        section = self.md.split("## Rollback", 1)[1].split("\n## ", 1)[0] if "## Rollback" in self.md else ""
+        self.assertRegex(section, r"asrsub:<previous-40-char-sha>|ASRSUB_IMAGE",
+                         msg="rollback must pin an explicit previous SHA")
+        for line in section.splitlines():
+            if "docker compose" in line or line.strip().startswith("ASRSUB_IMAGE="):
+                self.assertNotRegex(line, r"asrsub:latest",
+                                    msg=f"rollback must not pin latest: {line!r}")
 
     def test_docs_describe_release_descriptor(self):
         self.assertRegex(self.md, r"\.release\.env|release\.env|release\.json|release descriptor", msg="DEPLOY.md must describe the release descriptor/env emitted by build.sh")
