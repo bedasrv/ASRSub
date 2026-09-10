@@ -34,6 +34,13 @@ impl Jellyfin {
         !self.key.is_empty() && !self.base.is_empty()
     }
 
+    /// Current Jellyfin authorization scheme. Jellyfin 12 rejects the
+    /// deprecated `X-Emby-Token` header with HTTP 401; the API key must be
+    /// sent as `Authorization: MediaBrowser Token="<API_KEY>"`.
+    fn auth_value(&self) -> String {
+        format!(r#"MediaBrowser Token="{}""#, self.key)
+    }
+
     /// Path-based item identity: exact match or same filename (robust
     /// against Sonarr-vs-Jellyfin title drift). Shared by all three lookups.
     fn path_matches(p: &str, jelly_path: &str, filename: &str) -> bool {
@@ -91,7 +98,7 @@ impl Jellyfin {
         let r = self
             .http
             .post(format!("{}/Items/{id}/Refresh", self.base))
-            .header("X-Emby-Token", &self.key)
+            .header("Authorization", self.auth_value())
             .json(&serde_json::json!({
                 "MetadataRefreshMode": "FullRefresh",
                 "ImageRefreshMode": "None",
@@ -164,7 +171,7 @@ impl Jellyfin {
             .http
             .get(format!("{}/Shows/{sid}/Episodes", self.base))
             .query(&query)
-            .header("X-Emby-Token", &self.key)
+            .header("Authorization", self.auth_value())
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
@@ -245,7 +252,7 @@ impl Jellyfin {
             .http
             .get(format!("{}/Items", self.base))
             .query(query)
-            .header("X-Emby-Token", &self.key)
+            .header("Authorization", self.auth_value())
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
@@ -275,7 +282,7 @@ impl Jellyfin {
         let r = self
             .http
             .post(format!("{}/Library/Refresh", self.base))
-            .header("X-Emby-Token", &self.key)
+            .header("Authorization", self.auth_value())
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await;
@@ -285,6 +292,198 @@ impl Jellyfin {
                 "jellyfin: library scan triggered"
             ),
             Err(e) => tracing::warn!(error = %e, "jellyfin: library scan failed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    const PLACEHOLDER: &str = "TEST-PLACEHOLDER-KEY";
+
+    fn client() -> Jellyfin {
+        Jellyfin::with_root(
+            "http://127.0.0.1:8096",
+            PLACEHOLDER,
+            "/media",
+            reqwest::Client::new(),
+        )
+    }
+
+    #[test]
+    fn auth_value_uses_mediabrowser_scheme() {
+        // Exact outgoing value (placeholder key only, never a real secret).
+        assert_eq!(
+            client().auth_value(),
+            format!(r#"MediaBrowser Token="{PLACEHOLDER}""#)
+        );
+    }
+
+    #[test]
+    fn auth_value_trims_surrounding_whitespace() {
+        let j = Jellyfin::with_root(
+            "http://127.0.0.1:8096/",
+            "  TEST-PLACEHOLDER-KEY  ",
+            "/media/",
+            reqwest::Client::new(),
+        );
+        assert_eq!(
+            j.auth_value(),
+            r#"MediaBrowser Token="TEST-PLACEHOLDER-KEY""#
+        );
+    }
+
+    fn header_snapshot(headers: &axum::http::HeaderMap) -> (String, bool) {
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let deprecated = headers.contains_key("x-emby-token");
+        (auth, deprecated)
+    }
+
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn get_items_sends_mediabrowser_authorization() {
+        let seen: Arc<Mutex<Vec<(String, bool)>>> = Default::default();
+        let seen_clone = seen.clone();
+        let router = axum::Router::new().route(
+            "/Items",
+            axum::routing::get(move |headers: axum::http::HeaderMap| async move {
+                seen_clone.lock().unwrap().push(header_snapshot(&headers));
+                axum::Json(serde_json::json!({"Items": []}))
+            }),
+        );
+        let base = serve(router).await;
+        let j = Jellyfin::with_root(&base, PLACEHOLDER, "/media", reqwest::Client::new());
+        let items = j
+            .get_items(&[("Recursive", "true")])
+            .await
+            .expect("stub responds");
+        assert!(items.is_empty());
+        let got = seen.lock().unwrap();
+        assert_eq!(got.len(), 1, "expected one GET /Items call");
+        assert_eq!(
+            got[0].0,
+            format!(r#"MediaBrowser Token="{PLACEHOLDER}""#),
+            "Authorization header must use MediaBrowser scheme"
+        );
+        assert!(!got[0].1, "deprecated X-Emby-Token header must not be sent");
+    }
+
+    #[tokio::test]
+    async fn refresh_flow_sends_mediabrowser_auth_on_all_calls() {
+        // Records (endpoint, Authorization value, deprecated header present).
+        let seen: Arc<Mutex<Vec<(String, String, bool)>>> = Default::default();
+        let jelly_episode_path = "/media/Shows/TestShow/Season 1/Ep.mkv".to_string();
+
+        let s_items = seen.clone();
+        let items_router = move |headers: axum::http::HeaderMap| {
+            let s_items = s_items.clone();
+            async move {
+                let (auth, deprecated) = header_snapshot(&headers);
+                s_items
+                    .lock()
+                    .unwrap()
+                    .push(("GET /Items".to_string(), auth, deprecated));
+                axum::Json(serde_json::json!({"Items": [
+                    {"Id": "SERIES1", "Path": "/media/Shows/TestShow"},
+                ]}))
+            }
+        };
+
+        let s_ep = seen.clone();
+        let episodes_router = move |headers: axum::http::HeaderMap| {
+            let s_ep = s_ep.clone();
+            let jelly_episode_path = jelly_episode_path.clone();
+            async move {
+                let (auth, deprecated) = header_snapshot(&headers);
+                s_ep.lock().unwrap().push((
+                    "GET /Shows/SERIES1/Episodes".to_string(),
+                    auth,
+                    deprecated,
+                ));
+                axum::Json(serde_json::json!({"Items": [
+                    {"Id": "EP1", "Path": jelly_episode_path},
+                ]}))
+            }
+        };
+
+        let s_refresh = seen.clone();
+        let refresh_router = move |headers: axum::http::HeaderMap| {
+            let s_refresh = s_refresh.clone();
+            async move {
+                let (auth, deprecated) = header_snapshot(&headers);
+                s_refresh.lock().unwrap().push((
+                    "POST /Items/EP1/Refresh".to_string(),
+                    auth,
+                    deprecated,
+                ));
+                axum::http::StatusCode::NO_CONTENT
+            }
+        };
+
+        let s_scan = seen.clone();
+        let scan_router = move |headers: axum::http::HeaderMap| {
+            let s_scan = s_scan.clone();
+            async move {
+                let (auth, deprecated) = header_snapshot(&headers);
+                s_scan.lock().unwrap().push((
+                    "POST /Library/Refresh".to_string(),
+                    auth,
+                    deprecated,
+                ));
+                axum::http::StatusCode::NO_CONTENT
+            }
+        };
+
+        let router = axum::Router::new()
+            .route("/Items", axum::routing::get(items_router))
+            .route(
+                "/Shows/SERIES1/Episodes",
+                axum::routing::get(episodes_router),
+            )
+            .route("/Items/EP1/Refresh", axum::routing::post(refresh_router))
+            .route("/Library/Refresh", axum::routing::post(scan_router));
+        let base = serve(router).await;
+        let j = Jellyfin::with_root(&base, PLACEHOLDER, "/media", reqwest::Client::new());
+
+        // NAS-local path maps to the stub episode path via media_root.
+        let media_path = format!(
+            "{}{}",
+            crate::config::NAS_MEDIA_PREFIX,
+            "/Shows/TestShow/Season 1/Ep.mkv"
+        );
+        j.refresh_blocking(&media_path, "TestShow", "Episode").await;
+
+        let expected = format!(r#"MediaBrowser Token="{PLACEHOLDER}""#);
+        let got = seen.lock().unwrap().clone();
+        for endpoint in [
+            "GET /Items",
+            "GET /Shows/SERIES1/Episodes",
+            "POST /Items/EP1/Refresh",
+            "POST /Library/Refresh",
+        ] {
+            let hit = got
+                .iter()
+                .find(|(p, _, _)| p == endpoint)
+                .unwrap_or_else(|| panic!("expected {endpoint} call, got {got:?}"));
+            assert_eq!(
+                hit.1, expected,
+                "{endpoint} must send MediaBrowser Authorization"
+            );
+            assert!(!hit.2, "{endpoint} must not send deprecated X-Emby-Token");
         }
     }
 }
