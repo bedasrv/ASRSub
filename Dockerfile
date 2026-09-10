@@ -1,6 +1,8 @@
 # asrsub (Rust): remote-API subtitle pipeline — no local models, no GPU.
 # Multi-stage: build static-ish release binary, ship ffmpeg + ca-certs only.
-ARG RUST_VERSION=1.85
+# RUST_VERSION must satisfy Cargo.toml's rust-version (deps in Cargo.lock
+# require >= 1.88); keep it in sync or the CI `docker` job fails.
+ARG RUST_VERSION=1.98
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
