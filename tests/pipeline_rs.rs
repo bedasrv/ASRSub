@@ -47,8 +47,11 @@ fn cli_health_is_config_only() {
 #[test]
 fn cli_run_once_degrades_without_services() {
     // No Sonarr/Bazarr configured: empty pass, exit 0, valid stats JSON.
+    // Point at the committed keyless example so the test never depends on
+    // the untracked live providers file (absent on fresh CI clones).
     let out = Command::new(bin())
         .arg("run-once")
+        .env("PROVIDERS_FILE", "asrsub_providers.json.example")
         .env("SONARR_URL", "")
         .env("BAZARR_URL", "")
         .output()
