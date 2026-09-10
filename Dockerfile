@@ -1,6 +1,6 @@
 # asrsub (Rust): remote-API subtitle pipeline — no local models, no GPU.
 # Multi-stage: build static-ish release binary, ship ffmpeg + ca-certs only.
-ARG RUST_VERSION=1.85
+ARG RUST_VERSION=1.88
 FROM rust:${RUST_VERSION}-slim-bookworm AS build
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
