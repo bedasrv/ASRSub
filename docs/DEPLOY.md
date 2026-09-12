@@ -35,9 +35,13 @@ is parsed into the config map, never exported into the process environment.
 Put these in the container environment (the compose `environment:` block or
 the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
-`JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`. `RUST_LOG`
-(verbosity, `EnvFilter` syntax) and `ANILIST_BASE_URL` are read the same way
-and are not in the settings form either.
+`JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
+`ANILIST_BASE_URL`. `RUST_LOG` (verbosity, `EnvFilter` syntax) is read the same
+way and is not in the settings form either.
+
+An **empty** variable is not a value: it pins nothing, it is skipped when the
+layers merge, and a file value survives it. `WEBHOOK_PORT=` in the compose
+`.env` therefore cannot blank a setting — remove the line instead.
 
 Two settings are **pinned by the shipment**, because the bind mount and the
 reverse proxy must agree with the daemon: `NAS_MEDIA_PREFIX` and

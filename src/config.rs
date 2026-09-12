@@ -203,8 +203,14 @@ impl RawConfig {
         }
         // Process env wins over files, restricted to pipeline-owned keys
         // (plus keys already present from files) so stray env never leaks
-        // into the config map or `/config` output.
+        // into the config map or `/config` output. An empty variable is not a
+        // value: every loader (and `env_pinned`) treats "" as unset, so letting
+        // it overwrite the file layer both discarded a configured value and let
+        // the settings form report a save the daemon could never apply.
         for (k, v) in std::env::vars() {
+            if v.trim().is_empty() {
+                continue;
+            }
             if map.contains_key(&k) || ENV_ALLOWLIST.contains(&k.as_str()) {
                 map.insert(k, v);
             }
@@ -300,15 +306,44 @@ fn parse_float(raw: &HashMap<String, String>, key: &str, default: f64) -> f64 {
     }
 }
 
+/// Schemes whose `:` separates a scheme from an opaque payload rather than a
+/// user name from a password. Without this list the scheme-less branch below
+/// reads `mailto:admin@example.com` as a login and publishes `***:***@example.com`.
+const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
+    "mailto", "data", "urn", "tel", "sms", "geo", "magnet", "bitcoin",
+];
+
+/// True when `s` starts with something shaped like the `host[:port]` a
+/// credential URL carries after its `@`. Keeps the scheme-less branch from
+/// masking values that merely happen to contain a colon (an email address, a
+/// query string) — masking those is information loss, not redaction.
+fn starts_with_authority(s: &str) -> bool {
+    let host_port = s.split(['/', '?', '#']).next().unwrap_or("");
+    if host_port.is_empty() {
+        return false;
+    }
+    // IPv6 literals keep their colons inside the brackets.
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => (h, p),
+        None => (host_port, ""),
+    };
+    !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
+        && (port.is_empty() || port.chars().all(|c| c.is_ascii_digit()))
+}
+
 /// `scheme://user:pass@host/path` → `scheme://***:***@host/path`, and the same
 /// for a scheme-less `user:pass@host`.
 ///
 /// `/config` is answered without authentication, so a credential embedded in an
 /// otherwise harmless key (a service URL whose name carries no KEY/TOKEN hint)
 /// must not be published either. The authority ends at the *last* `@`, so a
-/// password containing `@` cannot survive half-masked. A scheme-less value is
-/// masked only when a colon marks real credentials, leaving plain `user@host`
-/// (or an email address) untouched. `None` when the value carries none.
+/// password containing `@` cannot survive half-masked, and the part after it
+/// must look like a host. A scheme-less value is masked only when a colon marks
+/// real credentials, leaving plain `user@host` (or an email address) untouched.
+/// `None` when the value carries none.
 fn redact_userinfo(value: &str) -> Option<String> {
     let (prefix, rest) = match value.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
@@ -318,14 +353,24 @@ fn redact_userinfo(value: &str) -> Option<String> {
     let authority = &rest[..authority_end];
     let at = authority.rfind('@')?;
     let userinfo = &authority[..at];
-    if userinfo.is_empty() {
-        return None;
-    }
-    if prefix.is_empty() && !userinfo.contains(':') {
+    if userinfo.is_empty() || !starts_with_authority(&authority[at + 1..]) {
         return None;
     }
     let masked = if userinfo.contains(':') {
+        if prefix.is_empty() {
+            let word = userinfo
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) {
+                return None;
+            }
+        }
         "***:***"
+    } else if prefix.is_empty() {
+        // Scheme-less without a colon: a bare user name, nothing to redact.
+        return None;
     } else {
         "***"
     };
@@ -387,6 +432,8 @@ impl Config {
         };
         // JSON array preferred; bare CSV (`a,b`) and single values accepted
         // so env-style configuration never silently falls back to default.
+        // `sdh_placeholders` is accepted as a lower-case alias for the
+        // spelling older deployments used in pipeline.env.
         let sdh_placeholders = match raw.get("SDH_PLACEHOLDERS").or(raw.get("sdh_placeholders")) {
             Some(v) => parse_string_list(v),
             None => vec!["（歌詞）".to_string()],
@@ -684,8 +731,12 @@ pub const FIELDS: &[Field] = &[
         key: "EPISODE_CONCURRENCY",
         label: "Episode concurrency",
         kind: FieldKind::Int(usize::MAX as u64),
-        help: "Parallel episodes per pass (default: cores, clamped 2-8).",
-        default: "4",
+        help: "Parallel episodes per pass. Empty = detected CPU count (clamped 2-8), \
+               which is machine-dependent and therefore not shown as a value here.",
+        // No static default on purpose: the loader derives this from the host's
+        // CPU count, so displaying "4" would name a number the daemon may not be
+        // using. Empty renders as "not set"; typing a number pins it.
+        default: "",
     },
     Field {
         group: "workflow",
@@ -905,12 +956,42 @@ pub const ENV_ONLY_KEYS: &[&str] = &[
     "JIMAKU_CALL_SLEEP_MS",
     "JIMAKU_TIMEOUT",
     "ANILIST_TIMEOUT",
+    "ANILIST_BASE_URL",
 ];
 
 /// True when `key` is an editable settings field (used to reject unknown keys
 /// on `POST /api2/config`).
 pub fn is_editable_key(key: &str) -> bool {
     FIELDS.iter().any(|f| f.key == key)
+}
+
+/// What `key` expects, when `value` cannot be used for it: `None` means the
+/// value is usable (or the key is not a typed field).
+///
+/// Both write paths — the settings form (`/ui/config`) and the JSON API
+/// (`/api2/config`) — validate through this, so neither can persist a value the
+/// loader would only warn about and silently discard on the next start. The
+/// bound is the *consumer's*, not a guess from the default's shape: a u16 field
+/// refuses 70000 even though it parses as a `u64`.
+pub fn value_requirement(key: &str, value: &str) -> Option<String> {
+    let f = FIELDS.iter().find(|f| f.key == key)?;
+    if value.trim().is_empty() {
+        // Empty means unset, not invalid.
+        return None;
+    }
+    match f.kind {
+        FieldKind::Int(max) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n <= max)
+            .is_none()
+            .then(|| format!("a whole number between 0 and {max}")),
+        FieldKind::Float => value
+            .parse::<f64>()
+            .is_err()
+            .then(|| "a number".to_string()),
+        _ => None,
+    }
 }
 
 /// True when the process environment defines `key`.
@@ -1239,8 +1320,10 @@ mod tests {
 
     #[test]
     fn env_pinned_ignores_empty_values() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // A variable that is set but empty does not override anything (every
-        // loader treats "" as unset), so it must not lock the field either.
+        // loader treats "" as unset, and `RawConfig::load` skips it), so it must
+        // not lock the field either.
         std::env::set_var("ASRSUB_TEST_PIN_NONEMPTY", "8085");
         assert!(env_pinned("ASRSUB_TEST_PIN_NONEMPTY"));
         std::env::remove_var("ASRSUB_TEST_PIN_NONEMPTY");
@@ -1251,6 +1334,59 @@ mod tests {
         std::env::set_var("ASRSUB_TEST_PIN_EMPTY", "   ");
         assert!(!env_pinned("ASRSUB_TEST_PIN_EMPTY"));
         std::env::remove_var("ASRSUB_TEST_PIN_EMPTY");
+    }
+
+    #[test]
+    fn empty_env_value_does_not_shadow_the_file_layer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pipeline.env"), "WEBHOOK_PORT=1234\n").unwrap();
+        let prev_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        // A deployment that leaves a variable empty is not overriding anything.
+        // Letting the empty value replace the file layer made the dashboard
+        // report a save ("Wrote 1 override(s)") that the daemon could never
+        // apply, because the empty env var won at load.
+        std::env::set_var("WEBHOOK_PORT", "");
+        assert_eq!(
+            RawConfig::load().0.get("WEBHOOK_PORT").map(String::as_str),
+            Some("1234")
+        );
+        // A real value still wins over the file, as documented.
+        std::env::set_var("WEBHOOK_PORT", "1235");
+        assert_eq!(
+            RawConfig::load().0.get("WEBHOOK_PORT").map(String::as_str),
+            Some("1235")
+        );
+        std::env::remove_var("WEBHOOK_PORT");
+        match prev_dir {
+            Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
+            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+        }
+    }
+
+    #[test]
+    fn value_requirement_matches_the_consumers_type() {
+        // The shared rule behind both write paths (/ui/config and /api2/config).
+        assert_eq!(
+            value_requirement("WEBHOOK_PORT", "70000").as_deref(),
+            Some("a whole number between 0 and 65535")
+        );
+        assert_eq!(value_requirement("WEBHOOK_PORT", "65535"), None);
+        assert_eq!(
+            value_requirement("MAX_CUE_MS", "4294967296").as_deref(),
+            Some("a whole number between 0 and 4294967295")
+        );
+        assert_eq!(
+            value_requirement("LADDER_MIN_CJK", "abc").as_deref(),
+            Some("a number")
+        );
+        assert_eq!(value_requirement("LADDER_MIN_CJK", "0.55"), None);
+        // Empty means unset, text fields take anything, unknown keys are not
+        // this function's business (the API rejects them separately).
+        assert_eq!(value_requirement("MAX_EPS_PER_RUN", ""), None);
+        assert_eq!(value_requirement("TARGET_LANGS", "id,en,es"), None);
+        assert_eq!(value_requirement("NOT_A_KEY", "1"), None);
     }
 
     #[test]
@@ -1278,6 +1414,17 @@ mod tests {
             Some("https://***:***@bazarr.lan:6767")
         );
         assert_eq!(redact_userinfo("http://bazarr.lan:6767/api"), None);
+        // Values that merely contain a colon and an '@' are not logins: masking
+        // them loses information (`mailto:` was rewritten to `***:***@…`).
+        assert_eq!(redact_userinfo("mailto:admin@example.com"), None);
+        assert_eq!(redact_userinfo("urn:isbn:1234@x"), None);
+        // A query string's '@' sits past the authority, so nothing is masked.
+        assert_eq!(redact_userinfo("https://bazarr.lan/api?x=a@b"), None);
+        // IPv6 literals keep their colons.
+        assert_eq!(
+            redact_userinfo("https://user:pw@[::1]:8080/api").as_deref(),
+            Some("https://***:***@[::1]:8080/api")
+        );
 
         // A key whose *name* carries no secret hint still loses its userinfo:
         // `/config` is unauthenticated.

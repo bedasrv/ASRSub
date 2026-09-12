@@ -489,5 +489,64 @@ class TestDocsMatchTheEnvironmentMechanism(unittest.TestCase):
         self.assertIn("CONTAINER environment", self.env_example)
 
 
+class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
+    """One daemon: the schema, the loader and the docs must describe it alike."""
+
+    def setUp(self):
+        self.config_rs = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        self.env_example = (REPO / "pipeline.env.example").read_text(encoding="utf-8")
+        self.deploy_md = DEPLOY_MD.read_text(encoding="utf-8") if DEPLOY_MD.exists() else ""
+        fields = re.search(
+            r"pub const FIELDS: &\[Field\] = &\[(.*?)\n\];", self.config_rs, re.S
+        )
+        if fields is None:
+            self.fail("FIELDS table not found in src/config.rs")
+        self.fields_block = fields.group(1)
+        self.keys = re.findall(r'key:\s*"([A-Z0-9_]+)"', self.fields_block)
+        env_only = re.search(
+            r"pub const ENV_ONLY_KEYS: &\[&str\] = &\[(.*?)\n\];", self.config_rs, re.S
+        )
+        if env_only is None:
+            self.fail("ENV_ONLY_KEYS not found in src/config.rs")
+        self.env_only = re.findall(r'"([A-Z0-9_]+)"', env_only.group(1))
+
+    def test_finds_the_schema(self):
+        # Guards the parsers above: an empty extraction would make the checks
+        # below pass vacuously.
+        self.assertGreater(len(self.keys), 20)
+        self.assertGreater(len(self.env_only), 5)
+
+    def test_every_settings_field_is_read_by_the_loader(self):
+        # A FIELDS entry the loader never reads is a knob that does nothing — and
+        # the dashboard renders the table, so the UI would offer it.
+        rest = self.config_rs.replace(self.fields_block, "")
+        for key in self.keys:
+            self.assertIn(
+                f'"{key}"',
+                rest,
+                f"{key} is exposed in FIELDS but never read by Config::load",
+            )
+
+    def test_env_only_keys_are_documented_in_the_example_env(self):
+        # ANILIST_BASE_URL was consumed by jimaku.rs and named in DEPLOY.md but
+        # missing here (and from ENV_ONLY_KEYS), so the inventory of env-only
+        # knobs was incomplete.
+        for key in self.env_only:
+            self.assertIn(
+                key,
+                self.env_example,
+                f"{key} is env-only but missing from pipeline.env.example",
+            )
+
+    def test_empty_environment_variables_are_documented(self):
+        # The rule the code enforces: an empty variable pins nothing and does not
+        # shadow a file value. If that ever changes, the docs must change with it.
+        for name, text in (("pipeline.env.example", self.env_example), ("DEPLOY.md", self.deploy_md)):
+            with self.subTest(doc=name):
+                self.assertIn("empty", text.lower())
+                self.assertIn("pins nothing", text)
+                self.assertIn("survives", text)
+
+
 if __name__ == "__main__":
     unittest.main()

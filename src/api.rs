@@ -402,6 +402,14 @@ async fn h_config_put(
             Value::Null => String::new(),
             other => other.to_string(),
         };
+        // Same rule as the settings form: refuse a value the loader would warn
+        // about and then discard, instead of persisting a phantom override.
+        if let Some(want) = crate::config::value_requirement(k, &sval) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("{k} must be {want}")})),
+            ));
+        }
         pairs.push((k.clone(), sval));
     }
     crate::config::write_overrides(&pairs).map_err(|e| {

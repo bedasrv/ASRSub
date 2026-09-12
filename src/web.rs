@@ -145,9 +145,11 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/ui/episode/{id}/{action}", post(h_episode_action))
         .route("/assets/htmx.min.js", get(h_htmx))
         .route("/assets/app.css", get(h_css))
-        // Framework rejections on these paths (404/405/415) become fragments too,
-        // so every /ui/* failure the shell may see is swappable.
-        .layer(axum::middleware::from_fn(fragment_errors))
+        // Framework rejections on these routes (404/405/415) become fragments
+        // too, so every /ui/* failure the shell may see is swappable.
+        // `route_layer`, not `layer`: the fallback stays a plain 404 instead of
+        // answering every unmatched path in the app with an HTML fragment.
+        .route_layer(axum::middleware::from_fn(fragment_errors))
 }
 
 fn now_s() -> u64 {
@@ -684,7 +686,7 @@ fn settings_frag(cfg: &Config, msg: Option<(bool, String)>) -> Markup {
                                         @match f.kind {
                                             FieldKind::Secret => {
                                                 @if is_pinned {
-                                                    input type="text" id=(f.key) name=(f.key) value="***" readonly disabled;
+                                                    input type="text" id=(f.key) value="***" readonly disabled;
                                                 } @else {
                                                     input type="password" id=(f.key) name=(f.key) value="" placeholder="unchanged" autocomplete="new-password";
                                                     input type="hidden" name=(format!("orig__{}", f.key)) value="";
@@ -700,7 +702,10 @@ fn settings_frag(cfg: &Config, msg: Option<(bool, String)>) -> Markup {
                                             }
                                             _ => {
                                                 @if is_pinned {
-                                                    input type="text" id=(f.key) name=(f.key) value=(cur) readonly disabled;
+                                                    // Read-only and nameless: a disabled control is
+                                                    // never submitted, and the hidden orig__ baseline
+                                                    // is omitted for the same reason.
+                                                    input type="text" id=(f.key) value=(cur) readonly disabled;
                                                 } @else {
                                                     input type="text" id=(f.key) name=(f.key) value=(cur);
                                                     input type="hidden" name=(format!("orig__{}", f.key)) value=(cur);
@@ -777,32 +782,13 @@ fn collect_changes(form: &HashMap<String, String>) -> Vec<(String, String)> {
 /// Reject values `Config::load` cannot use for a typed field, before they reach
 /// disk. Returns the offending key and what the field expects, so the banner can
 /// say it accurately (`LADDER_MIN_CJK=abc` is not "a whole number").
+///
+/// The rule lives in [`crate::config::value_requirement`] because the JSON API
+/// writes the same file and must refuse the same values.
 fn invalid_number(pairs: &[(String, String)]) -> Option<(String, String)> {
-    for (k, v) in pairs {
-        if v.is_empty() {
-            continue;
-        }
-        if let Some(f) = FIELDS.iter().find(|f| f.key == k) {
-            // Validate against the type the *consumer* parses, not against
-            // "looks numeric": an out-of-range integer used to be accepted,
-            // written, and then silently replaced by the default at load
-            // (WEBHOOK_PORT=70000 was the reported case).
-            let requirement = match f.kind {
-                FieldKind::Int(max) => v
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|n| *n <= max)
-                    .is_none()
-                    .then(|| format!("a whole number between 0 and {max}")),
-                FieldKind::Float => v.parse::<f64>().is_err().then(|| "a number".to_string()),
-                _ => None,
-            };
-            if let Some(req) = requirement {
-                return Some((k.clone(), req));
-            }
-        }
-    }
-    None
+    pairs
+        .iter()
+        .find_map(|(k, v)| crate::config::value_requirement(k, v).map(|want| (k.clone(), want)))
 }
 
 /// Pinned keys this request actually tried to change (the form renders them
@@ -1070,6 +1056,7 @@ mod tests {
         let _guard = crate::config::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("AI_MARKER_CUE");
         std::env::set_var("AI_MARKER_CUE", "true");
         let cfg = Config::load().unwrap();
         // A pinned checkbox renders disabled, so the browser never submits it:
@@ -1083,7 +1070,51 @@ mod tests {
         // A hand-crafted attempt to flip it is still refused.
         let crafted = form(&[("AI_MARKER_CUE", "false")]);
         assert_eq!(shadowed_attempts(&cfg, &crafted), vec!["AI_MARKER_CUE"]);
-        std::env::remove_var("AI_MARKER_CUE");
+        match prior {
+            Some(v) => std::env::set_var("AI_MARKER_CUE", v),
+            None => std::env::remove_var("AI_MARKER_CUE"),
+        }
+    }
+
+    #[test]
+    fn integer_bounds_match_their_consumer_types() {
+        // A wrong bound either refuses a value the daemon accepts or re-opens
+        // "saved, then silently replaced by the default at load". Keep this
+        // table in step with Config's struct fields.
+        let expected: &[(&str, u64)] = &[
+            ("MAX_EPS_PER_RUN", usize::MAX as u64),
+            ("EPISODE_CONCURRENCY", usize::MAX as u64),
+            ("ASR_CONCURRENCY", usize::MAX as u64),
+            ("TRANSLATE_CONCURRENCY", usize::MAX as u64),
+            ("UPLOAD_CONCURRENCY", usize::MAX as u64),
+            ("TRANSLATE_CHUNK", usize::MAX as u64),
+            ("CPS_MERGE_MAX_CHARS", usize::MAX as u64),
+            ("LADDER_MIN_CUES", usize::MAX as u64),
+            ("LADDER_MIN_CHARS", usize::MAX as u64),
+            ("MAX_CUE_MS", u32::MAX as u64),
+            ("AI_MARKER_CUE_MS", u32::MAX as u64),
+            ("CPS_MERGE_MAX_DUR_MS", u32::MAX as u64),
+            ("CPS_MERGE_MAX_GAP_MS", u32::MAX as u64),
+            ("WEBHOOK_PORT", u16::MAX as u64),
+        ];
+        for (key, max) in expected {
+            let f = FIELDS
+                .iter()
+                .find(|f| f.key == *key)
+                .unwrap_or_else(|| panic!("{key} is not in FIELDS"));
+            assert_eq!(f.kind, FieldKind::Int(*max), "bound drift for {key}");
+        }
+        // Every Int field must be covered, so a new one cannot slip in unguarded.
+        let int_fields: Vec<&str> = FIELDS
+            .iter()
+            .filter(|f| matches!(f.kind, FieldKind::Int(_)))
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            int_fields.len(),
+            expected.len(),
+            "add new integer fields to this table: {int_fields:?}"
+        );
     }
 
     #[test]
