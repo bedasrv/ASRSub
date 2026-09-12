@@ -707,6 +707,18 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
         // the right of a literal colon, so fall back to the next boundary to the
         // left that carries a literal one. `starts` is descending, so the first
         // match is the nearest one to the left.
+        //
+        // The literal colon it lands on need not be evidence itself: a malformed
+        // port or the `:` of an inner `://` anchors it too, so the mask swallows
+        // credential-free text — `nominal@sonarr.lan:http/x=&colon;pw@inner` and
+        // `git@git.lan:this/path&#580@inner` lose the whole readable host (up to
+        // an 8 KB one), where the parent kept it. That is the fail-closed price
+        // and it is not narrowed: the same shape with the credential inside the
+        // path (`…/x/s3cr3t://&amp#58@y`) must anchor on that literal colon, and
+        // separating the two by position would re-open the round-thirteen leak
+        // one segment over. Measured at the commit that introduced it: 2,847
+        // values newly masked against the parent, every one carrying colon-like
+        // evidence, none published that the parent masked.
         let start = match hidden_start.or(chosen) {
             Some(s) if !head[s..].contains(':') => starts
                 .iter()
@@ -765,7 +777,12 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
 ///   port (`[root:s3cr3t]`, `[::1]x`),
 ///   `[svc:pw]`) and a colon there in any other spelling (`b&#58Zk1P`,
 ///   `b%3AZk3P`) are masked with the name. A *malformed port* keeps its colon
-///   where a colon belongs, so `sonarr.lan:http` stays readable.
+///   where a colon belongs, so `sonarr.lan:http` stays readable — unless an
+///   encoded colon to its right pulls the mask back over it, which the fallback
+///   in [`mask_tail_runs`] may do (`nominal@sonarr.lan:http/x=&colon;pw@inner`
+///   masks the whole slot: a measured legibility price, deliberately not
+///   narrowed, because the same shape with the credential in the path
+///   (`…/x/s3cr3t://&amp#58@y`) must anchor on that literal colon).
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
