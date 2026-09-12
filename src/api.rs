@@ -128,6 +128,14 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
 async fn h_status(State(s): State<Arc<AppState>>) -> Json<Value> {
     let last = s.last_pass.lock().await.clone();
     let current = s.current.lock().await.clone();
+    // Same filesystem stat as /ready, so it gets the same treatment: a hung NAS
+    // must not stall a tokio worker thread on an unauthenticated GET.
+    let media_ok = {
+        let prefix = s.cfg.nas_media_prefix.clone();
+        tokio::task::spawn_blocking(move || media_present(&prefix))
+            .await
+            .unwrap_or(false)
+    };
     Json(json!({
         "paused": s.paused.load(Ordering::Relaxed),
         "uptime_s": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).saturating_sub(s.started_at),
@@ -137,7 +145,7 @@ async fn h_status(State(s): State<Arc<AppState>>) -> Json<Value> {
         "started_at": s.started_at,
         // Media root present, as an additive boolean. A vanished NAS no
         // longer looks identical to "idle" (done=0 naps).
-        "media_ok": media_present(&s.cfg.nas_media_prefix),
+        "media_ok": media_ok,
     }))
 }
 
@@ -237,9 +245,21 @@ pub(crate) async fn readiness_for(s: &Arc<AppState>) -> (bool, Value) {
     tokio::task::spawn_blocking(move || readiness(&cfg, counts))
         .await
         .unwrap_or_else(|e| {
+            // Keep the documented /ready schema even on this defensive path:
+            // clients read checks.* (docs/HEALTH.md, scripts/deploy_smoke.sh),
+            // and a payload without it looks like an empty response.
             (
                 false,
-                json!({"ready": false, "error": format!("readiness check failed: {e}")}),
+                json!({
+                    "ready": false,
+                    "checks": {
+                        "media_root": {"ok": false},
+                        "providers": {"ok": false},
+                        "state_dir": {"ok": false},
+                    },
+                    "integrations": {},
+                    "error": format!("readiness check failed: {e}"),
+                }),
             )
         })
 }
@@ -860,12 +880,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("nested").join("state.jsonl");
         assert!(state_dir_writable(&state));
-        // The writability probe must clean up after itself.
-        assert!(!dir
-            .path()
-            .join("nested")
-            .join(".asrsub-ready-probe")
-            .exists());
+        // The writability probe must clean up after itself. Its name carries the
+        // pid, so match the prefix: comparing the bare name made this vacuous.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path().join("nested"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".asrsub-ready-probe"))
+            .collect();
+        assert!(leftovers.is_empty(), "probe left artifacts: {leftovers:?}");
     }
 
     #[test]

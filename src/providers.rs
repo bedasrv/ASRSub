@@ -125,8 +125,9 @@ impl ProvidersFile {
     }
 }
 
-/// API key: embedded value wins, otherwise `$key_env` at call time so
-/// rotated keys apply without restart. Shared by LLM and Whisper entries.
+/// API key: embedded value wins, otherwise `$key_env` from the process
+/// environment (fixed at container start, so rotation needs a recreate).
+/// Shared by LLM and Whisper entries.
 fn resolve_key(api_key: &str, key_env: &str) -> String {
     if !api_key.is_empty() {
         return api_key.to_string();

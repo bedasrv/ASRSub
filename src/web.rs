@@ -16,8 +16,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{Form, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
@@ -28,6 +29,56 @@ use crate::state;
 
 const HTMX_JS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/htmx.min.js"));
 const APP_CSS: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/app.css"));
+
+/// Marks a response body as a dashboard fragment htmx is allowed to swap.
+///
+/// The shell only swaps error responses that carry it ([`SHELL_JS`]), so a bare
+/// framework or reverse-proxy error page can never replace a dashboard region.
+pub(crate) const FRAGMENT_HEADER: &str = "x-asrsub-fragment";
+
+/// Render `html` as a dashboard fragment with `status`, marked swappable.
+fn fragment(status: StatusCode, html: String) -> Response {
+    (status, [(FRAGMENT_HEADER, "1")], Html(html)).into_response()
+}
+
+/// A minimal fragment whose root id is the region htmx asked to swap.
+fn error_body(id: &str, msg: &str) -> String {
+    html! { div id=(id) { div class="banner err" { (msg) } } }.into_string()
+}
+
+/// Only ids the dashboard actually renders may be echoed back into HTML.
+fn sanitize_target(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('#')
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect()
+}
+
+/// Replace any non-fragment error response on this router with a swappable one.
+///
+/// The handlers already return fragments, but axum's own rejections (unknown
+/// `/ui` route -> 404, wrong method -> 405, a form POST without the urlencoded
+/// content type -> 415) are plain text, which htmx would either drop silently or
+/// (worse, with a naive "swap all 4xx" rule) paste into a dashboard region.
+async fn fragment_errors(req: Request, next: Next) -> Response {
+    let target = req
+        .headers()
+        .get("hx-target")
+        .and_then(|v| v.to_str().ok())
+        .map(sanitize_target)
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "overview-body".to_string());
+    let res = next.run(req).await;
+    if (res.status().is_client_error() || res.status().is_server_error())
+        && !res.headers().contains_key(FRAGMENT_HEADER)
+    {
+        let msg = format!("Request failed (HTTP {}).", res.status().as_u16());
+        return fragment(res.status(), error_body(&target, &msg));
+    }
+    res
+}
 
 /// Shell script: control-key handling, htmx 401 handling, nav highlighting.
 /// Kept as a raw string (maud cannot template JS).
@@ -58,12 +109,15 @@ const SHELL_JS: &str = r#"
     if (k) e.detail.headers['X-API-Key'] = k;
   });
   document.addEventListener('htmx:beforeSwap', function (e) {
-    // Error responses (401 missing/wrong key, 400 bad id, 404 unknown action,
-    // 500 a state write failed) all carry a rendered fragment with a banner, so
-    // swap them instead of htmx's default "drop errors" — otherwise a failed
-    // action looks like nothing happened at all. 5xx still reports as an error.
+    // Error responses the server marks as fragments (401 missing/wrong key, 400
+    // bad id or refused save, 404 unknown action, 500 a state write failed) all
+    // carry a banner, so swap them instead of htmx's default "drop errors" —
+    // otherwise a failed action looks like nothing happened at all. The marker
+    // keeps unrelated bodies (proxy/SSO 403, 502) out of the dashboard. 5xx
+    // still reports as an error.
     var st = e.detail.xhr ? e.detail.xhr.status : 0;
-    if (st >= 400) {
+    var frag = e.detail.xhr ? e.detail.xhr.getResponseHeader('X-Asrsub-Fragment') : null;
+    if (st >= 400 && frag) {
       e.detail.shouldSwap = true;
       e.detail.isError = st >= 500;
     }
@@ -91,6 +145,9 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/ui/episode/{id}/{action}", post(h_episode_action))
         .route("/assets/htmx.min.js", get(h_htmx))
         .route("/assets/app.css", get(h_css))
+        // Framework rejections on these paths (404/405/415) become fragments too,
+        // so every /ui/* failure the shell may see is swappable.
+        .layer(axum::middleware::from_fn(fragment_errors))
 }
 
 fn now_s() -> u64 {
@@ -717,25 +774,31 @@ fn collect_changes(form: &HashMap<String, String>) -> Vec<(String, String)> {
     out
 }
 
-/// Reject values `Config::load` cannot parse for `Number` fields before they
-/// reach disk. Integer fields (the ones whose default has no decimal point) are
-/// validated as integers, so `MAX_EPS_PER_RUN=4.5` is refused here instead of
-/// being saved and then silently replaced by the default at load.
-fn invalid_number(pairs: &[(String, String)]) -> Option<String> {
+/// Reject values `Config::load` cannot use for a typed field, before they reach
+/// disk. Returns the offending key and what the field expects, so the banner can
+/// say it accurately (`LADDER_MIN_CJK=abc` is not "a whole number").
+fn invalid_number(pairs: &[(String, String)]) -> Option<(String, String)> {
     for (k, v) in pairs {
         if v.is_empty() {
             continue;
         }
         if let Some(f) = FIELDS.iter().find(|f| f.key == k) {
-            if f.kind == FieldKind::Number {
-                let ok = if f.default.contains('.') {
-                    v.parse::<f64>().is_ok()
-                } else {
-                    v.parse::<u64>().is_ok()
-                };
-                if !ok {
-                    return Some(k.clone());
-                }
+            // Validate against the type the *consumer* parses, not against
+            // "looks numeric": an out-of-range integer used to be accepted,
+            // written, and then silently replaced by the default at load
+            // (WEBHOOK_PORT=70000 was the reported case).
+            let requirement = match f.kind {
+                FieldKind::Int(max) => v
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n <= max)
+                    .is_none()
+                    .then(|| format!("a whole number between 0 and {max}")),
+                FieldKind::Float => v.parse::<f64>().is_err().then(|| "a number".to_string()),
+                _ => None,
+            };
+            if let Some(req) = requirement {
+                return Some((k.clone(), req));
             }
         }
     }
@@ -749,22 +812,17 @@ fn shadowed_attempts(cfg: &Config, form: &HashMap<String, String>) -> Vec<&'stat
         .iter()
         .filter(|f| crate::config::env_pinned(f.key))
         .filter(|f| {
-            let submitted = match f.kind {
-                FieldKind::Bool => {
-                    if form.contains_key(f.key) {
-                        "true".to_string()
-                    } else {
-                        "false".to_string()
-                    }
-                }
-                _ => form
-                    .get(f.key)
-                    .map(|v| v.trim().to_string())
-                    .unwrap_or_default(),
-            };
+            let submitted = form
+                .get(f.key)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
             let current = field_display_value(cfg, f.key, f.default);
             if f.kind == FieldKind::Bool {
-                truthy(&submitted) != truthy(&current)
+                // A disabled checkbox is never submitted, so absence means "not
+                // attempted", never "set to false" — treating it as an attempt
+                // refused every save while any pinned bool was in the
+                // environment, even for untouched keys.
+                form.contains_key(f.key) && truthy(&submitted) != truthy(&current)
             } else {
                 !submitted.is_empty() && submitted != current
             }
@@ -780,10 +838,14 @@ async fn h_config_save(
 ) -> Response {
     if !crate::api::check_token(&s.cfg, &headers) {
         let html = settings_frag(&s.cfg, Some((false, UNAUTH_MSG.to_string()))).into_string();
-        return (StatusCode::UNAUTHORIZED, Html(html)).into_response();
+        return fragment(StatusCode::UNAUTHORIZED, html);
     }
     let shadowed = shadowed_attempts(&s.cfg, &form);
     let pairs = collect_changes(&form);
+    // Anything that persists nothing is a refusal, not a success: answer 400 (as
+    // the JSON config API does) while still returning the fragment the operator
+    // needs to see.
+    let mut refused = !shadowed.is_empty();
     let msg = if !shadowed.is_empty() {
         (
             false,
@@ -795,11 +857,9 @@ async fn h_config_save(
         )
     } else if pairs.is_empty() {
         (true, "No changes to save.".to_string())
-    } else if let Some(bad) = invalid_number(&pairs) {
-        (
-            false,
-            format!("{bad} must be a whole number. Nothing saved."),
-        )
+    } else if let Some((bad, want)) = invalid_number(&pairs) {
+        refused = true;
+        (false, format!("{bad} must be {want}. Nothing saved."))
     } else {
         match crate::config::write_overrides(&pairs) {
             Ok(_) => (
@@ -809,7 +869,10 @@ async fn h_config_save(
                     pairs.len()
                 ),
             ),
-            Err(e) => (false, format!("Save failed: {e}")),
+            Err(e) => {
+                refused = true;
+                (false, format!("Save failed: {e}"))
+            }
         }
     };
     // Re-render from what is on disk now (Config::load) instead of the running
@@ -817,7 +880,12 @@ async fn h_config_save(
     // Otherwise the operator sees pre-save values and a second identical save
     // reports "no changes" while the file differs from the running daemon.
     let view = crate::config::Config::load().unwrap_or_else(|_| s.cfg.clone());
-    Html(settings_frag(&view, Some(msg)).into_string()).into_response()
+    let body = settings_frag(&view, Some(msg)).into_string();
+    if refused {
+        fragment(StatusCode::BAD_REQUEST, body)
+    } else {
+        Html(body).into_response()
+    }
 }
 
 // ----------------------------------------------------------- mutations ----
@@ -834,7 +902,7 @@ async fn h_control(
         let html = overview_frag(&s, Some((UNAUTH_MSG, true)))
             .await
             .into_string();
-        return (StatusCode::UNAUTHORIZED, Html(html)).into_response();
+        return fragment(StatusCode::UNAUTHORIZED, html);
     }
     let msg: &str = match action.as_str() {
         "pause" => {
@@ -859,7 +927,7 @@ async fn h_control(
             let html = overview_frag(&s, Some(("Unknown control action.", true)))
                 .await
                 .into_string();
-            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            return fragment(StatusCode::NOT_FOUND, html);
         }
     };
     let html = overview_frag(&s, Some((msg, false))).await.into_string();
@@ -876,7 +944,7 @@ async fn h_episode_action(
         let html = library_frag(&s, &q, Some((UNAUTH_MSG, true)))
             .await
             .into_string();
-        return (StatusCode::UNAUTHORIZED, Html(html)).into_response();
+        return fragment(StatusCode::UNAUTHORIZED, html);
     }
     let (eid, kind) = match crate::api::parse_episode_id(&id) {
         Ok(v) => v,
@@ -884,7 +952,7 @@ async fn h_episode_action(
             // Every error branch returns a rendered fragment so htmx can swap a
             // visible banner (see the beforeSwap handler in SHELL_JS).
             let html = library_frag(&s, &q, Some((&e, true))).await.into_string();
-            return (StatusCode::BAD_REQUEST, Html(html)).into_response();
+            return fragment(StatusCode::BAD_REQUEST, html);
         }
     };
     let msg: String = match action.as_str() {
@@ -894,7 +962,7 @@ async fn h_episode_action(
             if let Err(e) = state::append_jsonl(&s.cfg.exclusions_file, &rec) {
                 let msg = format!("Exclude failed: {e}");
                 let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
-                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
+                return fragment(StatusCode::INTERNAL_SERVER_ERROR, html);
             }
             format!("Excluded {id}.")
         }
@@ -914,7 +982,7 @@ async fn h_episode_action(
             if let Err(e) = state::rewrite_jsonl(&s.cfg.exclusions_file, &kept) {
                 let msg = format!("Unexclude failed: {e}");
                 let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
-                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
+                return fragment(StatusCode::INTERNAL_SERVER_ERROR, html);
             }
             format!("Unexcluded {id}.")
         }
@@ -922,7 +990,7 @@ async fn h_episode_action(
             if let Err(e) = crate::api::enqueue_action(&s.cfg, typ, eid, kind, None) {
                 let msg = format!("Queue failed: {e}");
                 let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
-                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
+                return fragment(StatusCode::INTERNAL_SERVER_ERROR, html);
             }
             if typ != "skip" {
                 s.wake.notify_one();
@@ -933,7 +1001,7 @@ async fn h_episode_action(
             let html = library_frag(&s, &q, Some(("Unknown episode action.", true)))
                 .await
                 .into_string();
-            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+            return fragment(StatusCode::NOT_FOUND, html);
         }
     };
     let html = library_frag(&s, &q, Some((&msg, false)))
@@ -970,6 +1038,63 @@ mod tests {
     }
 
     #[test]
+    fn invalid_number_checks_the_consumers_range() {
+        let pairs = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        let key = |o: Option<(String, String)>| o.map(|(k, _)| k);
+        // WEBHOOK_PORT is a u16 in Config: 70000 used to be accepted, written,
+        // and then silently replaced by the default when the daemon reloaded.
+        assert_eq!(
+            key(invalid_number(&pairs("WEBHOOK_PORT", "70000"))),
+            Some("WEBHOOK_PORT".to_string())
+        );
+        assert_eq!(invalid_number(&pairs("WEBHOOK_PORT", "65535")), None);
+        // The *_MS knobs are u32.
+        assert_eq!(
+            key(invalid_number(&pairs("MAX_CUE_MS", "99999999999"))),
+            Some("MAX_CUE_MS".to_string())
+        );
+        assert_eq!(invalid_number(&pairs("MAX_CUE_MS", "4000000000")), None);
+        // Decimals go to the float fields only, and the message names the
+        // requirement rather than calling everything a whole number.
+        assert_eq!(invalid_number(&pairs("LADDER_MIN_CJK", "0.55")), None);
+        let (bad, want) = invalid_number(&pairs("MAX_EPS_PER_RUN", "4.5")).unwrap();
+        assert_eq!(bad, "MAX_EPS_PER_RUN");
+        assert!(want.contains("whole number"), "unexpected wording: {want}");
+        let (bad, want) = invalid_number(&pairs("LADDER_MIN_CJK", "abc")).unwrap();
+        assert_eq!(bad, "LADDER_MIN_CJK");
+        assert_eq!(want, "a number");
+    }
+
+    #[test]
+    fn pinned_bool_does_not_block_unrelated_saves() {
+        let _guard = crate::config::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("AI_MARKER_CUE", "true");
+        let cfg = Config::load().unwrap();
+        // A pinned checkbox renders disabled, so the browser never submits it:
+        // absence must mean "not attempted", not "set to false". Reading it as an
+        // attempt refused *every* save while a pinned bool was in the environment.
+        let untouched = form(&[("orig__MAX_EPS_PER_RUN", "8"), ("MAX_EPS_PER_RUN", "4")]);
+        assert!(
+            shadowed_attempts(&cfg, &untouched).is_empty(),
+            "an untouched pinned bool must not block an unrelated save"
+        );
+        // A hand-crafted attempt to flip it is still refused.
+        let crafted = form(&[("AI_MARKER_CUE", "false")]);
+        assert_eq!(shadowed_attempts(&cfg, &crafted), vec!["AI_MARKER_CUE"]);
+        std::env::remove_var("AI_MARKER_CUE");
+    }
+
+    #[test]
+    fn error_fragments_echo_only_known_target_ids() {
+        assert_eq!(sanitize_target("#settings-body"), "settings-body");
+        assert_eq!(sanitize_target(" overview-body "), "overview-body");
+        // htmx sends the target id back in a request header; it lands in HTML.
+        assert_eq!(sanitize_target("#bad\"id<script>"), "badidscript");
+    }
+
+    #[test]
     fn collect_changes_handles_bools_and_secrets() {
         // Bool flipping false→true (checkbox present) writes; true→true doesn't.
         let f = form(&[
@@ -1002,9 +1127,10 @@ mod tests {
     #[test]
     fn invalid_number_rejects_garbage_for_number_fields() {
         let pairs = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+        let key = |o: Option<(String, String)>| o.map(|(k, _)| k);
         // Number field: garbage rejected, numeric accepted.
         assert_eq!(
-            invalid_number(&pairs("MAX_EPS_PER_RUN", "abc")),
+            key(invalid_number(&pairs("MAX_EPS_PER_RUN", "abc"))),
             Some("MAX_EPS_PER_RUN".to_string())
         );
         assert_eq!(invalid_number(&pairs("MAX_EPS_PER_RUN", "4")), None);

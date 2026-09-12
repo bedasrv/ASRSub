@@ -18,7 +18,7 @@ daemon serves both the dashboard and the API on `WEBHOOK_PORT`, default
   `last_pass{at,scanned,done,failed}`, `current`, `started_at`,
   `run_once_requested`, `media_ok` (the configured media root is present — a
   dead mount no longer looks like "idle").
-- `GET /config` — Merged config with secrets masked.
+- `GET /config` — Merged config with secrets masked (by key name, and any `user:pass@` userinfo inside a URL-shaped value).
 - `POST /pause /resume /run-once /wake /webhook` — Control (require
   `X-API-Key` (or the `X-Control-Key` alias that media-server notification
   plugins send): `<control key>` from `/run/secrets/control_api_key`;
@@ -144,12 +144,12 @@ curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/s
 ## Operational Notes
 
 - **No secret values** appear in health/readiness responses, logs, or dashboards. `CONTROL_API_KEY` is loaded from `/run/secrets/control_api_key` (or `CONTROL_API_KEY_FILE`); `pipeline.env` at `/home/user/.config/asr-pipeline/pipeline.env` holds non-control settings (BAZARR_URL, SONARR_URL, JELLYFIN_URL, …) and is mounted as a volume, not injected as environment variables.
-- **One daemon serves the dashboard**: exactly one `orchestrator` service runs the daemon, which serves the UI at `/` and the API at `/api2/*` on `WEBHOOK_PORT` (default 8085). There is no separate dashboard replica: running a second full daemon on a read-only state mount caused an `EROFS` restart loop and risked competing state writers.
+- **One daemon serves the dashboard**: exactly one `orchestrator` service runs the daemon, which serves the UI at `/` and the API at `/api2/*` on `WEBHOOK_PORT` (default 8085). There is no separate dashboard replica: running a second full daemon on a read-only state mount caused an `EROFS` restart loop and risked competing state writers. Dashboard mutations (`POST /ui/…`) answer `400` with a rendered fragment when nothing was saved (a deployment-pinned key, an out-of-range value, a failed write) and mark every error body with `X-Asrsub-Fragment: 1`, so a script can tell a refusal from a save and the shell can swap app errors without pasting proxy pages into a pane. `200` means the write landed (or there was nothing to change).
 - **Build vs deploy**: images are built by CI and pushed to GHCR as immutable `ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (`build.sh` is local/dev builds only and never pushes); deploy pulls an explicit tag (`docker compose pull`, then `up -d --no-build`). The compose file fails closed if `ASRSUB_IMAGE` is unset. Deployment detail lives in `DEPLOY.md`.
-- **Probes** (compose ships this healthcheck; `/health` for liveness, `/ready` for readiness):
+- **Probes** (compose ships this healthcheck; `/health` for liveness, `/ready` for readiness). The probe is `CMD-SHELL` so it follows `WEBHOOK_PORT` — the same variable the daemon binds:
   ```yaml
   healthcheck:
-    test: ["CMD", "curl", "-sf", "http://127.0.0.1:8085/ready"]
+    test: ["CMD-SHELL", "curl -sf http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready"]
     interval: 30s
     timeout: 5s
     retries: 3

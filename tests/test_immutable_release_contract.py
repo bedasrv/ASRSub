@@ -337,21 +337,69 @@ class TestDeploymentPinnedKeys(unittest.TestCase):
         return set(re.findall(r'key: "([A-Z0-9_]+)"', body))
 
     def _compose_env_keys(self):
+        """Keys the compose `environment:` block injects, in either YAML form.
+
+        The list form (`- KEY=value`) and the mapping form (`KEY: value`) are
+        both valid Compose; recognising only one meant a key silently pinned in
+        the other form kept this guard green.
+        """
         keys = set()
         in_env = False
-        for line in self.compose.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("environment:"):
+        env_indent = -1
+        for raw in self.compose.splitlines():
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if raw.strip().startswith("environment:"):
+                env_indent = indent
                 in_env = True
                 continue
             if not in_env:
                 continue
-            if stripped and not stripped.startswith(("-", "#")):
-                break
-            match = re.match(r"-\s*([A-Z0-9_]+)=", stripped)
+            if indent <= env_indent:  # left the block
+                in_env = False
+                continue
+            stripped = raw.strip()
+            # List form, both `- KEY=value` and `- KEY` (value from the caller).
+            match = re.match(r"-\s*([A-Z][A-Z0-9_]*)\s*(=|$)", stripped)
+            if match:
+                keys.add(match.group(1))
+                continue
+            # Mapping form: KEY: value
+            match = re.match(r"([A-Z][A-Z0-9_]*)\s*:", stripped)
             if match:
                 keys.add(match.group(1))
         return keys
+
+    def test_compose_env_parser_reads_both_yaml_forms(self):
+        # Guard the guard: if this parser only understood one form, the pinned
+        # set below could be silently wrong.
+        original = self.compose
+        try:
+            self.compose = (
+                "services:\n"
+                "  orchestrator:\n"
+                "    environment:\n"
+                "      TZ: Asia/Jakarta\n"
+                "      NAS_MEDIA_PREFIX: /mnt/nas/share/media\n"
+                "    volumes:\n"
+                "      - /tmp:/tmp\n"
+            )
+            self.assertEqual(
+                self._compose_env_keys(), {"TZ", "NAS_MEDIA_PREFIX"}
+            )
+            self.compose = (
+                "services:\n"
+                "  orchestrator:\n"
+                "    environment:\n"
+                "      - TZ=Asia/Jakarta\n"
+                "      - NAS_MEDIA_PREFIX=/mnt/nas/share/media\n"
+            )
+            self.assertEqual(
+                self._compose_env_keys(), {"TZ", "NAS_MEDIA_PREFIX"}
+            )
+        finally:
+            self.compose = original
 
     def test_pinned_settings_are_exactly_the_documented_pair(self):
         pinned = self._compose_env_keys() & self._fields_keys()
@@ -411,8 +459,28 @@ class TestDocsMatchTheEnvironmentMechanism(unittest.TestCase):
         self.assertIn("required: false", self.compose)
 
     def test_rotation_semantics_are_documented_honestly(self):
-        self.assertNotIn("apply without restart", self.deploy_md)
+        # The process environment is fixed at container start, so no artefact may
+        # promise a live reload — including source comments, where the claim
+        # survived the first pass.
+        sources = [
+            self.deploy_md,
+            (REPO / "README.md").read_text(encoding="utf-8"),
+            (REPO / "src" / "providers.rs").read_text(encoding="utf-8"),
+        ]
+        for text in sources:
+            self.assertNotIn("apply without restart", text)
         self.assertIn("docker compose up -d", self.deploy_md)
+
+    def test_provider_key_verification_prints_names_only(self):
+        # `docker compose config` interpolates env_file entries into the rendered
+        # environment, so a plain grep in the deploy docs dumps live keys into
+        # the operator's terminal.
+        self.assertIn("grep -oE '^ *[A-Z_]+_API_KEY:'", self.deploy_md)
+        self.assertNotIn("grep -E '^ *[A-Z_]+_API_KEY:'", self.deploy_md)
+
+    def test_docs_state_the_compose_version_the_env_file_form_needs(self):
+        # The env_file mapping form with `required:` needs Compose v2.24+.
+        self.assertIn("v2.24", self.deploy_md)
 
     def test_env_only_knobs_are_not_advertised_as_pipeline_env(self):
         # pipeline.env is never exported to the process environment, so

@@ -300,15 +300,28 @@ fn parse_float(raw: &HashMap<String, String>, key: &str, default: f64) -> f64 {
     }
 }
 
-/// `scheme://user:pass@host/path` → `scheme://***:***@host/path`.
-/// `None` when the value carries no URL userinfo.
+/// `scheme://user:pass@host/path` → `scheme://***:***@host/path`, and the same
+/// for a scheme-less `user:pass@host`.
+///
+/// `/config` is answered without authentication, so a credential embedded in an
+/// otherwise harmless key (a service URL whose name carries no KEY/TOKEN hint)
+/// must not be published either. The authority ends at the *last* `@`, so a
+/// password containing `@` cannot survive half-masked. A scheme-less value is
+/// masked only when a colon marks real credentials, leaving plain `user@host`
+/// (or an email address) untouched. `None` when the value carries none.
 fn redact_userinfo(value: &str) -> Option<String> {
-    let (scheme, rest) = value.split_once("://")?;
+    let (prefix, rest) = match value.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), value),
+    };
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    let at = authority.find('@')?;
+    let at = authority.rfind('@')?;
     let userinfo = &authority[..at];
     if userinfo.is_empty() {
+        return None;
+    }
+    if prefix.is_empty() && !userinfo.contains(':') {
         return None;
     }
     let masked = if userinfo.contains(':') {
@@ -316,7 +329,7 @@ fn redact_userinfo(value: &str) -> Option<String> {
     } else {
         "***"
     };
-    Some(format!("{scheme}://{masked}{}", &rest[at..]))
+    Some(format!("{prefix}{masked}{}", &rest[at..]))
 }
 
 impl Config {
@@ -504,12 +517,18 @@ impl Config {
 }
 
 /// Input widget for a settings field.
+///
+/// An integer field carries the inclusive maximum its *consumer's* parser
+/// accepts (`u16::MAX` for `WEBHOOK_PORT`, `u32::MAX` for the `*_MS` knobs), so
+/// the form can reject a value `Config::load` would otherwise silently replace
+/// with the default after storing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Text,
     Secret,
     Bool,
-    Number,
+    Int(u64),
+    Float,
     Csv,
 }
 
@@ -656,7 +675,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "MAX_EPS_PER_RUN",
         label: "Max episodes per run",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Cap on items processed per pass.",
         default: "8",
     },
@@ -664,7 +683,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "EPISODE_CONCURRENCY",
         label: "Episode concurrency",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Parallel episodes per pass (default: cores, clamped 2-8).",
         default: "4",
     },
@@ -672,7 +691,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "ASR_CONCURRENCY",
         label: "ASR concurrency",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Transcription fan-out per episode.",
         default: "4",
     },
@@ -680,7 +699,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "TRANSLATE_CONCURRENCY",
         label: "Translate concurrency",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Translation fan-out per episode.",
         default: "16",
     },
@@ -688,7 +707,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "UPLOAD_CONCURRENCY",
         label: "Upload concurrency",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Parallel Bazarr uploads across episodes.",
         default: "8",
     },
@@ -696,7 +715,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "TRANSLATE_CHUNK",
         label: "Translate chunk size",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Lines per LLM translation request.",
         default: "10",
     },
@@ -704,7 +723,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "MAX_CUE_MS",
         label: "Max cue duration (ms)",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(u32::MAX as u64),
         help: "Maximum subtitle cue duration.",
         default: "8000",
     },
@@ -720,7 +739,7 @@ pub const FIELDS: &[Field] = &[
         group: "workflow",
         key: "AI_MARKER_CUE_MS",
         label: "AI marker duration (ms)",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(u32::MAX as u64),
         help: "Duration of the AI marker cue.",
         default: "1500",
     },
@@ -792,7 +811,7 @@ pub const FIELDS: &[Field] = &[
         group: "state",
         key: "WEBHOOK_PORT",
         label: "Control/webhook port",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(u16::MAX as u64),
         help: "Port for the dashboard, control API, and /webhook.",
         default: "8085",
     },
@@ -808,7 +827,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "CPS_MERGE_MAX",
         label: "Max reading speed",
-        kind: FieldKind::Number,
+        kind: FieldKind::Float,
         help: "Chars/sec cap before merging cues.",
         default: "20.0",
     },
@@ -816,7 +835,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "CPS_MERGE_MAX_CHARS",
         label: "Max merged chars",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Max characters in a merged cue.",
         default: "84",
     },
@@ -824,7 +843,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "CPS_MERGE_MAX_DUR_MS",
         label: "Max merged duration (ms)",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(u32::MAX as u64),
         help: "Max duration of a merged cue.",
         default: "7000",
     },
@@ -832,7 +851,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "CPS_MERGE_MAX_GAP_MS",
         label: "Max merge gap (ms)",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(u32::MAX as u64),
         help: "Max gap bridged when merging cues.",
         default: "1000",
     },
@@ -840,7 +859,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "LADDER_MIN_CUES",
         label: "Ladder min cues",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Minimum source cues to accept a sidecar.",
         default: "40",
     },
@@ -848,7 +867,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "LADDER_MIN_CHARS",
         label: "Ladder min chars",
-        kind: FieldKind::Number,
+        kind: FieldKind::Int(usize::MAX as u64),
         help: "Minimum source characters to accept a sidecar.",
         default: "1500",
     },
@@ -856,7 +875,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "LADDER_MIN_CJK",
         label: "Ladder min CJK ratio",
-        kind: FieldKind::Number,
+        kind: FieldKind::Float,
         help: "Minimum CJK ratio for Japanese sources.",
         default: "0.6",
     },
@@ -864,7 +883,7 @@ pub const FIELDS: &[Field] = &[
         group: "advanced",
         key: "LADDER_SPAN_TOLERANCE",
         label: "Ladder span tolerance",
-        kind: FieldKind::Number,
+        kind: FieldKind::Float,
         help: "Max span/duration deviation for a sidecar.",
         default: "0.15",
     },
@@ -902,8 +921,14 @@ pub fn is_editable_key(key: &str) -> bool {
 /// dashboard save for such a key would persist a value the daemon can never
 /// apply, so the UI renders those fields read-only and the config API rejects
 /// them instead of pretending to save.
+///
+/// A variable that is set but *empty* does not count: every loader in this
+/// module treats an empty value as "unset", so pinning on mere presence made a
+/// knob the environment does not actually override impossible to edit.
 pub fn env_pinned(key: &str) -> bool {
-    std::env::var_os(key).is_some()
+    std::env::var(key)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Merge `pairs` into `config.overrides.json` under the configured dir.
@@ -972,6 +997,12 @@ pub(crate) fn map_host_to_jellyfin(
         None => host_path.to_string(),
     }
 }
+
+/// Serialises tests that mutate process-global state: `ASRSUB_CONFIG_DIR` and
+/// any settings key, since `env_pinned` reads the process environment. Shared
+/// with the web tests, which pin keys the same way.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -1153,10 +1184,6 @@ mod tests {
         assert_eq!(cfg.max_eps_per_run, 4);
     }
 
-    /// Serializes tests that point `ASRSUB_CONFIG_DIR` at a temp dir: the env
-    /// var is process-global and cargo runs test threads in parallel.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn override_file_is_never_world_readable() {
         use std::os::unix::fs::PermissionsExt;
@@ -1211,6 +1238,22 @@ mod tests {
     }
 
     #[test]
+    fn env_pinned_ignores_empty_values() {
+        // A variable that is set but empty does not override anything (every
+        // loader treats "" as unset), so it must not lock the field either.
+        std::env::set_var("ASRSUB_TEST_PIN_NONEMPTY", "8085");
+        assert!(env_pinned("ASRSUB_TEST_PIN_NONEMPTY"));
+        std::env::remove_var("ASRSUB_TEST_PIN_NONEMPTY");
+        assert!(!env_pinned("ASRSUB_TEST_PIN_NONEMPTY"));
+
+        std::env::set_var("ASRSUB_TEST_PIN_EMPTY", "");
+        assert!(!env_pinned("ASRSUB_TEST_PIN_EMPTY"));
+        std::env::set_var("ASRSUB_TEST_PIN_EMPTY", "   ");
+        assert!(!env_pinned("ASRSUB_TEST_PIN_EMPTY"));
+        std::env::remove_var("ASRSUB_TEST_PIN_EMPTY");
+    }
+
+    #[test]
     fn url_credentials_are_stripped_from_config_output() {
         assert_eq!(
             redact_userinfo("https://user:pw@bazarr.lan:6767/api").as_deref(),
@@ -1219,6 +1262,20 @@ mod tests {
         assert_eq!(
             redact_userinfo("https://user@bazarr.lan/api").as_deref(),
             Some("https://***@bazarr.lan/api")
+        );
+        // A scheme-less credential is still a credential.
+        assert_eq!(
+            redact_userinfo("user:pw@sonarr.lan:8989").as_deref(),
+            Some("***:***@sonarr.lan:8989")
+        );
+        // ... but a bare user@host (or an email address) is not.
+        assert_eq!(redact_userinfo("user@sonarr.lan"), None);
+        assert_eq!(redact_userinfo("noreply@example.com"), None);
+        // A password containing '@' must not survive half-masked: the host is
+        // whatever follows the last '@' in the authority.
+        assert_eq!(
+            redact_userinfo("https://user:p@ss@bazarr.lan:6767").as_deref(),
+            Some("https://***:***@bazarr.lan:6767")
         );
         assert_eq!(redact_userinfo("http://bazarr.lan:6767/api"), None);
 

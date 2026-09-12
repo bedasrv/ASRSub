@@ -2,8 +2,9 @@
 
 Images are built by CI and published to GHCR; deployment pulls an explicit
 image by git SHA and starts it. There is no `deploy.sh` (deleted
-2026-09-09) and no mutable `latest` tag — the release image must always be
-set explicitly via `ASRSUB_IMAGE`.
+2026-09-09), and compose never consumes a mutable `latest` tag — the release
+image must always be set explicitly via `ASRSUB_IMAGE` (CI publishes a
+`latest` alias as a convenience; see Build).
 
 ## What's in the image
 
@@ -70,12 +71,16 @@ from the UI could never take effect. Change them in the compose `.env`.
     'COMMANDCODE_API_KEY=...' 'NOUS_API_KEY=...' \
     > /home/user/.config/asr-pipeline/secrets/provider_keys.env
   chmod 600 /home/user/.config/asr-pipeline/secrets/provider_keys.env
-  # Verify the rendered container environment picks them up (names only):
+  # Verify the rendered container environment picks them up. `docker compose
+  # config` interpolates env_file values, so print the names only — piping it
+  # through a plain grep would print the live keys into your scrollback:
   ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> docker compose config \
-    | grep -E '^ *[A-Z_]+_API_KEY:'
+    | grep -oE '^ *[A-Z_]+_API_KEY:'
   ```
   The compose `env_file` entry is `required: false`, so a deployment that
-  keeps every key inside the mode-600 providers file still validates. Values
+  keeps every key inside the mode-600 providers file still validates. (That
+  mapping form, with `required:`, needs Docker Compose v2.24+; older plugins
+  reject the file.) Values
   are readable by anyone who can run `docker inspect` on the container — on a
   single-admin host that is the same exposure as the providers file it
   replaces, and it keeps keys out of the config the daemon re-reads.
@@ -124,7 +129,7 @@ emits the non-secret release descriptor as an artifact
 locally, and **never pushes**. It never runs `docker compose down`,
 `docker rmi`, or `docker builder prune`.
 
-- Never tags or deploys a mutable `latest` tag — no `asrsub:` + `latest` default exists for production.
+- Never *deploys* a mutable `latest` tag: no production default references it (CI publishes one as a convenience alias, nothing pins it).
 - Retains volumes: `/home/user/.config/asr-pipeline`, `/home/user/.cache/asr-pipeline`, and the host media directory.
 - Single `orchestrator` service: the daemon serves the dashboard at `/` and the API at `/api2/*`; there is no separate dashboard replica (a read-only state mount used to restart-loop with `EROFS`).
 - Release descriptor contains only `ASRSUB_IMAGE` / `GIT_SHA` / `BUILD_TIME` — no secrets.
@@ -236,7 +241,7 @@ file, no `PAUSED=1` handling — those belonged to the retired Python
 daemon). To hold the backlog for inspection after boot:
 
 ```bash
-ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:$(git rev-parse HEAD) docker compose up -d --no-build
+ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> docker compose up -d --no-build
 # then immediately pause via:
 curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/pause
 # ...inspect...
