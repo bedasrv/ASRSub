@@ -9,14 +9,17 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gcc libc6-dev cmake \
     && rm -rf /var/lib/apt/lists/*
-COPY Cargo.toml Cargo.lock* ./
+# Cargo.lock must be in the build context (see .dockerignore): --locked builds
+# the release image from the committed dependency set that CI tested, and fails
+# the build rather than silently resolving fresh versions.
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 # The dashboard (htmx/CSS) is embedded via include_str!, so it must be present
 # at compile time even though it is not copied into the runtime stage.
 COPY assets ./assets
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release && cp target/release/asrsub /asrsub
+    cargo build --release --locked && cp target/release/asrsub /asrsub
 
 FROM debian:trixie-slim
 ENV HOME=/home/user DEBIAN_FRONTEND=noninteractive

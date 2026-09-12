@@ -8,6 +8,13 @@ venv/
 *.ass
 state*.jsonl
 *.lock
+# Cargo.lock is the one lock file the image build needs: the build stage runs
+# `cargo build --release --locked`, so the published image must resolve from
+# the committed lockfile. Re-include it after the blanket `*.lock`.
+!Cargo.lock
+# Local build output. The Dockerfile never COPYs it, but as build context it
+# ships ~1.7 GB to the daemon (and to CI, on a warm checkout) on every build.
+target/
 tmp/
 outputs/
 episodes/
