@@ -36,8 +36,10 @@ Put these in the container environment (the compose `environment:` block or
 the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
 `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
-`ANILIST_BASE_URL`. `RUST_LOG` (verbosity, `EnvFilter` syntax) is read the same
-way and is not in the settings form either.
+`ANILIST_BASE_URL`, `ANILIST_CACHE`, `RUST_LOG` (verbosity, `EnvFilter`
+syntax). Each provider entry's `key_env` is also read from the process
+environment, never from a config file — that is how `provider_keys.env`
+reaches the pipeline.
 
 An **empty** variable is not a value: it pins nothing, it is skipped when the
 layers merge, it is treated as unset by the consumers above, and a file value
@@ -228,10 +230,16 @@ at `:8080` — proxies, bookmarks, uptime monitors.
 from `config.overrides.json` instead). The control key comes from a file —
 `CONTROL_API_KEY_FILE` if set, else the shipped default
 `/run/secrets/control_api_key` — or, as a test-only fallback, the
-`CONTROL_API_KEY` **environment variable**. It is never read from a config
-*value*: a key written into `pipeline.env` or `config.overrides.json` does not
-authenticate, and `PIPE_TOKEN` is no longer read at all. Blanking the variable
-therefore denies control access rather than falling back to a file value.
+`CONTROL_API_KEY` **environment variable**. The *token* is never read from a
+config *value*: a key written into `pipeline.env` or `config.overrides.json`
+does not authenticate, and the daemon no longer reads `PIPE_TOKEN`. The
+*path* in `CONTROL_API_KEY_FILE` is an ordinary config key, so any layer may
+point it somewhere else (`CONTROL_API_KEY_FILE=/srv/keys/asrsub` in
+`pipeline.env` works and that file's contents then authenticate). Blanking the
+environment variable therefore denies control access rather than falling back
+to a file value. The bundled `pctl` client is separate: it still accepts
+`PIPE_TOKEN` as a convenience override and also looks for
+`<config dir>/secrets/control_api_key`.
 
 ## Rollback (immutable: pull previous SHA)
 

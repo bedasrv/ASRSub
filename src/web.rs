@@ -1128,16 +1128,21 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let prev_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
         std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
         let cfg = crate::config::Config::load().unwrap();
-        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        match prev_dir {
+            Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
+            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+        }
         let mut seen: Vec<&str> = Vec::new();
         for (key, bound) in FIELDS.iter().filter_map(|f| match f.kind {
             FieldKind::Int(max) => Some((f.key, max)),
             _ => None,
         }) {
             // Width of the struct field this key is loaded into. The match arm
-            // list is the point: a new field fails to compile until it is added.
+            // list is the point: an Int field added to FIELDS without an arm
+            // fails this test (the `panic!` below), not the build.
             let width = match key {
                 "MAX_EPS_PER_RUN" => std::mem::size_of_val(&cfg.max_eps_per_run),
                 "EPISODE_CONCURRENCY" => std::mem::size_of_val(&cfg.episode_concurrency),

@@ -35,7 +35,7 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 104 unit + 4 integration (offline simulation incl.)
+cargo test                     # 105 unit + 4 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt

@@ -45,11 +45,19 @@ use crate::srt::Cue;
 #[derive(Parser, Debug)]
 #[command(name = "asrsub", version, about = "Remote-API subtitle pipeline")]
 struct Cli {
-    /// Config dir override (default ~/.config/asr-pipeline)
-    #[arg(long, env = "ASRSUB_CONFIG_DIR")]
+    /// Config dir override (default ~/.config/asr-pipeline, or `ASRSUB_CONFIG_DIR`)
+    ///
+    /// Declared without clap's `env =` on purpose: clap rejects an empty env
+    /// value outright (`error: a value is required for '--config-dir'`), which
+    /// would abort the daemon where the documented rule is that an empty
+    /// variable is simply unset. The env var is read through `config::env_str`,
+    /// the same reader every other key uses.
+    #[arg(long)]
     config_dir: Option<PathBuf>,
-    /// Providers file (default ./asrsub_providers.json or PROVIDERS_FILE)
-    #[arg(long, env = "PROVIDERS_FILE")]
+    /// Providers file (default ./asrsub_providers.json, or `PROVIDERS_FILE`)
+    ///
+    /// Same reason as `config_dir` for the missing `env =` attribute.
+    #[arg(long)]
     providers_file: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Option<Cmd>,

@@ -520,8 +520,17 @@ class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
         )
         if env_allow is None:
             self.fail("ENV_ALLOWLIST not found in src/config.rs")
+        # The file's own unit tests name any number of settings keys, so a
+        # deleted loader read would still leave the name behind in `mod tests`.
+        # Strip the test module too — the guard is about the *loader*, not about
+        # the string appearing somewhere in the file.
+        without_tests = re.sub(
+            r"\n#\[cfg\(test\)\]\s*\nmod tests \{.*$", "", self.config_rs, flags=re.S
+        )
+        if without_tests == self.config_rs:
+            self.fail("mod tests block not found in src/config.rs")
         self.rest = (
-            self.config_rs.replace(self.fields_block, "")
+            without_tests.replace(self.fields_block, "")
             .replace(env_allow.group(1), "")
             .replace(env_only.group(1), "")
         )

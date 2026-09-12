@@ -331,31 +331,6 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
     "mailto", "data", "urn", "tel", "sms", "geo", "magnet", "bitcoin",
 ];
 
-/// True when `s` starts with something shaped like the `host[:port]` a
-/// credential URL carries after its `@`.
-///
-/// Used by the scheme-qualified branch to recognise a `@` that belongs to the
-/// path or the query (a base URL like `https://bazarr.lan:6767/api?x=a@b`) and
-/// not to a userinfo, so a value with no credentials is left alone. It is never
-/// allowed to *suppress* masking of a `user:pass@` userinfo: masking must fail
-/// closed, because `/config` is answered without authentication.
-fn starts_with_authority(s: &str) -> bool {
-    let host_port = s.split(['/', '?', '#']).next().unwrap_or("");
-    if host_port.is_empty() {
-        return false;
-    }
-    // IPv6 literals keep their colons inside the brackets.
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (h, p),
-        None => (host_port, ""),
-    };
-    !host.is_empty()
-        && host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
-        && (port.is_empty() || port.chars().all(|c| c.is_ascii_digit()))
-}
-
 /// `scheme://user:pass@host/path` → `scheme://***:***@host/path`, and the same
 /// for a scheme-less `user:pass@host`.
 ///
@@ -363,21 +338,28 @@ fn starts_with_authority(s: &str) -> bool {
 /// otherwise harmless key (a service URL whose name carries no KEY/TOKEN hint)
 /// must not be published either. Two properties matter:
 ///
-/// * **Fail closed.** Anything that carries a colon before the last `@` and
-///   looks like an address is masked even when the host is malformed — a
-///   trailing space, a non-ASCII or percent-encoded host, an alphabetic port, an
-///   empty host, a UNC path, an IPv6 zone id. Host-shapedness may only *add*
-///   masking (recognising a `@` that belongs to a path instead of a userinfo),
-///   never remove it; a shape the classifier does not recognise is published
-///   verbatim otherwise, and that is the wrong default for a credential.
-/// * **The userinfo is anchored on the last `@`**, not on the first path
-///   separator, so a password containing `/`, `?` or `#` cannot survive unmasked.
+/// * **Fail closed.** Anything that carries a colon before the `@` that ends the
+///   userinfo is masked, whatever the host looks like: a trailing space, a
+///   non-ASCII or percent-encoded host, an alphabetic port, an empty host, a UNC
+///   path, an IPv6 zone id, a password that begins with digits and contains a
+///   separator. Host shape decides only whether a `@` sits in the path or the
+///   query, and even then only when nothing in front of the separator could be a
+///   `user:pass` pair — `https://user:1/2@host` is indistinguishable from
+///   `https://host:port/path@x`, so it is masked, and so is the harmless
+///   `https://bazarr.lan:6767/api?x=a@b`. Losing a readable base URL costs
+///   information; publishing `root:1234` costs the credential.
+/// * **The userinfo is the one inside the authority** when the value has an
+///   authority, and the last `@` otherwise, so neither a password containing
+///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
 ///
 /// A scheme-less value is masked only when a colon marks real credentials, which
 /// leaves plain `user@host` (an email address) untouched, and a non-hierarchical
-/// scheme (`mailto:admin@example.com`, `urn:isbn:…@x`) that carries no port is
-/// left alone because it has no password to hide. `None` when the value carries
-/// no credential-shaped userinfo.
+/// scheme word (`mailto:admin@example.com`, `urn:isbn:…@x`) with no port after
+/// the host is left alone: it has no password to hide, and masking it would
+/// rewrite every email address. Documented trade-off — a credential whose user
+/// name is literally `mailto`/`data`/`tel`/… and whose host carries no port is
+/// read as that URI and published. `None` when the value carries no
+/// credential-shaped userinfo.
 fn redact_userinfo(value: &str) -> Option<String> {
     // A trailing space or newline is a copy/paste artefact, not part of a host.
     let value = value.trim();
@@ -385,7 +367,16 @@ fn redact_userinfo(value: &str) -> Option<String> {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
         None => (String::new(), value),
     };
-    let at = rest.rfind('@')?;
+    // Where the authority ends: the first path/query/fragment separator.
+    let sep = rest.find(['/', '?', '#']);
+    // A credential inside the authority is separated by the *first* `@` before
+    // that separator; anything later is a path or query character. When the
+    // authority holds no `@` the last `@` in the value is the candidate — and the
+    // branch below may still drop it as a path/query character.
+    let at = match sep {
+        Some(s) if rest[..s].contains('@') => rest[..s].rfind('@')?,
+        _ => rest.rfind('@')?,
+    };
     let userinfo = &rest[..at];
     let after = &rest[at + 1..];
     let host = after.split(['/', '?', '#']).next().unwrap_or("");
@@ -394,7 +385,7 @@ fn redact_userinfo(value: &str) -> Option<String> {
     }
     if prefix.is_empty() {
         // Scheme-less: a colon is what distinguishes `user:pass@host` from a
-        // bare address, and the listed schemes have no password at all.
+        // bare address, and the listed scheme words have no password at all.
         if !userinfo.contains(':') {
             return None;
         }
@@ -406,12 +397,12 @@ fn redact_userinfo(value: &str) -> Option<String> {
         if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) && !host.contains(':') {
             return None;
         }
-    } else if userinfo.contains(['/', '?', '#']) {
-        // The `@` sits past the authority. Unless the text in front of it is
-        // itself host-shaped, this is a password containing a separator and must
-        // still be masked.
-        let first = userinfo.split(['/', '?', '#']).next().unwrap_or("");
-        if starts_with_authority(first) {
+    } else if let Some(s) = sep {
+        // A `@` past the authority is a path or query character, not a userinfo —
+        // unless the text in front of that separator could be a `user:pass` pair,
+        // which is what `https://root:1234/secret@nas.lan` looks like. Ambiguity
+        // is resolved by masking.
+        if s < at && !rest[..s].contains(':') {
             return None;
         }
     }
@@ -610,10 +601,10 @@ impl Config {
         // host access can edit, and a key read from there would keep
         // authenticating a deployment that deliberately removed it from the
         // environment — the documented contract is that the control key never
-        // comes from `pipeline.env`. An empty variable therefore denies control
-        // access (`check_token` refuses an empty key) instead of falling back to
-        // a stale file value.
-        std::env::var("CONTROL_API_KEY").unwrap_or_default()
+        // comes from `pipeline.env`. An empty (or whitespace-only) variable
+        // therefore denies control access (`check_token` refuses an empty key)
+        // instead of falling back to a stale file value.
+        env_str("CONTROL_API_KEY").unwrap_or_default()
     }
 }
 
@@ -1575,9 +1566,51 @@ mod tests {
         // is a credential whose *user name* is `data`, `tel`, … and which has no
         // port. Masking it would publish `***:***@…` for every email address.
         assert_eq!(redact_userinfo("data:pw@host.lan"), None);
-        // A `@` past a host-shaped authority is a path/query character, not a
-        // userinfo — that is the only thing host shape is allowed to decide.
-        assert_eq!(redact_userinfo("https://bazarr.lan:6767/api?x=a@b"), None);
+        // A password that begins with digits reads as `host:port` at the first
+        // separator — the exact regression this test exists for. `user:1/2@host`
+        // is spelled like `host:6767/path@x`, and `/config` is unauthenticated,
+        // so the ambiguity is resolved by masking.
+        assert_eq!(
+            redact_userinfo("https://user:1/2@host.lan").as_deref(),
+            Some("https://***:***@host.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://root:1234/secret@nas.lan").as_deref(),
+            Some("https://***:***@nas.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://admin:1234?x@host.lan").as_deref(),
+            Some("https://***:***@host.lan")
+        );
+        // A credential inside the authority is masked even when a second `@`
+        // follows it in the path: the first `@` before the separator ends the
+        // userinfo, and the tail is kept.
+        assert_eq!(
+            redact_userinfo("https://user:s3cr3t@host.lan/a@b").as_deref(),
+            Some("https://***:***@host.lan/a@b")
+        );
+        // A `@` past the authority is a path/query character — and may be left
+        // alone only when nothing in front of the separator could be a
+        // `user:pass` pair. No colon, no credential.
+        assert_eq!(redact_userinfo("https://bazarr.lan/api?x=a@b"), None);
+        assert_eq!(redact_userinfo("https://bazarr.lan:6767/x"), None);
+        // ... but a port makes `bazarr.lan:6767/api?x=a` indistinguishable from a
+        // user name and password, so that one is masked (over-masking is the
+        // safe direction; a real base URL carries no `@` in its query).
+        assert_eq!(
+            redact_userinfo("https://bazarr.lan:6767/api?x=a@b").as_deref(),
+            Some("https://***:***@b")
+        );
+        // Values with no authority at all are left alone: the last `@` is in the
+        // path, and nothing before the separator carries a colon.
+        assert_eq!(redact_userinfo("file:///mnt/nas/a@b.mkv"), None);
+        assert_eq!(redact_userinfo("https:///path@x"), None);
+        // A scheme-qualified bare user name is masked by design (no colon before
+        // the `@`, so it is `***`, not `***:***`), and the path `@` is kept.
+        assert_eq!(
+            redact_userinfo("https://user@bazarr.lan/api?x=a@b").as_deref(),
+            Some("https://***@bazarr.lan/api?x=a@b")
+        );
     }
 
     /// `value_requirement` feeds both write paths, and every consumer trims, so
@@ -1617,6 +1650,11 @@ mod tests {
         if std::path::Path::new("/run/secrets/control_api_key").exists() {
             // The shipped default secret would win before the environment is
             // consulted, so this test cannot be deterministic on such a host.
+            // Say so out loud rather than passing vacuously.
+            eprintln!(
+                "SKIP control_key_never_comes_from_a_config_file: \
+                 /run/secrets/control_api_key exists on this host"
+            );
             return;
         }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1638,7 +1676,18 @@ mod tests {
             "",
             "a key in pipeline.env must not authenticate control requests"
         );
+        // Empty *and* whitespace-only deny: `check_token` refuses an empty key,
+        // and a variable with only spaces is not a key anybody typed.
+        std::env::set_var("CONTROL_API_KEY", "   ");
+        assert_eq!(
+            cfg.control_key(),
+            "",
+            "a whitespace-only variable must deny, not authenticate"
+        );
         std::env::set_var("CONTROL_API_KEY", "env-layer-key");
+        assert_eq!(cfg.control_key(), "env-layer-key");
+        // ... and a real value is trimmed before it is used.
+        std::env::set_var("CONTROL_API_KEY", " env-layer-key \n");
         assert_eq!(cfg.control_key(), "env-layer-key");
         match prev_key {
             Some(v) => std::env::set_var("CONTROL_API_KEY", v),
