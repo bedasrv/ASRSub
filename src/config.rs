@@ -435,14 +435,36 @@ fn entity_decode_once(s: &str) -> Option<String> {
     while let Some(i) = rest.find('&') {
         let tail = &rest[i..];
         let lower = tail.to_ascii_lowercase();
-        let pattern = ["&amp;", "&#38;", "&#x26;"]
+        // The semicolon is optional in the spelling a sloppy encoder emits, and
+        // HTML5 accepts the legacy `&amp` without one: `&amp#58` is then a colon
+        // one layer down (`a&amp#58s3cr3t@host:6767/x@y` was published whole by
+        // the unauthenticated `/config`). A legacy spelling is only read as one
+        // when the next character could not continue a name, which is what the
+        // HTML5 parser does, so a `&amps` in prose is not rewritten.
+        let terminated = ["&amp;", "&#38;", "&#x26;"];
+        let legacy = ["&amp", "&#38", "&#x26"];
+        let consumed = terminated
             .into_iter()
-            .find(|p| lower.starts_with(p));
-        match pattern {
-            Some(p) => {
+            .find(|p| lower.starts_with(p))
+            .map(str::len)
+            .or_else(|| {
+                legacy
+                    .into_iter()
+                    .find(|p| {
+                        lower.starts_with(p)
+                            && !tail[p.len()..]
+                                .chars()
+                                .next()
+                                .map(|c| c.is_alphanumeric() || c == '=')
+                                .unwrap_or(false)
+                    })
+                    .map(str::len)
+            });
+        match consumed {
+            Some(len) => {
                 out.push_str(&rest[..i]);
                 out.push('&');
-                rest = &tail[p.len()..];
+                rest = &tail[len..];
                 decoded = true;
             }
             None => {
@@ -692,10 +714,18 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
 ///   URL costs information; publishing `root:1234` costs the credential. The
 ///   colon may be spelled literally, percent-encoded up to
 ///   [`PERCENT_ESCAPE_LAYERS`] layers deep, as an HTML entity or as the full-width
-///   `\u{FF1A}`, and one encoding layer deeper (`&amp;#58`). A numeric entity
-///   counts whatever follows it: `&#580` is U+0244 and `&#x3afb` a CJK ideograph,
-///   but guarding on the next character published `svc&#x3aabc@inner`, so the
-///   credential-free `&#580` is the price of fail-closed masking.
+///   `\u{FF1A}`, one encoding layer deeper (`&amp;#58`), and with the legacy
+///   semicolon-less `&amp` that HTML5 accepts (`&amp#58` — the same credential one
+///   layer down, and decoding only the terminated spelling published
+///   `a&amp#58s3cr3t@host:6767/x@y` whole). A numeric entity counts whatever
+///   follows it: `&#580` is U+0244 and `&#x3afb` a CJK ideograph, but guarding on
+///   the next character published `svc&#x3aabc@inner`, so the credential-free
+///   `&#580` is the price of fail-closed masking. The slot right after the `@` is
+///   part of the authority and is checked too, not merely excluded from the
+///   widening: brackets that do not hold an IPv6 literal (`[root:s3cr3t]`,
+///   `[svc:pw]`) and a colon there in any other spelling (`b&#58Zk1P`,
+///   `b%3AZk3P`) are masked with the name. A *malformed port* keeps its colon
+///   where a colon belongs, so `sonarr.lan:http` stays readable.
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
@@ -764,15 +794,65 @@ fn redact_userinfo(value: &str) -> Option<String> {
         Some(i) => &after[..i],
         None => after,
     };
-    // The host[:port] that follows the userinfo is not credential evidence: a port
-    // colon must not let the tail scan widen over the readable host it belongs to.
-    let floor = if is_host_port(host) { host.len() } else { 0 };
+    // The text immediately after the userinfo is the host slot, and it is part of
+    // the authority: a host carries at most one colon, as a port. `is_host_port`
+    // alone was not enough — it only kept the tail scan's widening out of that
+    // text, and every candidate a scan takes is to its *right*, so whenever the
+    // userinfo in front was the credential-shaped part the slot rode through:
+    // `a&#58Zk1P@[root:s3cr3t]/redir?url=http://a:b@c` published `root:s3cr3t`
+    // from the unauthenticated `/config`.
+    //
+    // Only two spellings make the slot a credential rather than a host with a
+    // broken port: brackets that do not hold an IPv6 literal (`[root:s3cr3t]`,
+    // `[svc:pw]`), and a colon that is not the literal port colon (a percent
+    // escape, an entity, the full-width form). A malformed *port*
+    // (`sonarr.lan:http`, `host:`) has its colon where a colon belongs, so it
+    // stays readable — masking every host that fails to parse would cost real
+    // base URLs for nothing.
+    let escaped_colon = carries_credential_colon(&host.replace(':', ""));
+    let host_hidden = !host.contains('@')
+        && !is_host_port(host)
+        && (escaped_colon || (host.starts_with('[') && host.contains(':')));
+    // The mask replaces the slot *and* the credential run that continues past it,
+    // up to the `@` that ends this authority: a password may straddle the
+    // separator (`er:p/ss@host`), and splitting at the separator published `ss`.
+    let scan_owned;
+    let after: &str = if host_hidden {
+        scan_owned = match after.find('@') {
+            Some(i) => format!("***:***{}", &after[i..]),
+            None => format!("***:***{}", &after[host.len()..]),
+        };
+        &scan_owned
+    } else {
+        after
+    };
+    // A readable host[:port] is still excluded from the widening, so a port colon
+    // cannot justify masking the host it belongs to
+    // (`https://user@host:6767/x@y` -> `https://***@***:***@y`); a hidden slot is
+    // excluded by its own mask's width for the same reason.
+    let floor = if host_hidden {
+        "***:***".len()
+    } else if is_host_port(host) {
+        host.len()
+    } else {
+        0
+    };
+    // A hidden host slot is already a mask, so it must count as one even when
+    // nothing in the tail needed masking: returning `None` there published the
+    // whole value, and with it the credential the slot mask had just replaced.
+    let finish = |tail: Option<String>, original: &str| -> Option<String> {
+        match tail {
+            Some(t) => Some(t),
+            None if host_hidden => Some(original.to_string()),
+            None => None,
+        }
+    };
     if userinfo.is_empty() {
         // No userinfo in the authority, so there is nothing to replace there —
         // but the value can still embed a credential later
         // (`http://@host.lan/a:b@c`). The tail scan decides; `None` when it finds
         // nothing either.
-        return mask_tail_runs(after, floor).map(|tail| format!("{prefix}@{tail}"));
+        return finish(mask_tail_runs(after, floor), after).map(|tail| format!("{prefix}@{tail}"));
     }
     if prefix.is_empty() {
         // Scheme-less: a colon is what distinguishes `user:pass@host` from a
@@ -786,7 +866,8 @@ fn redact_userinfo(value: &str) -> Option<String> {
             // family verbatim; the tail scan decides instead, and `None` when it
             // finds nothing keeps `user@sonarr.lan` and `noreply@example.com`
             // untouched.
-            return mask_tail_runs(after, floor).map(|tail| format!("{prefix}{userinfo}@{tail}"));
+            return finish(mask_tail_runs(after, floor), after)
+                .map(|tail| format!("{prefix}{userinfo}@{tail}"));
         }
         let word = userinfo
             .split(':')
@@ -814,7 +895,7 @@ fn redact_userinfo(value: &str) -> Option<String> {
     } else {
         "***"
     };
-    let after = match mask_tail_runs(after, floor) {
+    let after = match finish(mask_tail_runs(after, floor), after) {
         Some(tail) => tail,
         None => after.to_string(),
     };
@@ -2342,10 +2423,67 @@ mod tests {
 
     #[test]
     fn a_credential_without_a_host_after_it_is_not_a_pair() {
-        // No `@` after the password, so there is nothing to attach it to — the
-        // same choice `user:pass` with no host gets. The scan needs an `@`.
-        assert_eq!(redact_userinfo("a@b&#58Zk1P"), None);
+        // The slot after the `@` is part of the authority, so an escaped colon
+        // there is a credential written where a host belongs (`b&#58Zk1P` reads as
+        // `b:Zk1P`) and is masked with the name instead of being published.
+        assert_eq!(redact_userinfo("a@b&#58Zk1P").as_deref(), Some("a@***:***"));
+        // With no `@` at all there is nothing to attach a credential to: the scan
+        // needs one.
         assert_eq!(redact_userinfo("r?u=svc:p"), None);
+    }
+    #[test]
+    fn a_legacy_ampersand_hides_a_colon_one_layer_down() {
+        // HTML5 accepts the legacy `&amp` without a semicolon, and `&amp#58` is
+        // then `&#58`, a colon: decoding only the terminated spelling published
+        // `a&amp#58s3cr3t@host:6767/x@y` whole from the unauthenticated `/config`.
+        for v in [
+            "a&amp#58s3cr3t@host:6767/x@y",
+            "a&amp#581234@host:6767/x@y",
+            "a&amp#58s3cr3t@[::1]:8080/x@y",
+            "a&amp#58%3AZk1P@host:6767/x@y",
+        ] {
+            let out = redact_userinfo(v).unwrap_or_else(|| v.to_string());
+            assert!(
+                !out.contains("s3cr3t") && !out.contains("Zk1P"),
+                "{v} -> {out}"
+            );
+            assert!(out.contains("***:***"), "{v} -> {out}");
+        }
+        // The legacy spelling is only read as an entity when the next character
+        // could not continue a name, so a `&amps` in prose is not rewritten.
+        assert_eq!(redact_userinfo("https://bazarr.lan/a?x=1&ampy@b"), None);
+    }
+
+    #[test]
+    fn a_credential_in_the_host_slot_is_masked_with_the_name() {
+        // `is_host_port` only kept the tail scan's widening out of the host slot,
+        // and every candidate a scan takes is to its right, so whenever the name in
+        // front was the credential-shaped part the slot rode through:
+        // `a&#58Zk1P@[root:s3cr3t]/redir?url=http://a:b@c` published `root:s3cr3t`.
+        for v in [
+            "a&#58Zk1P@[root:s3cr3t]/redir?url=http://a:b@c",
+            "a&#58Zk1P@[svc:pw]:80/x@y",
+            "a&amp#58Zk1P@[root:s3cr3t]?u=svc:p@in",
+            "x@b%3AZk3P/ss@host.lan",
+        ] {
+            let out = redact_userinfo(v).unwrap_or_else(|| v.to_string());
+            assert!(
+                !out.contains("s3cr3t") && !out.contains("svc:pw") && !out.contains("Zk3P"),
+                "{v} -> {out}"
+            );
+        }
+        // A malformed *port* has its colon where a colon belongs, so it stays
+        // readable: the rule is for a credential in that slot, not for a port that
+        // does not parse.
+        assert_eq!(
+            redact_userinfo("https://user:pw@sonarr.lan:http").as_deref(),
+            Some("https://***:***@sonarr.lan:http")
+        );
+        // A password that straddles the separator is swallowed with the slot.
+        assert_eq!(
+            redact_userinfo("https://us@er:p/ss@host.lan").as_deref(),
+            Some("https://***@***:***@host.lan")
+        );
     }
 
     #[test]
