@@ -173,7 +173,11 @@ impl Pipeline {
                 }
                 Ok(_) => stats.skipped += 1,
                 Err(e) => {
-                    tracing::warn!(episode = eid, error = %e, "episode failed");
+                    tracing::warn!(
+                        episode = eid,
+                        error = %crate::config::mask_for_log(&e.to_string()),
+                        "episode failed"
+                    );
                     stats.failed += 1;
                     self.append_state(eid, None, "error", "", "series").await;
                 }
@@ -249,7 +253,11 @@ impl Pipeline {
                         is_movie: false,
                     }),
                     Err(e) => {
-                        tracing::warn!(episode = r.episode_id, error = %e, "action: retry episode lookup failed, skipping")
+                        tracing::warn!(
+                            episode = r.episode_id,
+                            error = %crate::config::mask_for_log(&e.to_string()),
+                            "action: retry episode lookup failed, skipping"
+                        )
                     }
                 }
             }
@@ -328,7 +336,10 @@ impl Pipeline {
                     });
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "bazarr wanted fetch failed"),
+            Err(e) => tracing::warn!(
+                error = %crate::config::mask_for_log(&e.to_string()),
+                "bazarr wanted fetch failed"
+            ),
         }
         // Movies (optional; never fails the pass).
         if let Ok(movies) = movies {

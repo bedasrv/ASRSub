@@ -227,7 +227,10 @@ async fn whisper_request(
     let mut last_err = String::from("no whisper endpoints attempted");
     for (idx, wp) in endpoints {
         if wp.api_key().is_empty() {
-            tracing::debug!(endpoint = %wp.endpoint, "whisper: skipping keyless endpoint");
+            tracing::debug!(
+                endpoint = %crate::config::mask_for_log(&wp.endpoint),
+                "whisper: skipping keyless endpoint"
+            );
             continue;
         }
         let _permit = pool.acquire_whisper(idx).await;

@@ -8,7 +8,7 @@
 > tree), and the parallel branches closed. Kept as-is for provenance —
 > the live contracts are `README.md` and `docs/HEALTH.md`.
 
-Repo: `~/benchmark/pipeline` on PC (user@10.10.20.208), origin `bedasrv/ASRSub`.
+Repo: `~/benchmark/pipeline` on PC (user@<benchmark-host>), origin `bedasrv/ASRSub`.
 Base: `main` @ f7394af. Three parallel worktrees, each on its own branch, all
 merge into `main` when their track is done and verified.
 

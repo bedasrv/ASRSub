@@ -164,7 +164,11 @@ async fn chat_across_providers(
             Ok(Some(content)) => return Ok(Some(content)),
             Ok(None) => continue, // 404 -> next model
             Err(e) => {
-                tracing::debug!(provider = %p.model, error = %e, "llm attempt failed, next provider");
+                tracing::debug!(
+                    provider = %p.model,
+                    error = %crate::config::mask_for_log(&e.to_string()),
+                    "llm attempt failed, next provider"
+                );
                 continue;
             }
         }

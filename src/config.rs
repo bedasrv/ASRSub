@@ -3,6 +3,7 @@
 //! Precedence (highest wins): process env > overrides file > pipeline.env > defaults.
 //! Secrets are never logged; [`Config::masked`] redacts them for `/config` output.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -300,7 +301,7 @@ where
         Some(v) => v.parse().unwrap_or_else(|_| {
             tracing::warn!(
                 key,
-                value = v,
+                value = %mask_for_log(v),
                 "unparseable integer in config; using the default ({default})"
             );
             default
@@ -315,7 +316,7 @@ fn parse_float(raw: &HashMap<String, String>, key: &str, default: f64) -> f64 {
         Some(v) => v.parse().unwrap_or_else(|_| {
             tracing::warn!(
                 key,
-                value = v,
+                value = %mask_for_log(v),
                 "unparseable number in config; using the default ({default})"
             );
             default
@@ -378,36 +379,16 @@ fn carries_credential_colon(s: &str) -> bool {
 /// Whether an HTML entity spelling of `:` appears, with or without the semicolon a
 /// sloppy encoder drops.
 ///
-/// A *numeric* entity only counts when nothing extends it: `&#580` is `E` with a
-/// grave accent and `&#x3afb` is Cyrillic, so matching the bare prefix masked
-/// credential-free values. The named form is matched with no such guard, because
-/// `&colonpw` is exactly the semicolon-less spelling this must catch and no
-/// credential-free value in the corpus reads as `&colon` followed by a word;
-/// masking the rare `&colony` is the fail-closed direction.
+/// The numeric forms count on the bare prefix, with no guard on the character
+/// that follows, because the ambiguity cannot be resolved from the text: `&#580`
+/// is U+0244 and `&#x3afb` is a CJK ideograph, but `&#58pw` is a colon whose
+/// encoder dropped the semicolon. Guarding on the next character traded a
+/// credential-free over-mask for a fail-open — it published
+/// `r?u=svc&#x3aabc@inner` and `x&#581234@inner`, whose passwords begin with a
+/// hex or a decimal digit, while the docs still claimed fail-closed masking.
+/// Ambiguity resolves by masking, so the credential-free `&#580` is the price.
 fn entity_colon(lower: &str) -> bool {
-    const NUMERIC: &[(&str, bool)] = &[("&#58", false), ("&#x3a", true)];
-    for (needle, hex_tail) in NUMERIC {
-        let mut from = 0;
-        while let Some(i) = lower[from..].find(needle) {
-            let end = from + i + needle.len();
-            let extends = lower[end..]
-                .chars()
-                .next()
-                .map(|c| {
-                    if *hex_tail {
-                        c.is_ascii_hexdigit()
-                    } else {
-                        c.is_ascii_digit()
-                    }
-                })
-                .unwrap_or(false);
-            if !extends {
-                return true;
-            }
-            from = end;
-        }
-    }
-    lower.contains("&colon")
+    lower.contains("&#58") || lower.contains("&#x3a") || lower.contains("&colon")
 }
 
 /// One layer of percent-decoding (`%3A` -> `:`), or `None` when the value carries
@@ -457,18 +438,60 @@ fn is_scheme(prefix: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Whether `text` reads as a host with an optional port: no colon at all, or one
-/// colon whose tail is all digits. A colon in this position is a port, not
-/// evidence of a credential, so a run must never start inside it.
+/// Mask a configuration value for a log line.
+///
+/// `/config` masks credentials, but a log line is a second sink for the same
+/// value: a warning that echoed a configured value verbatim printed
+/// `prefix=user@nas.lan:6767/redir?url=http://svc:PWZ9K@inner` to stderr. Every
+/// site that logs a configuration value goes through this so both sinks agree,
+/// and a value that carries nothing is returned borrowed, so the common case
+/// costs no allocation.
+pub fn mask_for_log(value: &str) -> Cow<'_, str> {
+    match redact_userinfo(value) {
+        Some(masked) => Cow::Owned(masked),
+        None => Cow::Borrowed(value),
+    }
+}
+
+/// Path of the single-instance lock for `state_file`.
+///
+/// The state path is operator input and this lock is a real file on disk, so a
+/// credential-shaped value would be written into a filename. Masking keeps the
+/// name credential-free and deterministic; a credential-free path (every path an
+/// operator actually writes) comes back unchanged, so the one-daemon-per-state
+/// guard still keys on the real path.
+pub fn lock_path(state_file: &Path) -> PathBuf {
+    let masked = mask_for_log(&state_file.display().to_string()).into_owned();
+    PathBuf::from(masked).with_extension("daemon.lock")
+}
+
+/// Whether `text` reads as a host with an optional port: no colon at all, one
+/// colon whose tail is all digits, or a bracketed IPv6 literal
+/// (`[::1]`, `[fe80::1%eth0]:8080`) whose colons belong to the address. A colon
+/// in this position is a port, not evidence of a credential, so a run must never
+/// start inside it. Malformed shapes — an empty host (`:8080`), an empty port
+/// (`host:`), a second colon (`host:1:2`) — are `false`, so the caller keeps the
+/// fail-closed fallback and masks; the readable host is that price.
 fn is_host_port(text: &str) -> bool {
+    let port_ok = |port: &str| {
+        !port.is_empty() && !port.contains(':') && port.bytes().all(|b| b.is_ascii_digit())
+    };
+    if let Some(rest) = text.strip_prefix('[') {
+        // Bracketed IPv6 literal, optionally followed by a port.
+        let Some((literal, tail)) = rest.split_once(']') else {
+            return false;
+        };
+        if literal.is_empty() {
+            return false;
+        }
+        return match tail.strip_prefix(':') {
+            None => tail.is_empty(),
+            Some(port) => port_ok(port),
+        };
+    }
     match text.split_once(':') {
         None => !text.is_empty(),
-        Some((host, port)) => {
-            !host.is_empty()
-                && !port.is_empty()
-                && !port.contains(':')
-                && port.bytes().all(|b| b.is_ascii_digit())
-        }
+        Some((host, port)) => !host.is_empty() && port_ok(port),
     }
 }
 
@@ -485,12 +508,16 @@ fn is_host_port(text: &str) -> bool {
 /// (`?to=nominal@host`, `b.mkv`) and is left as it stands, so a redirected URL
 /// stays legible where it can: `...?url=http://***:***@inner`.
 ///
-/// `floor` is the first index of `tail` that may start a run — the width of the
-/// host[:port] that follows the userinfo. Without it a port colon was read as a
+/// `floor` is the width of the `host[:port]` that follows the userinfo: the first
+/// index at which a run may start for the first `@`, re-based as `rest` advances,
+/// so a run never begins inside the host. Without it a port colon was read as a
 /// credential and the widening swallowed the readable host of an already-masked
-/// authority (`https://user@host:6767/x@y` -> `https://***@***:***@y`). `0` when
-/// the value has no authority to exclude. `None` when nothing in `tail` is
-/// masked.
+/// authority (`https://user@host:6767/x@y` -> `https://***@***:***@y`). The
+/// price is symmetric and named here rather than discovered later: a digit-only
+/// password sitting in the host slot is published with the host it is mistaken
+/// for (`https://u@svc:1234/x@y`), because the two spellings are identical and
+/// keeping the readable host is why the floor exists. `0` when the value has no
+/// authority to exclude. `None` when nothing in `tail` is masked.
 fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
     if !tail.contains('@') {
         return None;
@@ -2055,7 +2082,7 @@ mod tests {
     /// scheme-less value whose user name contains an `@` — or whose tail carries a
     /// credential — used to leave the colon-free branch without ever scanning the
     /// tail and was published verbatim. Round nine's differential fuzz counted 784
-    /// such values at `58b316b`. Four of its samples are pinned here.
+    /// such values at `58b316b`. Five of its samples are pinned here.
     #[test]
     fn a_scheme_less_name_with_a_credentialed_tail_is_still_masked() {
         assert_eq!(
@@ -2112,22 +2139,63 @@ mod tests {
             redact_userinfo("https://bazarr.lan:6767/api?x=a@b").as_deref(),
             Some("https://***:***@b")
         );
+        // A bracketed IPv6 literal is a host too, so a credential-free value
+        // keeps it instead of losing it to the tail scan.
+        assert_eq!(redact_userinfo("user@[::1]:8080/x@y"), None);
+        assert_eq!(redact_userinfo("user@[fe80::1%eth0]:80/pw@y"), None);
+        // The named price of keeping a readable host: a digit-only password in
+        // the host slot is published with the host it is mistaken for.
+        assert_eq!(
+            redact_userinfo("https://u@svc:1234/x@y").as_deref(),
+            Some("https://***@svc:1234/x@y")
+        );
     }
 
-    /// A numeric entity is only a colon when nothing extends it: `&#580` is `E`
-    /// with a grave accent, `&#5812` is another letter and `&#x3afb` is Cyrillic,
-    /// so matching the bare prefix masked credential-free values. The named form
-    /// keeps no such guard, because `&colonpw` is exactly the semicolon-less
-    /// spelling that must be caught; masking the rare `&colony` is the fail-closed
-    /// direction and is documented as a price.
+    /// `/config` is not the only sink for these values: a warning that echoed a
+    /// configured value published it to stderr, so log sites mask too.
     #[test]
-    fn an_entity_that_extends_the_colon_is_not_a_colon() {
+    fn the_single_instance_lock_name_never_carries_a_credential() {
+        assert_eq!(
+            lock_path(Path::new("/var/lib/asrsub/state.jsonl")),
+            PathBuf::from("/var/lib/asrsub/state.daemon.lock")
+        );
+        assert_eq!(
+            lock_path(Path::new("user:pa?ss@sonarr")),
+            PathBuf::from("***:***@sonarr.daemon.lock")
+        );
+    }
+
+    #[test]
+    fn a_config_value_is_masked_before_it_reaches_a_log_line() {
+        assert_eq!(mask_for_log("https://user:pw@host"), "https://***:***@host");
+        assert_eq!(mask_for_log("user@nas.lan:6767"), "user@nas.lan:6767");
+        assert_eq!(
+            mask_for_log("user@nas.lan:6767/redir?url=http://svc:pw@inner"),
+            "user@nas.lan:6767/redir?url=http://***:***@inner"
+        );
+        assert!(matches!(mask_for_log("plain"), Cow::Borrowed("plain")));
+    }
+
+    /// An entity spelling of the colon masks whatever follows it: the ambiguity
+    /// between a longer entity (`&#580` is U+0244, `&#x3afb` is a CJK ideograph)
+    /// and a colon whose encoder dropped the semicolon cannot be resolved from
+    /// the text, and resolving it the wrong way publishes a password
+    /// (`r?u=svc&#x3aabc@inner`, `x&#581234@inner`). Ambiguity resolves by
+    /// masking, so a credential-free `&#580` is the price.
+    #[test]
+    fn an_entity_spelling_of_the_colon_masks_even_when_it_looks_longer() {
         for value in [
             "https://host/a&#580;b@c",
             "https://host/a&#5812;b@c",
             "https://host/a&#x3afb@c",
+            "https://gw.lan/r?u=svc&#x3aabc@inner",
+            "https://u@host/x&#581234@inner",
+            "https:///user&#x3aabc@host.lan",
         ] {
-            assert_eq!(redact_userinfo(value), None, "{value}");
+            assert!(
+                redact_userinfo(value).is_some(),
+                "{value} must be masked, not published"
+            );
         }
         for value in [
             "https:///user&#58pw@host.lan",

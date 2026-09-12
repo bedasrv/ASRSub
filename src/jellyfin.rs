@@ -121,7 +121,11 @@ impl Jellyfin {
                 code = resp.status().as_u16(),
                 "jellyfin: refresh"
             ),
-            Err(e) => tracing::warn!(file = %media_path, error = %e, "jellyfin: refresh failed"),
+            Err(e) => tracing::warn!(
+                file = %crate::config::mask_for_log(media_path),
+                error = %crate::config::mask_for_log(&e.to_string()),
+                "jellyfin: refresh failed"
+            ),
         }
         self.maybe_scan().await;
     }
@@ -298,7 +302,10 @@ impl Jellyfin {
                 code = resp.status().as_u16(),
                 "jellyfin: library scan triggered"
             ),
-            Err(e) => tracing::warn!(error = %e, "jellyfin: library scan failed"),
+            Err(e) => tracing::warn!(
+                error = %crate::config::mask_for_log(&e.to_string()),
+                "jellyfin: library scan failed"
+            ),
         }
     }
 }

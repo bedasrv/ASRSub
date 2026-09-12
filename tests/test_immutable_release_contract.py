@@ -223,6 +223,14 @@ class TestHealthAndJellyfinContract(unittest.TestCase):
             self.assertNotIn(
                 "10.10.20.160", text, msg=f"{name} must not carry a site-specific default"
             )
+            # Any private LAN address is site-specific, not just that one;
+            # loopback is a local example and stays allowed.
+            self.assertIsNone(
+                re.search(
+                    r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b", text
+                ),
+                msg=f"{name} must not carry a site-specific private address",
+            )
         self.assertRegex(self.config, r'DEFAULT_JELLYFIN_URL:\s*&str\s*=\s*""')
         # The example config keeps the required URL visible.
         self.assertIn("JELLYFIN_URL", self.env_example)
@@ -581,6 +589,24 @@ class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
                 self.assertIn("empty", text.lower())
                 self.assertIn("pins nothing", text)
                 self.assertIn("survives", text)
+
+
+class TestMaskingHasNoSecondSink(unittest.TestCase):
+    """`/config` is not the only sink for a configured value."""
+
+    def test_log_sites_mask_configuration_values(self):
+        config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        main_rs = (REPO / "src" / "main.rs").read_text(encoding="utf-8")
+        # The warning that echoed the media root was the demonstrated leak.
+        self.assertNotIn("prefix = %cfg.nas_media_prefix", main_rs)
+        self.assertIn("mask_for_log(&cfg.nas_media_prefix)", main_rs)
+        # A parse warning must not print the value it could not parse.
+        self.assertNotIn("value = v,", config)
+        # The masker is shared, not re-implemented at a call site.
+        self.assertIn("pub fn mask_for_log", config)
+        for rel in ("src/bazarr.rs", "src/jellyfin.rs", "src/pipeline.rs", "src/translate.rs"):
+            text = (REPO / rel).read_text(encoding="utf-8")
+            self.assertIn("mask_for_log", text, msg=f"{rel} logs errors that can carry a URL")
 
 
 if __name__ == "__main__":

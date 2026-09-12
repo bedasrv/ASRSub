@@ -222,7 +222,7 @@ impl Bazarr {
                 Ok(Some(code))
             }
             Err(e) => {
-                tracing::warn!(error = %e, "bazarr {what} upload error");
+                tracing::warn!(error = %crate::config::mask_for_log(&e.to_string()), "bazarr {what} upload error");
                 Ok(None)
             }
         }
@@ -329,7 +329,11 @@ impl Bazarr {
                     code = resp.status().as_u16(),
                     "bazarr wanted refill"
                 ),
-                Err(e) => tracing::warn!(task = job, error = %e, "bazarr wanted refill failed"),
+                Err(e) => tracing::warn!(
+                    task = job,
+                    error = %crate::config::mask_for_log(&e.to_string()),
+                    "bazarr wanted refill failed"
+                ),
             }
         }
     }

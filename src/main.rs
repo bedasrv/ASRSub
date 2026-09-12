@@ -162,7 +162,7 @@ async fn load_stack(
     // and the daemon degrades (no destructive cleanup) rather than exiting.
     if !std::path::Path::new(&cfg.nas_media_prefix).is_dir() {
         tracing::warn!(
-            prefix = %cfg.nas_media_prefix,
+            prefix = %crate::config::mask_for_log(&cfg.nas_media_prefix),
             "media root is not a directory; /ready will report not-ready until the mount is fixed"
         );
     }
@@ -170,10 +170,13 @@ async fn load_stack(
     let ppath = providers_override
         .or_else(|| crate::config::env_str("PROVIDERS_FILE").map(PathBuf::from))
         .unwrap_or_else(|| cfg.providers_file.clone());
+    // The path is operator input (`PROVIDERS_FILE`), and these strings reach the
+    // log and the CLI, so the same mask that guards `/config` guards them.
+    let pshow = crate::config::mask_for_log(&ppath.display().to_string()).into_owned();
     let file = providers::ProvidersFile::load(&ppath)
-        .with_context(|| format!("load providers {ppath:?}"))?;
+        .with_context(|| format!("load providers {pshow:?}"))?;
     if file.llm_translation_models.is_empty() {
-        anyhow::bail!("no llm_translation_models in {ppath:?}");
+        anyhow::bail!("no llm_translation_models in {pshow:?}");
     }
     if file.whisper_stt.is_none() {
         tracing::warn!("no whisper_stt provider configured; ASR will fail");
@@ -448,7 +451,7 @@ async fn refine_cmd(
 async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
-    let lock_path = cfg.state_file.with_extension("daemon.lock");
+    let lock_path = crate::config::lock_path(&cfg.state_file);
     if let Some(p) = lock_path.parent() {
         if !p.as_os_str().is_empty() {
             std::fs::create_dir_all(p)?;
