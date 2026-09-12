@@ -331,6 +331,111 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
     "mailto", "data", "urn", "tel", "sms", "geo", "magnet", "bitcoin",
 ];
 
+/// A colon that can separate a user name from a password, written any of the
+/// ways a value can carry one: a literal `:`, a percent-encoded `%3A` at any
+/// escape depth, an HTML entity (`&#58;`, `&#x3a;`, `&colon;`) or the full-width
+/// `\u{FF1A}`. Matching only the literal byte published
+/// `https:///user%3Apw@host` verbatim while the literal spelling of the same
+/// value was masked, so the empty-authority class was only half closed.
+fn carries_credential_colon(s: &str) -> bool {
+    fn colon_like(s: &str) -> bool {
+        if s.contains(':') || s.contains('\u{FF1A}') || s.contains('\u{FE55}') {
+            return true;
+        }
+        let lower = s.to_ascii_lowercase();
+        lower.contains("&#58;") || lower.contains("&#x3a;") || lower.contains("&colon;")
+    }
+
+    if colon_like(s) {
+        return true;
+    }
+    // Escape layers: `%3A` is a colon, `%253A` is one layer further down, and a
+    // value that arrives double- or triple-encoded still carries a credential.
+    let mut current = s.to_string();
+    for _ in 0..3 {
+        match percent_decode_once(&current) {
+            Some(decoded) => {
+                if colon_like(&decoded) {
+                    return true;
+                }
+                current = decoded;
+            }
+            None => break,
+        }
+    }
+    false
+}
+
+/// One layer of percent-decoding (`%3A` -> `:`), or `None` when the value carries
+/// no escape. Bytes are decoded one at a time, so a multi-byte sequence becomes
+/// mojibake; that is fine here — the only question this answers is whether a
+/// colon hides behind an escape.
+fn percent_decode_once(s: &str) -> Option<String> {
+    if !s.contains('%') {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut decoded = false;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                if let Some(c) = char::from_u32(hi * 16 + lo) {
+                    out.push(c);
+                    i += 3;
+                    decoded = true;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    decoded.then_some(out)
+}
+
+/// Mask every credential-shaped run in `tail`, the part of a value that follows
+/// the authority's userinfo.
+///
+/// A run starts after the innermost `scheme://` in front of the `@` when there is
+/// one — so `?url=http://svc:pa/ss@inner` is caught even though its password
+/// contains a separator — and after the last `/`, `?` or `#` otherwise, so a
+/// *scheme-less* tail password containing a separator is the one shape this
+/// cannot see. A run with no colon is a plain address or path
+/// (`?to=nominal@host`, `b.mkv`) and is left as it stands. The readable prefix is
+/// always kept, which is what makes a redirected URL legible:
+/// `...?url=http://***:***@inner`. `None` when nothing in `tail` is masked.
+fn mask_tail_runs(tail: &str) -> Option<String> {
+    if !tail.contains('@') {
+        return None;
+    }
+    let mut out = String::with_capacity(tail.len());
+    let mut rest = tail;
+    let mut masked = false;
+    while let Some(at) = rest.find('@') {
+        let head = &rest[..at];
+        let start = match head.rfind("://") {
+            Some(i) => i + 3,
+            None => head.rfind(['/', '?', '#']).map(|i| i + 1).unwrap_or(0),
+        };
+        let run = &head[start..];
+        if run.is_empty() || !carries_credential_colon(run) {
+            out.push_str(head);
+        } else {
+            out.push_str(&head[..start]);
+            out.push_str("***:***");
+            masked = true;
+        }
+        out.push('@');
+        rest = &rest[at + 1..];
+    }
+    out.push_str(rest);
+    masked.then_some(out)
+}
+
 /// `scheme://user:pass@host/path` → `scheme://***:***@host/path`, and the same
 /// for a scheme-less `user:pass@host`.
 ///
@@ -348,17 +453,22 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
 ///   the `@` could be a `user:pass` pair — `https://user:1/2@host` is
 ///   indistinguishable from `https://host:port/path@x`, so it is masked, and so
 ///   is the harmless `https://bazarr.lan:6767/api?x=a@b`. Losing a readable base
-///   URL costs information; publishing `root:1234` costs the credential.
+///   URL costs information; publishing `root:1234` costs the credential. The
+///   colon may be spelled literally, percent-encoded at any depth, as an HTML
+///   entity or as the full-width `\u{FF1A}`, so no spelling slips through (see
+///   `carries_credential_colon`).
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
-/// * **One credential per value.** Only that userinfo is replaced; the tail after
-///   it is copied as it stands, so a value that embeds a *second* credentialed
-///   URL in its own path or query
-///   (`https://user:pw@gw.lan/redirect?url=http://a:b@c`) masks the outer pair
-///   and leaves the inner one visible. A documented limitation, not an oversight:
-///   it takes two `user:pass@` runs in one value, and re-scanning the tail made
-///   ordinary base URLs unreadable.
+/// * **Every credential-shaped run is masked**, not just the authority's: the
+///   tail is scanned too (`mask_tail_runs`), so a value that embeds a second
+///   credentialed URL in its own path or query
+///   (`https://user:pw@gw.lan/redirect?url=http://a:b@c`) masks both pairs and
+///   stays legible: `https://***:***@gw.lan/redirect?url=http://***:***@c`. A run
+///   with no colon is an address or a path, not a credential
+///   (`?to=nominal@host`), and is left as it stands. Scanning the tail is safe
+///   because a run starts after the innermost `scheme://` or after the last
+///   path/query separator, so the readable prefix is never swallowed.
 ///
 /// A scheme-less value is masked only when a colon marks real credentials, which
 /// leaves plain `user@host` (an email address) untouched, and a non-hierarchical
@@ -366,8 +476,14 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
 /// the host is left alone: it has no password to hide, and masking it would
 /// rewrite every email address. Documented trade-off — a credential whose user
 /// name is literally `mailto`/`data`/`tel`/… and whose host carries no port is
-/// read as that URI and published. `None` when the value carries no
-/// credential-shaped userinfo.
+/// read as that URI and published.
+///
+/// Two narrower exceptions, both pinned by tests: a *colon-free* authority-less
+/// userinfo is published (`https://///pw@host`, `https:///path@x`) — the extra
+/// slashes make it a user name with no password, and masking every path that
+/// contains an `@` would be the wrong default — and a *scheme-less* tail password
+/// that contains a path separator is not recognised, because its run begins after
+/// that separator. `None` when the value carries no credential-shaped userinfo.
 fn redact_userinfo(value: &str) -> Option<String> {
     // A trailing space or newline is a copy/paste artefact, not part of a host.
     let value = value.trim();
@@ -391,12 +507,16 @@ fn redact_userinfo(value: &str) -> Option<String> {
     let after = &rest[at + 1..];
     let host = after.split(['/', '?', '#']).next().unwrap_or("");
     if userinfo.is_empty() {
-        return None;
+        // No userinfo in the authority, so there is nothing to replace there —
+        // but the value can still embed a credential later
+        // (`http://@host.lan/a:b@c`). The tail scan decides; `None` when it finds
+        // nothing either.
+        return mask_tail_runs(after).map(|tail| format!("{prefix}@{tail}"));
     }
     if prefix.is_empty() {
         // Scheme-less: a colon is what distinguishes `user:pass@host` from a
         // bare address, and the listed scheme words have no password at all.
-        if !userinfo.contains(':') {
+        if !carries_credential_colon(userinfo) {
             return None;
         }
         let word = userinfo
@@ -415,14 +535,19 @@ fn redact_userinfo(value: &str) -> Option<String> {
         // `https:///root:1234@nas.lan` looks like: there the separator sits at
         // index 0, so the empty candidate carried no colon and the value was
         // published verbatim. Ambiguity is resolved by masking.
-        if s < at && !rest[..s].contains(':') && !rest[..at].contains(':') {
+        if s < at && !carries_credential_colon(&rest[..s]) && !carries_credential_colon(&rest[..at])
+        {
             return None;
         }
     }
-    let masked = if userinfo.contains(':') {
+    let masked = if carries_credential_colon(userinfo) {
         "***:***"
     } else {
         "***"
+    };
+    let after = match mask_tail_runs(after) {
+        Some(tail) => tail,
+        None => after.to_string(),
     };
     Some(format!("{prefix}{masked}@{after}"))
 }
@@ -1154,6 +1279,45 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::*;
 
+    /// Process environment is the highest-precedence config layer, so a test that
+    /// asserts a **file** layer value only proves what it claims on a machine that
+    /// does not export that key: with `TARGET_LANGS=id` left behind by a manual
+    /// daemon run, `write_overrides_merges_and_round_trips` fails on correct code
+    /// and `cargo test` goes red for a reason that has nothing to do with the
+    /// commit under review. Scrub every pipeline key for the duration of such a
+    /// test and put the environment back on drop. Any test that mutates a key
+    /// itself must still hold `ENV_LOCK`; this guard only removes *ambient* values.
+    struct ConfigEnvScrubbed(Vec<(String, Option<std::ffi::OsString>)>);
+
+    impl ConfigEnvScrubbed {
+        fn new() -> Self {
+            let keys: Vec<String> = ENV_ALLOWLIST
+                .iter()
+                .chain(ENV_ONLY_KEYS.iter())
+                .map(|k| (*k).to_string())
+                .collect();
+            let saved = keys
+                .iter()
+                .map(|k| (k.clone(), std::env::var_os(k)))
+                .collect();
+            for k in &keys {
+                std::env::remove_var(k);
+            }
+            Self(saved)
+        }
+    }
+
+    impl Drop for ConfigEnvScrubbed {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     #[test]
     fn env_parser_handles_export_and_quotes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1170,6 +1334,12 @@ mod tests {
     fn stray_env_never_enters_config_map() {
         // Process env wins only for pipeline-owned keys: PATH-style strays
         // must not leak into the map (or `/config` output).
+        //
+        // This test sets `TARGET_LANGS`, an allowlisted key, so it must hold
+        // `ENV_LOCK`: without it the value leaks into every test running in
+        // parallel, and a test asserting the *file* layer sees the environment win
+        // instead — the intermittent `["id"] != ["id","en","es"]` failure.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("ASRSUB_TEST_BOGUS_XYZ", "1");
         std::env::set_var("TARGET_LANGS", "id");
         let raw = RawConfig::load();
@@ -1303,6 +1473,7 @@ mod tests {
     #[test]
     fn write_overrides_merges_and_round_trips() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _scrub = ConfigEnvScrubbed::new();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
         let r = write_overrides(&[
@@ -1355,6 +1526,7 @@ mod tests {
         // the loader must read "" as unset too — otherwise a default-true
         // switch could never be turned on from the dashboard.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _scrub = ConfigEnvScrubbed::new();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pipeline.env"), "AI_MARKER_CUE=\n").unwrap();
         std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
@@ -1369,6 +1541,7 @@ mod tests {
     #[test]
     fn unparseable_numbers_fall_back_to_defaults() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _scrub = ConfigEnvScrubbed::new();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("pipeline.env"),
@@ -1511,6 +1684,7 @@ mod tests {
         // A key whose *name* carries no secret hint still loses its userinfo:
         // `/config` is unauthenticated.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _scrub = ConfigEnvScrubbed::new();
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("pipeline.env"),
@@ -1616,9 +1790,10 @@ mod tests {
             redact_userinfo("https://bazarr.lan:6767/api?x=a@b").as_deref(),
             Some("https://***:***@b")
         );
-        // A `@` in a path with no credential in front of it is left alone: the
-        // last `@` is in the path, and neither the text before the separator nor
-        // the text before the `@` carries a colon.
+        // Colon-free tails are left alone: a path `@` under the `file:` scheme
+        // (which allows an empty host), and an authority-less user name, where the
+        // extra slashes make it a name with no password in it. Neither the text
+        // before the separator nor the text before the `@` carries a colon.
         assert_eq!(redact_userinfo("file:///mnt/nas/a@b.mkv"), None);
         assert_eq!(redact_userinfo("https:///path@x"), None);
         // An *empty authority* is the case that made "nothing in front of the
@@ -1651,22 +1826,124 @@ mod tests {
         );
     }
 
-    /// The tail after the masked userinfo is copied as it stands, so a value that
-    /// embeds a *second* credentialed URL in its own path or query keeps that
-    /// inner pair visible. A documented limitation (see `redact_userinfo`), not an
-    /// oversight: it takes two `user:pass@` runs in one value, and re-scanning the
-    /// tail rewrote ordinary base URLs. Pinned so a change to it is deliberate.
+    /// Every credential-shaped run is masked, not only the authority's: the tail
+    /// is scanned too. A run starts after the innermost `scheme://` in front of the
+    /// `@`, or after the last path/query separator when there is none, so the
+    /// readable prefix survives and a redirected URL stays legible. This replaced a
+    /// documented limitation — the tail used to be copied as it stood, which
+    /// published an inner `svc:pw` from unauthenticated `/config`.
     #[test]
-    fn a_second_credential_in_the_tail_is_a_documented_limitation() {
+    fn a_second_credential_in_the_tail_is_masked_too() {
         assert_eq!(
             redact_userinfo("https://user:pw@gw.lan/redirect?url=http://a:b@c").as_deref(),
-            Some("https://***:***@gw.lan/redirect?url=http://a:b@c")
+            Some("https://***:***@gw.lan/redirect?url=http://***:***@c")
+        );
+        assert_eq!(
+            redact_userinfo("https://nominal@host.lan/redir?url=http://svc:pw@inner.lan")
+                .as_deref(),
+            Some("https://***@host.lan/redir?url=http://***:***@inner.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://user:pw@h1/a:b@h2/c:d@h3").as_deref(),
+            Some("https://***:***@h1/***:***@h2/***:***@h3")
+        );
+        // A tail password containing a separator is caught as well, because the run
+        // starts after the `scheme://` and not after that `/`.
+        assert_eq!(
+            redact_userinfo("https://nominal@host.lan/redir?url=http://svc:pa/ss@inner.lan")
+                .as_deref(),
+            Some("https://***@host.lan/redir?url=http://***:***@inner.lan")
+        );
+        // An empty authority publishes nothing itself, but the tail can still
+        // carry a credential — this used to return `None` and publish it.
+        assert_eq!(
+            redact_userinfo("http://@host.lan/a:b@c").as_deref(),
+            Some("http://@host.lan/***:***@c")
+        );
+        assert_eq!(
+            redact_userinfo("https://@host.lan/root:1234@nas.lan").as_deref(),
+            Some("https://@host.lan/***:***@nas.lan")
         );
         // A base URL that merely embeds another URL, with no colon in front of a
         // `@`, is still untouched.
         assert_eq!(
             redact_userinfo("https://gw.lan/redirect?url=http://nominal.lan/x"),
             None
+        );
+        assert_eq!(
+            redact_userinfo("https://user@host.lan/api?x=a@b").as_deref(),
+            Some("https://***@host.lan/api?x=a@b")
+        );
+        assert_eq!(redact_userinfo("http://@host.lan"), None);
+        // Documented residue: a *scheme-less* tail password containing a separator
+        // begins its run after that separator, so it is not recognised.
+        assert_eq!(
+            redact_userinfo("https://nominal@host.lan/redir?to=a:b/c@d").as_deref(),
+            Some("https://***@host.lan/redir?to=a:b/c@d")
+        );
+    }
+
+    /// The colon separating a user name from a password is not always a literal
+    /// `:` byte. Matching only the byte published `https:///user%3Apw@host`
+    /// verbatim — the same empty-authority class the previous round claimed to
+    /// close — while the literal spelling of that value was masked. `/config` is
+    /// answered without authentication, so every spelling counts.
+    #[test]
+    fn an_encoded_colon_is_credential_evidence() {
+        for (value, want) in [
+            ("https:///user%3Apw@host.lan", "https://***:***@host.lan"),
+            ("file:///user%3Apw@host.lan", "file://***:***@host.lan"),
+            (
+                "smb:///user%3Apw@server/share",
+                "smb://***:***@server/share",
+            ),
+            ("http:////user%3Apw@host.lan", "http://***:***@host.lan"),
+            ("https://?x=user%3Apw@host.lan", "https://***:***@host.lan"),
+            ("https://#user%3Apw@host.lan", "https://***:***@host.lan"),
+            ("https://////user%3Apw@host.lan", "https://***:***@host.lan"),
+            ("https:///user%253Apw@host.lan", "https://***:***@host.lan"),
+            (
+                "https:///user%25253Apw@host.lan",
+                "https://***:***@host.lan",
+            ),
+            ("https:///user&#58;pw@host.lan", "https://***:***@host.lan"),
+            ("https:///user&#x3a;pw@host.lan", "https://***:***@host.lan"),
+            (
+                "https:///user&colon;pw@host.lan",
+                "https://***:***@host.lan",
+            ),
+            (
+                "https:///user\u{FF1A}pw@host.lan",
+                "https://***:***@host.lan",
+            ),
+            ("user%3Apw@host.lan:8080", "***:***@host.lan:8080"),
+            ("https:///user:pa%2Fss@host.lan", "https://***:***@host.lan"),
+        ] {
+            assert_eq!(
+                redact_userinfo(value).as_deref(),
+                Some(want),
+                "credential published verbatim: {value:?}"
+            );
+        }
+        // A `%` that hides no colon is not a credential.
+        assert_eq!(redact_userinfo("https://bazarr.lan/a%20b@c"), None);
+        assert_eq!(redact_userinfo("file:///mnt/nas/a%20b@c.mkv"), None);
+    }
+
+    /// A colon-free authority-less userinfo is published: extra slashes after a
+    /// special scheme make it a user name with no password in it (WHATWG reads
+    /// `https://///pw@host` as the user name `pw`), which is not the credential
+    /// this function exists for — masking every path containing an `@` would be
+    /// the wrong default. Pinned so the asymmetry is deliberate, not accidental.
+    #[test]
+    fn a_colon_free_authority_less_userinfo_is_a_documented_exception() {
+        assert_eq!(redact_userinfo("https://///pw@host"), None);
+        assert_eq!(redact_userinfo("https:///path@x"), None);
+        assert_eq!(redact_userinfo("file:///mnt/nas/a@b.mkv"), None);
+        // With a colon in the same position it is a credential, and it is masked.
+        assert_eq!(
+            redact_userinfo("https://///pw:pw@host").as_deref(),
+            Some("https://***:***@host")
         );
     }
 
@@ -1730,9 +2007,18 @@ mod tests {
             "file-layer-key",
             "a key in pipeline.env must not authenticate control requests"
         );
-        if std::path::Path::new("/run/secrets/control_api_key").exists() {
-            assert!(
-                !cfg.control_key().is_empty(),
+        // Branch on the code's own predicate — a readable, non-empty file — not on
+        // `Path::exists`. Compose secrets are typically 0400 root-owned while
+        // `cargo test` runs as the invoking user, and a k8s `/run/secrets/<name>/`
+        // mount is a directory: `exists()` alone would take the file branch, find
+        // no key, and report a failure that is the harness's fault, not the code's.
+        let shipped_file_key = std::fs::read_to_string("/run/secrets/control_api_key")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        if !shipped_file_key.is_empty() {
+            assert_eq!(
+                cfg.control_key(),
+                shipped_file_key,
                 "a host that ships the secret file must authenticate from the file"
             );
             std::env::set_var("CONTROL_API_KEY", "env-layer-key");

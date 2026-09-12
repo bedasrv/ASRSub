@@ -36,8 +36,9 @@ Put these in the container environment (the compose `environment:` block or
 the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
 `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
-`ANILIST_BASE_URL`, `ANILIST_CACHE`, `RUST_LOG` (verbosity, `EnvFilter`
-syntax). Each provider entry's `key_env` is also read from the process
+`ANILIST_BASE_URL`, `RUST_LOG` (verbosity, `EnvFilter` syntax).
+`ANILIST_CACHE` is **not** one of these: it is an ordinary settings field,
+editable in the dashboard and settable from `pipeline.env`. Each provider entry's `key_env` is also read from the process
 environment, never from a config file — that is how `provider_keys.env`
 reaches the pipeline.
 
@@ -237,8 +238,11 @@ variable if set, else that config key, whose shipped default is
 **environment variable**, which exists as a test fallback. An empty
 `CONTROL_API_KEY` therefore contributes no key, and with no key file present
 every control request is refused — but blanking the variable alone does **not**
-disable the control API while a key file is there; remove the secret file (or
-point `CONTROL_API_KEY_FILE` at nothing) as well. The *token* is never read
+disable the control API while a key file is there; remove the secret file as
+well. No value of `CONTROL_API_KEY_FILE` can prevent the daemon reading
+`/run/secrets/control_api_key`: the literal path is an unconditional candidate,
+and an empty variable is treated as unset, so the config key falls back to that
+same default. The *token* is never read
 from a config *value*: a key written into `pipeline.env` or
 `config.overrides.json` does not authenticate, and the daemon no longer reads
 `PIPE_TOKEN`. The *path* in `CONTROL_API_KEY_FILE` is an ordinary config key,

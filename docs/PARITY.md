@@ -18,8 +18,10 @@ the *decisions*.
 - Rust coverage **at the time of the port**: 72 unit `#[test]` (incl. the
   full-program sim, 40+ asserts across phases A–G) + 4 binary-boundary
   integration tests + 21 stdlib-unittest release-contract cases. The tree has
-  grown since (105 unit tests and 53 release-contract cases today, per
-  `README.md`); this file records the port decision, not the current counts.
+  grown since: 108 unit tests + 4 integration tests (`cargo test`; `README.md`
+  quotes the same pair) and 53 release-contract cases (`python3 -m unittest
+  tests.test_immutable_release_contract tests.test_release_descriptor_execution`).
+  This file records the port decision, not the current counts.
 - Each row maps one legacy behavior area to its Rust status. Live contracts
   remain `README.md` + `docs/HEALTH.md`; `docs/PLAN.md` is provenance only.
 
