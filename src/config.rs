@@ -359,11 +359,13 @@ fn carries_credential_colon(s: &str) -> bool {
     if colon_like(s) {
         return true;
     }
-    // Escape layers: `%3A` is a colon, `%253A` is one layer further down, and a
-    // value that arrives double- or triple-encoded still carries a credential.
+    // Escape layers: `%3A` is a colon and `%253A` is one layer further down; the
+    // same credential can also arrive with the ampersand of an entity encoded
+    // (`&amp;#58`), so each round tries both spellings and stops when neither
+    // decodes.
     let mut current = s.to_string();
     for _ in 0..PERCENT_ESCAPE_LAYERS {
-        match percent_decode_once(&current) {
+        match percent_decode_once(&current).or_else(|| entity_decode_once(&current)) {
             Some(decoded) => {
                 if colon_like(&decoded) {
                     return true;
@@ -389,6 +391,69 @@ fn carries_credential_colon(s: &str) -> bool {
 /// Ambiguity resolves by masking, so the credential-free `&#580` is the price.
 fn entity_colon(lower: &str) -> bool {
     lower.contains("&#58") || lower.contains("&#x3a") || lower.contains("&colon")
+}
+
+/// Whether the `#` at byte `i` of `s` introduces an HTML entity rather than a
+/// fragment: `&#58`, `&#x3a`, or one layer deeper (`&amp;#58`, `&#38;#58`).
+///
+/// The authority split reads the first `/`, `?` or `#` as the end of the
+/// authority, so a `#` that belongs to an entity moved the split past the
+/// password: `a@b&#58Zk1P@host.lan` was split as `a@b` plus
+/// `&#58Zk1P@host.lan`, the entity's `&`-run was declared the host, and the whole
+/// credential was published by the unauthenticated `/config`. A `#` directly
+/// after an `&`, or after an ampersand written as an entity, is an entity
+/// introducer.
+fn hash_starts_entity(s: &str, i: usize) -> bool {
+    let before = &s[..i];
+    if before.ends_with('&') {
+        return true;
+    }
+    let trimmed = before.trim_end_matches(';').to_ascii_lowercase();
+    trimmed.ends_with("&amp") || trimmed.ends_with("&#38") || trimmed.ends_with("&#x26")
+}
+
+/// Byte index of the first path/query/fragment separator in `s`, ignoring a `#`
+/// that belongs to an entity (see [`hash_starts_entity`]).
+fn first_separator(s: &str) -> Option<usize> {
+    s.char_indices().find_map(|(i, c)| match c {
+        '/' | '?' => Some(i),
+        '#' if !hash_starts_entity(s, i) => Some(i),
+        _ => None,
+    })
+}
+
+/// One layer of entity-decoding for the ampersand (`&amp;` / `&#38;` -> `&`), or
+/// `None` when the value carries no such escape. `&amp;#58pw@host` is the same
+/// credential as `&#58pw@host`, one encoding layer further down.
+fn entity_decode_once(s: &str) -> Option<String> {
+    if !s.contains('&') {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut decoded = false;
+    while let Some(i) = rest.find('&') {
+        let tail = &rest[i..];
+        let lower = tail.to_ascii_lowercase();
+        let pattern = ["&amp;", "&#38;", "&#x26;"]
+            .into_iter()
+            .find(|p| lower.starts_with(p));
+        match pattern {
+            Some(p) => {
+                out.push_str(&rest[..i]);
+                out.push('&');
+                rest = &tail[p.len()..];
+                decoded = true;
+            }
+            None => {
+                let step = tail.chars().next().map(char::len_utf8).unwrap_or(1);
+                out.push_str(&rest[..i + step]);
+                rest = &rest[i + step..];
+            }
+        }
+    }
+    out.push_str(rest);
+    decoded.then_some(out)
 }
 
 /// One layer of percent-decoding (`%3A` -> `:`), or `None` when the value carries
@@ -456,32 +521,81 @@ pub fn mask_for_log(value: &str) -> Cow<'_, str> {
 /// Path of the single-instance lock for `state_file`.
 ///
 /// The state path is operator input and this lock is a real file on disk, so a
-/// credential-shaped value would be written into a filename. Masking keeps the
-/// name credential-free and deterministic; a credential-free path (every path an
-/// operator actually writes) comes back unchanged, so the one-daemon-per-state
-/// guard still keys on the real path.
+/// credential-shaped name would be written into a filename. The lock therefore
+/// sits beside the state file under its *masked* name, and only the file name is
+/// masked: masking the whole path let the run-widening eat the leading directory
+/// and drop the lock into the working directory (`/x/user:pw@host/sub/st.jsonl`
+/// became `***:***@host/sub/st.daemon.lock`, a relative path).
+///
+/// A credential-free name (every path an operator actually writes) comes back
+/// unchanged, so the one-daemon-per-state guard still keys on the real path. When
+/// masking does change the name, two different credentials would collapse onto
+/// one file — which would let a second daemon pass the guard — so the masked name
+/// also carries a short digest of the real path.
 pub fn lock_path(state_file: &Path) -> PathBuf {
-    let masked = mask_for_log(&state_file.display().to_string()).into_owned();
-    PathBuf::from(masked).with_extension("daemon.lock")
+    let name = state_file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let masked = mask_for_log(&name).into_owned();
+    if masked == name {
+        return state_file.with_extension("daemon.lock");
+    }
+    let digest = fnv1a64(state_file.display().to_string().as_bytes());
+    // `with_file_name` keeps the state file's own directory: a relative path stays
+    // relative (a bare `state.jsonl` keeps its lock in the working directory) and
+    // an absolute one stays absolute.
+    state_file.with_file_name(format!("{masked}.{digest:016x}.daemon.lock"))
+}
+
+/// FNV-1a over the bytes of a path, used only to keep two masked lock names
+/// apart. Credential-free by construction: the digest is what the file name
+/// shows instead of the credential it stands for.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Whether `text` reads as a host with an optional port: no colon at all, one
-/// colon whose tail is all digits, or a bracketed IPv6 literal
+/// colon whose tail is all digits, or a *real* bracketed IPv6 literal
 /// (`[::1]`, `[fe80::1%eth0]:8080`) whose colons belong to the address. A colon
 /// in this position is a port, not evidence of a credential, so a run must never
 /// start inside it. Malformed shapes — an empty host (`:8080`), an empty port
 /// (`host:`), a second colon (`host:1:2`) — are `false`, so the caller keeps the
 /// fail-closed fallback and masks; the readable host is that price.
+///
+/// Two spellings are `false` even though they look like a host, because treating
+/// them as one handed the tail scan a floor that hid a password:
+///
+/// * A colon written any other way inside the candidate (`%3A`, an entity, the
+///   full-width `\u{FF1A}`) is credential evidence, not a port: `b%3AZk3P` and
+///   `b&#58Zk1P` were read as hosts, and the credential behind them was published
+///   by the unauthenticated `/config`.
+/// * A bracket is not a licence to hide a `user:pass`: only text that parses as an
+///   IPv6 address (an optional `%zone` aside) counts, so `user@[root:s3cr3t]/x@y`
+///   keeps the fail-closed fallback instead of publishing `root:s3cr3t`.
 fn is_host_port(text: &str) -> bool {
     let port_ok = |port: &str| {
         !port.is_empty() && !port.contains(':') && port.bytes().all(|b| b.is_ascii_digit())
+    };
+    // A colon in any other spelling means this is a credential, not a host.
+    let hidden_colon = |part: &str| {
+        part.contains('%')
+            || part.contains('&')
+            || part.contains('\u{FF1A}')
+            || part.contains('\u{FE55}')
     };
     if let Some(rest) = text.strip_prefix('[') {
         // Bracketed IPv6 literal, optionally followed by a port.
         let Some((literal, tail)) = rest.split_once(']') else {
             return false;
         };
-        if literal.is_empty() {
+        let address = literal.split('%').next().unwrap_or("");
+        if address.parse::<std::net::Ipv6Addr>().is_err() {
             return false;
         }
         return match tail.strip_prefix(':') {
@@ -490,8 +604,8 @@ fn is_host_port(text: &str) -> bool {
         };
     }
     match text.split_once(':') {
-        None => !text.is_empty(),
-        Some((host, port)) => !host.is_empty() && port_ok(port),
+        None => !text.is_empty() && !hidden_colon(text),
+        Some((host, port)) => !host.is_empty() && !hidden_colon(host) && port_ok(port),
     }
 }
 
@@ -578,10 +692,10 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
 ///   URL costs information; publishing `root:1234` costs the credential. The
 ///   colon may be spelled literally, percent-encoded up to
 ///   [`PERCENT_ESCAPE_LAYERS`] layers deep, as an HTML entity or as the full-width
-///   `\u{FF1A}`. A numeric entity that continues past the colon (`&#580`,
-///   `&#x3afb`) is a different character and is not read as one; a named
-///   semicolon-less `&colon` followed by a word is still read as a colon, because
-///   `&colonpw` is the spelling this must catch.
+///   `\u{FF1A}`, and one encoding layer deeper (`&amp;#58`). A numeric entity
+///   counts whatever follows it: `&#580` is U+0244 and `&#x3afb` a CJK ideograph,
+///   but guarding on the next character published `svc&#x3aabc@inner`, so the
+///   credential-free `&#580` is the price of fail-closed masking.
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
@@ -609,6 +723,11 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
 /// `nominal@host/redir?url=http://svc:pw@inner` masks `svc:pw` while the bare name
 /// stays readable.
 ///
+/// The authority ends at the first `/`, `?` or `#` **that is not part of an
+/// entity**: a `#` in `&#58` is an entity introducer, so a name carrying an
+/// escaped colon keeps the credential on the userinfo side of the split instead
+/// of publishing it in a "tail" the scan never treats as a credential.
+///
 /// A *colon-free* authority-less userinfo is published
 /// (`https://///pw@host`, `https:///path@x`) — the extra slashes make it a user
 /// name with no password, and masking every path that contains an `@` would be
@@ -626,8 +745,9 @@ fn redact_userinfo(value: &str) -> Option<String> {
         Some((scheme, rest)) if is_scheme(scheme) => (format!("{scheme}://"), rest),
         _ => (String::new(), value),
     };
-    // Where the authority ends: the first path/query/fragment separator.
-    let sep = rest.find(['/', '?', '#']);
+    // Where the authority ends: the first path/query/fragment separator, with a
+    // `#` that belongs to an entity ignored (`a@b&#58Zk1P@host.lan`).
+    let sep = first_separator(rest);
     // A credential inside the authority is separated by the *last* `@` before
     // that separator (the WHATWG authority split, and the fail-closed choice:
     // `user@user@host` loses both names rather than one); anything later is a
@@ -640,7 +760,10 @@ fn redact_userinfo(value: &str) -> Option<String> {
     };
     let userinfo = &rest[..at];
     let after = &rest[at + 1..];
-    let host = after.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match first_separator(after) {
+        Some(i) => &after[..i],
+        None => after,
+    };
     // The host[:port] that follows the userinfo is not credential evidence: a port
     // colon must not let the tail scan widen over the readable host it belongs to.
     let floor = if is_host_port(host) { host.len() } else { 0 };
@@ -2153,15 +2276,108 @@ mod tests {
 
     /// `/config` is not the only sink for these values: a warning that echoed a
     /// configured value published it to stderr, so log sites mask too.
+
+    #[test]
+    fn an_entity_colon_inside_a_name_does_not_hide_the_password() {
+        // The authority split read the `#` in `&#58` as a fragment boundary, so the
+        // credential landed in a "tail" that the scan never treats as a credential
+        // and the unauthenticated `/config` published it verbatim. A `#` that
+        // belongs to an entity is an entity introducer, not a fragment.
+        for v in [
+            "a@b&#58Zk1P@host.lan",
+            "a@b&#x3aZk1P@host.lan",
+            "a@b&amp;#58Zk1P@host.lan",
+            "ftp://a@b&#58Zk1P@host.lan",
+            "https://us@er&#58;Zk1P@host.lan",
+        ] {
+            let out = redact_userinfo(v).expect(v);
+            assert!(!out.contains("Zk1P"), "{v} -> {out}");
+        }
+        assert_eq!(
+            redact_userinfo("a@b&#58Zk1P@host.lan").as_deref(),
+            Some("***:***@host.lan")
+        );
+    }
+
+    #[test]
+    fn an_escaped_colon_after_a_name_does_not_hide_the_password() {
+        // The same family with the colon written as `%3A`, a named entity or the
+        // full-width character: the text in front of the `@` carries no literal
+        // colon, so the split chose it as a name and the password was published.
+        for v in [
+            "a@b%3AZk3P/ss@host.lan",
+            "a@b\u{FF1A}Zk3P/ss@host.lan",
+            "a@b&colon#Zk1P@host.lan",
+            "ftp://a@b%3AZk3P/ss@host.lan",
+            "ftp://a@b&colonZk3P/ss@host.lan",
+        ] {
+            let out = redact_userinfo(v).expect(v);
+            assert!(
+                !out.contains("Zk3P") && !out.contains("Zk1P"),
+                "{v} -> {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_real_ipv6_literal_is_a_bracketed_host() {
+        // The host slot is excluded from the credential scan, so a bracket is not
+        // a licence to hide a `user:pass`: anything that is not an IPv6 address
+        // keeps the fail-closed fallback.
+        for v in [
+            "user@[root:s3cr3t]/x@y",
+            "user@[svc:pw]:80/x@y",
+            "https://u@[svc:pw]:8080/x@y",
+        ] {
+            let out = redact_userinfo(v).expect(v);
+            assert!(
+                !out.contains("s3cr3t") && !out.contains("svc:pw"),
+                "{v} -> {out}"
+            );
+        }
+        // A real literal still counts as a host, so the readable name survives.
+        assert_eq!(redact_userinfo("user@[::1]:8080/x@y"), None);
+        assert_eq!(redact_userinfo("user@[fe80::1%eth0]:80/pw@y"), None);
+    }
+
+    #[test]
+    fn a_credential_without_a_host_after_it_is_not_a_pair() {
+        // No `@` after the password, so there is nothing to attach it to — the
+        // same choice `user:pass` with no host gets. The scan needs an `@`.
+        assert_eq!(redact_userinfo("a@b&#58Zk1P"), None);
+        assert_eq!(redact_userinfo("r?u=svc:p"), None);
+    }
+
     #[test]
     fn the_single_instance_lock_name_never_carries_a_credential() {
+        // A credential-free path keeps its directory and its stem: this is every
+        // path an operator actually writes, so the guard still keys on the real
+        // path.
         assert_eq!(
             lock_path(Path::new("/var/lib/asrsub/state.jsonl")),
             PathBuf::from("/var/lib/asrsub/state.daemon.lock")
         );
         assert_eq!(
-            lock_path(Path::new("user:pa?ss@sonarr")),
-            PathBuf::from("***:***@sonarr.daemon.lock")
+            lock_path(Path::new("state.jsonl")),
+            PathBuf::from("state.daemon.lock")
+        );
+        // A credential-shaped name is masked *in place*: masking the whole path
+        // let the widening eat the leading directory and drop the lock into the
+        // working directory instead of beside the state file.
+        let lock = lock_path(Path::new("/x/user:pw@host/sub/st.jsonl"));
+        assert_eq!(lock, PathBuf::from("/x/user:pw@host/sub/st.daemon.lock"));
+        let masked = lock_path(Path::new("user:pa?ss@sonarr"));
+        let name = masked.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(!name.contains("pa?ss"), "{name}");
+        assert!(
+            name.starts_with("***:***@sonarr.") && name.ends_with(".daemon.lock"),
+            "{name}"
+        );
+        // Two state paths that differ only inside the credential must not collapse
+        // onto one lock name: that would let a second daemon pass the guard.
+        assert_ne!(
+            lock_path(Path::new("/x/a:pw1@h/st.jsonl")),
+            lock_path(Path::new("/x/a:pw2@h/st.jsonl"))
         );
     }
 

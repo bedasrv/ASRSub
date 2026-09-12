@@ -604,9 +604,61 @@ class TestMaskingHasNoSecondSink(unittest.TestCase):
         self.assertNotIn("value = v,", config)
         # The masker is shared, not re-implemented at a call site.
         self.assertIn("pub fn mask_for_log", config)
-        for rel in ("src/bazarr.rs", "src/jellyfin.rs", "src/pipeline.rs", "src/translate.rs"):
+        for rel in (
+            "src/bazarr.rs",
+            "src/jellyfin.rs",
+            "src/pipeline.rs",
+            "src/translate.rs",
+            "src/asr.rs",
+            "src/jimaku.rs",
+            "src/ladder.rs",
+            "src/providers.rs",
+        ):
             text = (REPO / rel).read_text(encoding="utf-8")
             self.assertIn("mask_for_log", text, msg=f"{rel} logs errors that can carry a URL")
+
+    def test_unauthenticated_views_and_payloads_mask_config_values(self):
+        """`/ui/*`, `/ready` and the CLI error chain are sinks too.
+
+        `/config` masks, but the dashboard, the readiness payload and an error
+        chain each published a configured value verbatim: the settings form
+        rendered every field raw, `/ui/overview` and `/ready` printed the media
+        path, and `reqwest` puts the request URL into its error text.
+        """
+        web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+        api = (REPO / "src" / "api.rs").read_text(encoding="utf-8")
+        main_rs = (REPO / "src" / "main.rs").read_text(encoding="utf-8")
+        providers = (REPO / "src" / "providers.rs").read_text(encoding="utf-8")
+        # The settings form and the overview stat must not render a raw value.
+        self.assertNotIn("(s.cfg.nas_media_prefix)", web)
+        self.assertIn("mask_for_log(&s.cfg.nas_media_prefix)", web)
+        display = web[web.index("fn field_display_value") : web.index("fn pinned_keys")]
+        self.assertIn("mask_for_log", display)
+        # The readiness payload reports the media path to an unauthenticated caller.
+        self.assertNotIn('"path": cfg.nas_media_prefix', api)
+        self.assertIn("mask_for_log(&cfg.nas_media_prefix)", api)
+        # One sink for every error chain, not a chase per site.
+        self.assertIn("mask(e.to_string())", main_rs)
+        self.assertIn("e.chain()", main_rs)
+        # The providers loader names the path it tried.
+        self.assertIn('mask_for_log(&p.display().to_string())', providers)
+        self.assertNotIn("format!(\"read providers file {path:?}\")", providers)
+        self.assertNotIn("format!(\"parse providers file {path:?}\")", providers)
+
+    def test_the_redaction_core_keeps_the_round_eleven_fixes(self):
+        """The two rules that closed the `@`-in-name plus escaped-colon family.
+
+        A `#` inside an entity is not a fragment boundary, and a bracketed host is
+        only a host when it really is an IPv6 literal — otherwise the split and the
+        host slot hand the credential scan a floor that hides a password.
+        """
+        config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        self.assertIn("fn first_separator", config)
+        self.assertIn("fn hash_starts_entity", config)
+        self.assertIn("fn entity_decode_once", config)
+        self.assertIn("parse::<std::net::Ipv6Addr>()", config)
+        for value in ("a@b&#58Zk1P@host.lan", "a@b%3AZk3P/ss@host.lan", "user@[root:s3cr3t]/x@y"):
+            self.assertIn(value, config, msg=f"{value} must stay pinned by a test")
 
 
 if __name__ == "__main__":

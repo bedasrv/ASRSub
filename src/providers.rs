@@ -100,17 +100,23 @@ impl ProvidersFile {
                 }
             }
         }
+        // The path is operator input and this message reaches stderr and the log,
+        // so it is masked like every other sink for a configured value.
+        let tried: Vec<String> = tried
+            .iter()
+            .map(|p| crate::config::mask_for_log(&p.display().to_string()).into_owned())
+            .collect();
         anyhow::bail!(
-            "providers file not found (tried {:?}); set PROVIDERS_FILE or --providers-file",
-            tried
+            "providers file not found (tried {tried:?}); set PROVIDERS_FILE or --providers-file"
         )
     }
 
     fn load_exact(path: &Path) -> Result<Self> {
+        let shown = crate::config::mask_for_log(&path.display().to_string()).into_owned();
         let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read providers file {path:?}"))?;
+            .with_context(|| format!("read providers file {shown:?}"))?;
         let mut v: Self = serde_json::from_str(&text)
-            .with_context(|| format!("parse providers file {path:?}"))?;
+            .with_context(|| format!("parse providers file {shown:?}"))?;
         v.llm_translation_models
             .sort_by(|a, b| a.probe_latency_s.partial_cmp(&b.probe_latency_s).unwrap());
         Ok(v)

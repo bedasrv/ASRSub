@@ -221,7 +221,10 @@ impl Jimaku {
             anyhow::bail!("jimaku download: HTTP 429 rate limited reset_after={reset_after}");
         }
         if let Err(e) = r.error_for_status_ref() {
-            anyhow::bail!("jimaku download: HTTP {e}");
+            anyhow::bail!(
+                "jimaku download: HTTP {}",
+                crate::config::mask_for_log(&format!("{e}"))
+            );
         }
         let mut fh = tokio::fs::File::create(&tmp).await?;
         let stream_result = async {

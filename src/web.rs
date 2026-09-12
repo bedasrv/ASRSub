@@ -285,7 +285,7 @@ async fn overview_frag(s: &Arc<AppState>, flash: Option<(&str, bool)>) -> Markup
                         div class="v" { (ok_pill(ready, "ready", "not ready")) } }
                     div class="stat" { div class="k" { "Media root" }
                         div class="v" { (ok_pill(checks["media_root"]["ok"].as_bool().unwrap_or(false), "mounted", "missing")) }
-                        div class="muted mono" { (s.cfg.nas_media_prefix) } }
+                        div class="muted mono" { (crate::config::mask_for_log(&s.cfg.nas_media_prefix).as_ref()) } }
                     div class="stat" { div class="k" { "Providers" }
                         div class="v" { (ok_pill(checks["providers"]["ok"].as_bool().unwrap_or(false), "ok", "incomplete")) }
                         div class="muted" { "llm " (checks["providers"]["llm"].as_u64().unwrap_or(0)) " · whisper " (checks["providers"]["whisper"].as_u64().unwrap_or(0)) } }
@@ -625,11 +625,18 @@ async fn h_provenance(State(s): State<Arc<AppState>>) -> Html<String> {
 // ---------------------------------------------------------------- settings --
 
 fn field_display_value(cfg: &Config, key: &str, default: &str) -> String {
-    cfg.raw
+    let value = cfg
+        .raw
         .get(key)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or_else(|| default.to_string());
+    // The settings form is served without authentication, so it obeys the same
+    // rule as `/config`: a credential inside a value is masked. The hidden
+    // `orig__` baseline is rendered from this same string, so an untouched field
+    // posts its masked value back and `collect_changes` skips it — a masked
+    // display can never be written to disk.
+    crate::config::mask_for_log(&value).into_owned()
 }
 
 /// Keys whose effective value comes from the process environment. Process env
@@ -654,7 +661,9 @@ fn settings_frag(cfg: &Config, msg: Option<(bool, String)>) -> Markup {
                 div class="banner" {
                     "Edits are written to " code { "config.overrides.json" } ", which beats "
                     code { "pipeline.env" } " but not the container environment. "
-                    "Restart the daemon to apply. Secret fields left blank stay unchanged."
+                    "Restart the daemon to apply. Secret fields left blank stay unchanged. "
+                    "A credential inside a value is masked here as it is in the config API; "
+                    "type a new value to change it."
                     @if !pinned.is_empty() {
                         br;
                         span class="muted" {
@@ -1073,6 +1082,61 @@ mod tests {
         match prior {
             Some(v) => std::env::set_var("AI_MARKER_CUE", v),
             None => std::env::remove_var("AI_MARKER_CUE"),
+        }
+    }
+
+    #[test]
+    fn the_settings_form_masks_a_credential_and_cannot_save_the_mask_back() {
+        let _guard = crate::config::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
+        let prior_key = std::env::var_os("SONARR_URL");
+        // The suite must not depend on the shell it runs in: an exported
+        // SONARR_URL would pin the field and skip it as read-only.
+        std::env::remove_var("SONARR_URL");
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        crate::config::write_overrides(&[(
+            "SONARR_URL".to_string(),
+            "http://svc:PWZ9K@sonarr.lan:8989/api/v3".to_string(),
+        )])
+        .unwrap();
+        let cfg = Config::load().unwrap();
+        // The form is served without authentication, so a credential in a value
+        // must not reach the markup, exactly as in `/config`.
+        let html = settings_frag(&cfg, None).into_string();
+        assert!(
+            !html.contains("PWZ9K"),
+            "the settings form published a credential"
+        );
+        let shown = field_display_value(&cfg, "SONARR_URL", "");
+        assert_eq!(shown, "http://***:***@sonarr.lan:8989/api/v3");
+        // The hidden `orig__` baseline is rendered from that same masked string, so
+        // an untouched field posts the mask back and is skipped: saving the form
+        // can never write `***:***@host` over the real URL.
+        let untouched = form(&[("orig__SONARR_URL", &shown), ("SONARR_URL", &shown)]);
+        assert!(
+            collect_changes(&untouched).is_empty(),
+            "{:?}",
+            collect_changes(&untouched)
+        );
+        // An edited field still saves.
+        let edited = form(&[
+            ("orig__SONARR_URL", &shown),
+            ("SONARR_URL", "http://new.lan:8989"),
+        ]);
+        assert_eq!(
+            collect_changes(&edited),
+            vec![("SONARR_URL".to_string(), "http://new.lan:8989".to_string())]
+        );
+        match prior_dir {
+            Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
+            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+        }
+        match prior_key {
+            Some(v) => std::env::set_var("SONARR_URL", v),
+            None => std::env::remove_var("SONARR_URL"),
         }
     }
 

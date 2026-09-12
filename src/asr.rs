@@ -248,7 +248,11 @@ async fn whisper_request(
         let resp = match resp {
             Err(e) => {
                 pool.record_whisper_failure(idx);
-                last_err = format!("{}: transport: {e:#}", wp.endpoint);
+                last_err = format!(
+                    "{}: transport: {}",
+                    crate::config::mask_for_log(&wp.endpoint),
+                    crate::config::mask_for_log(&format!("{e:#}"))
+                );
                 continue;
             }
             Ok(r) => r,
@@ -259,7 +263,7 @@ async fn whisper_request(
             pool.record_whisper_failure(idx);
             last_err = format!(
                 "{}: HTTP {code}: {}",
-                wp.endpoint,
+                crate::config::mask_for_log(&wp.endpoint),
                 crate::srt::snippet(&body)
             );
             continue;

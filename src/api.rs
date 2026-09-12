@@ -286,7 +286,12 @@ pub(crate) fn readiness(cfg: &Config, counts: ProviderCounts) -> (bool, Value) {
         json!({
             "ready": ready,
             "checks": {
-                "media_root": {"ok": media_ok, "path": cfg.nas_media_prefix},
+                // Masked: this endpoint is answered without authentication, so the
+                // rule `/config` follows applies to the path it reports too.
+                "media_root": {
+                    "ok": media_ok,
+                    "path": crate::config::mask_for_log(&cfg.nas_media_prefix),
+                },
                 "providers": {"ok": providers_ok, "llm": counts.llm, "whisper": counts.whisper,
                               "llm_keyed": counts.llm_keyed, "whisper_keyed": counts.whisper_keyed},
                 "state_dir": {"ok": state_ok, "path": state_dir},

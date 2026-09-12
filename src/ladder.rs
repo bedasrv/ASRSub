@@ -146,7 +146,10 @@ impl Pipeline {
         let entries = match self.jimaku.search_by_anilist(anilist_id).await {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("ladder: jimaku direct: entry search failed ({tag}): {e:#}");
+                tracing::warn!(
+                    "ladder: jimaku direct: entry search failed ({tag}): {}",
+                    crate::config::mask_for_log(&format!("{e:#}"))
+                );
                 return None;
             }
         };
@@ -155,7 +158,10 @@ impl Pipeline {
         let files = match self.jimaku.list_files(entry_id, Some(episode)).await {
             Ok(f) => f,
             Err(e) => {
-                tracing::warn!("ladder: jimaku direct: file list failed ({tag}): {e:#}");
+                tracing::warn!(
+                    "ladder: jimaku direct: file list failed ({tag}): {}",
+                    crate::config::mask_for_log(&format!("{e:#}"))
+                );
                 return None;
             }
         };

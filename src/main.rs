@@ -109,18 +109,47 @@ enum Cmd {
     ConfigShow,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let cli = Cli::parse();
     init_tracing();
     // Optional config-dir override before Config::load reads the env.
     if let Some(d) = cli.config_dir.clone() {
         std::env::set_var("ASRSUB_CONFIG_DIR", &d);
     }
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("asrsub")
-        .build()?;
-    rt.block_on(async_main(cli))
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let Err(e) = rt.block_on(async_main(cli)) else {
+        return;
+    };
+    // One sink for every error text. A cause chain can carry a configured value
+    // without the site that built it knowing: `reqwest` puts the request URL into
+    // its error, the providers loader puts the path into its "tried" list.
+    // Masking the rendered chain here closes the class instead of chasing the
+    // sites, and reproduces `Result`'s own layout (`Error:`, then `Caused by:`)
+    // so operators see the shape they expect.
+    let mask = |t: String| crate::config::mask_for_log(&t).into_owned();
+    eprintln!("Error: {}", mask(e.to_string()));
+    let causes: Vec<String> = e.chain().skip(1).map(|c| mask(c.to_string())).collect();
+    match causes.len() {
+        0 => {}
+        1 => eprintln!("\nCaused by:\n    {}", causes[0]),
+        _ => {
+            eprintln!("\nCaused by:");
+            for (i, cause) in causes.iter().enumerate() {
+                eprintln!("    {i}: {cause}");
+            }
+        }
+    }
+    std::process::exit(1);
 }
 
 fn init_tracing() {
