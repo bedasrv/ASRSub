@@ -32,7 +32,8 @@ daemon serves both the dashboard and the API on `WEBHOOK_PORT`, default
   "ready": true,                       // 200 when true, 503 when false
   "checks": {
     "media_root": {"ok": true, "path": "/mnt/nas/share/media"},
-    "providers":  {"ok": true, "llm": 14, "whisper": 1},
+    "providers":  {"ok": true, "llm": 14, "whisper": 1,
+                    "llm_keyed": 14, "whisper_keyed": 1},   // resolvable keys
     "state_dir":  {"ok": true, "path": "/home/user/.config/asr-pipeline"}
   },
   "integrations": {                    // diagnostics ONLY — never gate ready
@@ -46,15 +47,23 @@ daemon serves both the dashboard and the API on `WEBHOOK_PORT`, default
 
 Readiness requires all three gating checks:
 
-1. **`media_root`** — the directory named by `NAS_MEDIA_PREFIX` exists and is
-   a directory. This is where `/data/…` paths from Sonarr/Radarr are mapped
-   and what the daemon reads; it must be the mounted media tree.
-2. **`providers`** — at least one LLM model and at least one Whisper
-   endpoint are configured in `asrsub_providers.json`. The daemon refuses to
-   start without an LLM, so a running-but-LLM-less process is impossible;
-   the Whisper count catches a file that omits STT.
-3. **`state_dir`** — the directory containing `STATE_FILE` is writable (a
-   short-lived probe file is created and removed). State lives here.
+1. **`media_root`** — the directory named by `NAS_MEDIA_PREFIX` is a mount
+   point (checked in `/proc/self/mountinfo`) or a non-empty tree. `is_dir()`
+   alone was not enough: when a bind mount's source goes away, Docker creates
+   an empty directory at the target, which used to report the media as
+   present. This is where `/data/…` paths from Sonarr/Radarr are mapped and
+   what the daemon reads; it must be the mounted media tree.
+2. **`providers`** — at least one LLM model **and** at least one Whisper
+   endpoint have a *resolvable key* (a non-empty `api_key`, or a `$key_env`
+   that is set). The daemon refuses to start without an LLM, and the pipeline
+   skips keyless endpoints, so counting configured entries hid a container
+   whose provider keys were never injected: it reported ready and then did no
+   work at all. The payload reports totals plus `llm_keyed`/`whisper_keyed`.
+3. **`state_dir`** — the directory containing `STATE_FILE` is writable. A
+   short-lived probe file (per-process name) is created and removed, and the
+   result is memoized for 15 s: `/ready` is unauthenticated and polled by the
+   compose healthcheck every 30 s and by the dashboard every 5 s, so a GET
+   must not mutate the state directory on every call. State lives here.
 
 `integrations` reports whether the optional `SONARR_URL`, `BAZARR_URL` and
 `JELLYFIN_URL`/key pairs are configured. `jellyfin_misconfigured` is `true`

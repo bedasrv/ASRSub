@@ -27,11 +27,22 @@ dashboard header (kept in `sessionStorage` only). Settings writes go to
 `config.overrides.json` and apply on the next daemon restart.
 
 The settings form exposes only keys the config layers control. A few tuning
-knobs are read directly from the process environment by their consumers and so
-are **not** editable in the dashboard — set them in `pipeline.env` or the
-environment: `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
+knobs are read straight from the process environment by their consumers
+(`providers.rs`, `jimaku.rs`), so **neither** the dashboard's
+`config.overrides.json` **nor** `pipeline.env` reaches them — `pipeline.env`
+is parsed into the config map, never exported into the process environment.
+Put these in the container environment (the compose `environment:` block or
+the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
-`JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`.
+`JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`. `RUST_LOG`
+(verbosity, `EnvFilter` syntax) and `ANILIST_BASE_URL` are read the same way
+and are not in the settings form either.
+
+Two settings are **pinned by the shipment**, because the bind mount and the
+reverse proxy must agree with the daemon: `NAS_MEDIA_PREFIX` and
+`WEBHOOK_PORT`. Compose exports both into the container, process env outranks
+every config layer, so the dashboard renders them read-only — a value saved
+from the UI could never take effect. Change them in the compose `.env`.
 
 ## Prerequisites
 
@@ -48,7 +59,7 @@ environment: `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
   printf '%s' '<CONTROL_API_KEY>' > /home/user/.config/asr-pipeline/secrets/control_api_key
   chmod 600 /home/user/.config/asr-pipeline/secrets/control_api_key
   # Verify compose picks it up (requires ASRSUB_IMAGE to be set for config rendering):
-  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:$(git rev-parse HEAD) CONTROL_API_KEY_FILE_HOST=/home/user/.config/asr-pipeline/secrets/control_api_key docker compose config | grep -A2 control_api_key
+  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> CONTROL_API_KEY_FILE_HOST=/home/user/.config/asr-pipeline/secrets/control_api_key docker compose config | grep -A2 control_api_key
   ```
   The file is mounted as a Docker Compose secret at `/run/secrets/control_api_key` inside containers. Environment `CONTROL_API_KEY` is only for hermetic tests.
 
@@ -60,7 +71,7 @@ environment: `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
     > /home/user/.config/asr-pipeline/secrets/provider_keys.env
   chmod 600 /home/user/.config/asr-pipeline/secrets/provider_keys.env
   # Verify the rendered container environment picks them up (names only):
-  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:$(git rev-parse HEAD) docker compose config \
+  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> docker compose config \
     | grep -E '^ *[A-Z_]+_API_KEY:'
   ```
   The compose `env_file` entry is `required: false`, so a deployment that
@@ -78,6 +89,9 @@ environment: `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
     Set it in the compose `.env`, because the bind mount must match.
   - `JELLYFIN_MEDIA_ROOT` (default `/media`) — the path prefix the
     **Jellyfin server** reports; set it in `pipeline.env` to match Jellyfin.
+    The compose file also uses the value from *its own* environment as the
+    target of the second (read-only) media mount, and Compose cannot read
+    `pipeline.env`: change it in both places, or leave it at `/media`.
   `MEDIA_HOST_PATH` is the host directory bind-mounted into the container
   (default `/mnt/nas/share/media`), mounted at both prefixes.
 
@@ -122,14 +136,20 @@ Deploy fails closed if `ASRSUB_IMAGE` is not set to an immutable
 
 ```bash
 export ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha>
+CONTROL_API_KEY="$(cat /home/user/.config/asr-pipeline/secrets/control_api_key)"
 docker compose config                    # review secrets, mounts, and resolved ASRSUB_IMAGE
+# Drain first: recreating mid-pass discards the item in flight.
+curl -sf -X POST -H "X-API-Key: $CONTROL_API_KEY" http://127.0.0.1:8085/pause
+curl -sf http://127.0.0.1:8085/status | jq '{current, last_pass}'   # wait for current: null
 docker compose pull                      # fetch the exact image from GHCR
 docker compose up -d --no-build          # start/restart without deleting volumes, never building
 docker compose ps
 curl -sf http://127.0.0.1:8085/health | jq .     # liveness (process up)
 curl -sf http://127.0.0.1:8085/ready  | jq .     # readiness (media/providers/state)
-curl -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/status | jq '{paused, media_ok, last_pass}'
 ```
+
+The pause is only for the drain: the replacement container boots unpaused
+(there is no paused-boot yet — see `HEALTH.md`), so nothing needs resuming.
 
 A ready deployment answers `200` on `/ready`; a `503` names the failing
 local check (`checks.media_root`, `checks.providers`, `checks.state_dir`)
@@ -181,6 +201,21 @@ working SSO page.
 
 A public `200` on protected routes means auth is bypassed; a public `302`
 with a dead authenticated path means the firewall/ACL above is missing.
+
+## Upgrading from the two-service layout
+
+Older deployments ran `orchestrator` **and** a second daemon as `dashboard`
+on `WEBHOOK_PORT=8080` over a read-only state mount. That replica
+restart-looped with `EROFS` and is gone: one service now serves `/` and
+`/api2/*` on `WEBHOOK_PORT` (default 8085), so update anything that pointed
+at `:8080` — proxies, bookmarks, uptime monitors.
+
+`pctl` follows the same single-service API. Two subcommands changed:
+`status2` is now `api-status`, and `config unset` was removed (delete the key
+from `config.overrides.json` instead). The control key is read from
+`CONTROL_API_KEY`/`PIPE_TOKEN`, `CONTROL_API_KEY_FILE`,
+`/run/secrets/control_api_key`, or `<config dir>/secrets/control_api_key` —
+never from `pipeline.env`.
 
 ## Rollback (immutable: pull previous SHA)
 

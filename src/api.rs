@@ -141,9 +141,38 @@ async fn h_status(State(s): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
-/// The host/NAS media root `map_path` points `/data/` at still exists.
+/// The host/NAS media root `map_path` points `/data/` at is really there.
+///
+/// `is_dir()` alone is not enough: when a bind mount's source is gone, Docker
+/// creates an empty directory at the mount target, so a dead NAS used to report
+/// `media_ok: true` (docs/HEALTH.md already tells operators to check
+/// `mountpoint -q`). Accept a real mount point, or a non-empty tree so a plain
+/// (unmounted) media directory still counts.
 fn media_present(prefix: &str) -> bool {
-    std::path::Path::new(prefix).is_dir()
+    let path = std::path::Path::new(prefix);
+    if !path.is_dir() {
+        return false;
+    }
+    is_mount_point(prefix)
+        || std::fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+}
+
+/// True when `path` is a mount point, per `/proc/self/mountinfo` field 5.
+/// Paths with spaces are octal-escaped there, so this is exact for the
+/// space-free media prefixes the config accepts.
+fn is_mount_point(path: &str) -> bool {
+    let Ok(mi) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let want = path.trim_end_matches('/');
+    mi.lines().any(|l| {
+        l.split(' ')
+            .nth(4)
+            .map(|mp| mp.trim_end_matches('/') == want)
+            .unwrap_or(false)
+    })
 }
 
 async fn h_api2_status(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -169,7 +198,7 @@ async fn h_health() -> Json<Value> {
 /// answers `503` until they hold. External services are diagnostics only so a
 /// slow or down Sonarr/Bazarr/Jellyfin never flaps the probe.
 async fn h_ready(State(s): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let (ready, body) = readiness(&s.cfg, s.pipeline.pool.len(), s.pipeline.pool.whisper_len());
+    let (ready, body) = readiness_for(&s).await;
     let code = if ready {
         StatusCode::OK
     } else {
@@ -178,13 +207,53 @@ async fn h_ready(State(s): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     (code, Json(body))
 }
 
-/// Pure readiness evaluation (see [`h_ready`]). `llm`/`whisper` are the
-/// configured provider counts. Returns `(ready, payload)`.
-pub(crate) fn readiness(cfg: &Config, llm: usize, whisper: usize) -> (bool, Value) {
+/// Provider pool sizes: endpoints configured, and how many of those have a key
+/// that actually resolves.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProviderCounts {
+    pub llm: usize,
+    pub whisper: usize,
+    pub llm_keyed: usize,
+    pub whisper_keyed: usize,
+}
+
+impl ProviderCounts {
+    pub(crate) fn from_pool(pool: &crate::providers::ProviderPool) -> Self {
+        Self {
+            llm: pool.len(),
+            whisper: pool.whisper_len(),
+            llm_keyed: pool.keyed_len(),
+            whisper_keyed: pool.whisper_keyed_len(),
+        }
+    }
+}
+
+/// Readiness for the HTTP surface. The checks do blocking filesystem I/O (a
+/// media-root stat on a hung NAS can block for the mount timeout), so they run
+/// off the async worker rather than stalling it.
+pub(crate) async fn readiness_for(s: &Arc<AppState>) -> (bool, Value) {
+    let cfg = s.cfg.clone();
+    let counts = ProviderCounts::from_pool(&s.pipeline.pool);
+    tokio::task::spawn_blocking(move || readiness(&cfg, counts))
+        .await
+        .unwrap_or_else(|e| {
+            (
+                false,
+                json!({"ready": false, "error": format!("readiness check failed: {e}")}),
+            )
+        })
+}
+
+/// Pure readiness evaluation (see [`h_ready`]), sync so it stays unit-testable.
+/// Returns `(ready, payload)`.
+pub(crate) fn readiness(cfg: &Config, counts: ProviderCounts) -> (bool, Value) {
     let media_ok = media_present(&cfg.nas_media_prefix);
-    // ASR needs Whisper and translation needs at least one LLM endpoint.
-    let providers_ok = llm > 0 && whisper > 0;
-    let state_ok = state_dir_writable(&cfg.state_file);
+    // ASR needs Whisper and translation needs at least one LLM endpoint — and
+    // the endpoint must have a resolvable key, because the pipeline skips
+    // keyless ones. Counting configured endpoints let a container with no
+    // provider keys injected report "ready" while doing no work at all.
+    let providers_ok = counts.llm_keyed > 0 && counts.whisper_keyed > 0;
+    let state_ok = state_dir_writable_cached(&cfg.state_file);
     let ready = media_ok && providers_ok && state_ok;
     let state_dir = cfg
         .state_file
@@ -198,7 +267,8 @@ pub(crate) fn readiness(cfg: &Config, llm: usize, whisper: usize) -> (bool, Valu
             "ready": ready,
             "checks": {
                 "media_root": {"ok": media_ok, "path": cfg.nas_media_prefix},
-                "providers": {"ok": providers_ok, "llm": llm, "whisper": whisper},
+                "providers": {"ok": providers_ok, "llm": counts.llm, "whisper": counts.whisper,
+                              "llm_keyed": counts.llm_keyed, "whisper_keyed": counts.whisper_keyed},
                 "state_dir": {"ok": state_ok, "path": state_dir},
             },
             "integrations": {
@@ -223,7 +293,8 @@ fn state_dir_writable(state_file: &std::path::Path) -> bool {
     if std::fs::create_dir_all(&dir).is_err() {
         return false;
     }
-    let probe = dir.join(".asrsub-ready-probe");
+    // Per-process name: concurrent probes must not unlink each other's file.
+    let probe = dir.join(format!(".asrsub-ready-probe.{}", std::process::id()));
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -235,6 +306,31 @@ fn state_dir_writable(state_file: &std::path::Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// [`state_dir_writable`] behind a short TTL cache.
+///
+/// `/ready` is unauthenticated and polled every 30 s by the compose healthcheck
+/// and every 5 s by the dashboard overview, so an unauthenticated GET must not
+/// mutate the state directory on every call.
+fn state_dir_writable_cached(state_file: &std::path::Path) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(15);
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(g) = cell.lock() {
+        if let Some((at, ok)) = *g {
+            if at.elapsed() < TTL {
+                return ok;
+            }
+        }
+    }
+    let ok = state_dir_writable(state_file);
+    if let Ok(mut g) = cell.lock() {
+        *g = Some((Instant::now(), ok));
+    }
+    ok
 }
 
 async fn h_config(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -263,6 +359,20 @@ async fn h_config_put(
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("unknown or non-editable key: {k}")})),
+            ));
+        }
+        // Process env outranks this layer, so writing a pinned key would
+        // persist a value the daemon can never apply. Refuse instead of
+        // pretending.
+        if crate::config::env_pinned(k) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!(
+                        "{k} is set by the process environment (deployment), not by config; \
+                         change it in the deployment environment instead"
+                    )
+                })),
             ));
         }
         let sval = match v {
@@ -764,6 +874,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let media = dir.path().join("media");
         std::fs::create_dir_all(&media).unwrap();
+        // A media root must look like a real mount or a non-empty tree: an
+        // empty directory is exactly what a vanished bind mount leaves behind.
+        std::fs::write(media.join("ep.mkv"), b"x").unwrap();
         let state = dir.path().join("state.jsonl");
         std::env::set_var("NAS_MEDIA_PREFIX", media.to_str().unwrap());
         std::env::set_var("STATE_FILE", state.to_str().unwrap());
@@ -776,14 +889,40 @@ mod tests {
         std::env::remove_var("JELLYFIN_URL");
 
         // Providers missing → not ready even though the local dirs are fine.
-        let (ready, body) = readiness(&cfg, 0, 0);
+        let none = ProviderCounts {
+            llm: 0,
+            whisper: 0,
+            llm_keyed: 0,
+            whisper_keyed: 0,
+        };
+        let (ready, body) = readiness(&cfg, none);
         assert!(!ready);
         assert_eq!(body["checks"]["media_root"]["ok"], json!(true));
         assert_eq!(body["checks"]["providers"]["ok"], json!(false));
         assert_eq!(body["checks"]["state_dir"]["ok"], json!(true));
 
+        // Configured endpoints whose keys never resolve are NOT ready: the
+        // pipeline skips keyless endpoints, so counting configured entries hid
+        // a deployment with no provider credentials at all.
+        let keyless = ProviderCounts {
+            llm: 4,
+            whisper: 1,
+            llm_keyed: 0,
+            whisper_keyed: 1,
+        };
+        let (ready, body) = readiness(&cfg, keyless);
+        assert!(!ready);
+        assert_eq!(body["checks"]["providers"]["llm"], json!(4));
+        assert_eq!(body["checks"]["providers"]["llm_keyed"], json!(0));
+
         // All local prerequisites met → ready; integrations are diagnostics.
-        let (ready, body) = readiness(&cfg, 3, 1);
+        let keyed = ProviderCounts {
+            llm: 3,
+            whisper: 1,
+            llm_keyed: 3,
+            whisper_keyed: 1,
+        };
+        let (ready, body) = readiness(&cfg, keyed);
         assert!(ready);
         assert_eq!(body["ready"], json!(true));
         assert_eq!(body["integrations"]["jellyfin"], json!(false));

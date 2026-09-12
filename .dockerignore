@@ -19,6 +19,16 @@ tmp/
 outputs/
 episodes/
 ground_truth/
+# Operator secrets must never reach the build context. The Dockerfile copies
+# only explicit paths, so this is defence in depth: the providers file holds
+# live API keys, and the config/secrets dirs hold provider and control keys.
+asrsub_providers.json
+config.overrides.json
+*.env
+.env
+secrets/
+!*.env.example
+!asrsub_providers.json.example
 # Dev-only files, docs, and tests: not part of the Rust runtime image.
 docs/
 tests/

@@ -58,11 +58,14 @@ const SHELL_JS: &str = r#"
     if (k) e.detail.headers['X-API-Key'] = k;
   });
   document.addEventListener('htmx:beforeSwap', function (e) {
-    // 401 is expected (missing/wrong key): swap the rendered fragment, which
-    // carries a banner, instead of htmx's default "do not swap errors".
-    if (e.detail.xhr && e.detail.xhr.status === 401) {
+    // Error responses (401 missing/wrong key, 400 bad id, 404 unknown action,
+    // 500 a state write failed) all carry a rendered fragment with a banner, so
+    // swap them instead of htmx's default "drop errors" — otherwise a failed
+    // action looks like nothing happened at all. 5xx still reports as an error.
+    var st = e.detail.xhr ? e.detail.xhr.status : 0;
+    if (st >= 400) {
       e.detail.shouldSwap = true;
-      e.detail.isError = false;
+      e.detail.isError = st >= 500;
     }
   });
   document.addEventListener('click', function (e) {
@@ -209,8 +212,7 @@ async fn overview_frag(s: &Arc<AppState>, flash: Option<(&str, bool)>) -> Markup
     let current = s.current.lock().await.clone();
     let paused = s.paused.load(Ordering::Relaxed);
     let uptime = fmt_uptime(now_s().saturating_sub(s.started_at));
-    let (ready, rb) =
-        crate::api::readiness(&s.cfg, s.pipeline.pool.len(), s.pipeline.pool.whisper_len());
+    let (ready, rb) = crate::api::readiness_for(s).await;
     let checks = &rb["checks"];
     let integ = &rb["integrations"];
     let last_at = last.at.clone().unwrap_or_else(|| "never".to_string());
@@ -571,14 +573,36 @@ fn field_display_value(cfg: &Config, key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
+/// Keys whose effective value comes from the process environment. Process env
+/// outranks every config layer, so a save here would persist a value the daemon
+/// never applies: the shipped compose pins `NAS_MEDIA_PREFIX` (the bind-mount
+/// target) and `WEBHOOK_PORT` (the healthcheck/reverse-proxy port). Those
+/// fields render read-only instead of posing as editable knobs.
+fn pinned_keys() -> Vec<&'static str> {
+    FIELDS
+        .iter()
+        .map(|f| f.key)
+        .filter(|k| crate::config::env_pinned(k))
+        .collect()
+}
+
 fn settings_frag(cfg: &Config, msg: Option<(bool, String)>) -> Markup {
+    let pinned = pinned_keys();
     html! {
         div id="settings-body" {
             div class="card" {
                 h2 { "Settings" }
                 div class="banner" {
-                    "Edits are written to " code { "config.overrides.json" } " (beats pipeline.env). "
+                    "Edits are written to " code { "config.overrides.json" } ", which beats "
+                    code { "pipeline.env" } " but not the container environment. "
                     "Restart the daemon to apply. Secret fields left blank stay unchanged."
+                    @if !pinned.is_empty() {
+                        br;
+                        span class="muted" {
+                            "Read-only here — the deployment environment sets them: "
+                            code { (pinned.join(", ")) } " (change them in the compose .env)"
+                        }
+                    }
                     @if !ENV_ONLY_KEYS.is_empty() {
                         br;
                         span class="muted" {
@@ -597,23 +621,41 @@ fn settings_frag(cfg: &Config, msg: Option<(bool, String)>) -> Markup {
                                 legend { (gtitle) }
                                 @for f in FIELDS.iter().filter(|f| f.group == *gid) {
                                     @let cur = field_display_value(cfg, f.key, f.default);
+                                    @let is_pinned = pinned.contains(&f.key);
                                     div class="field" {
                                         label for=(f.key) { (f.label) }
                                         @match f.kind {
                                             FieldKind::Secret => {
-                                                input type="password" id=(f.key) name=(f.key) value="" placeholder="unchanged" autocomplete="new-password";
-                                                input type="hidden" name=(format!("orig__{}", f.key)) value="";
+                                                @if is_pinned {
+                                                    input type="text" id=(f.key) name=(f.key) value="***" readonly disabled;
+                                                } @else {
+                                                    input type="password" id=(f.key) name=(f.key) value="" placeholder="unchanged" autocomplete="new-password";
+                                                    input type="hidden" name=(format!("orig__{}", f.key)) value="";
+                                                }
                                             }
                                             FieldKind::Bool => {
-                                                input type="checkbox" id=(f.key) name=(f.key) checked[truthy(&cur)];
-                                                input type="hidden" name=(format!("orig__{}", f.key)) value=(cur);
+                                                @if is_pinned {
+                                                    input type="checkbox" id=(f.key) checked[truthy(&cur)] disabled;
+                                                } @else {
+                                                    input type="checkbox" id=(f.key) name=(f.key) checked[truthy(&cur)];
+                                                    input type="hidden" name=(format!("orig__{}", f.key)) value=(cur);
+                                                }
                                             }
                                             _ => {
-                                                input type="text" id=(f.key) name=(f.key) value=(cur);
-                                                input type="hidden" name=(format!("orig__{}", f.key)) value=(cur);
+                                                @if is_pinned {
+                                                    input type="text" id=(f.key) name=(f.key) value=(cur) readonly disabled;
+                                                } @else {
+                                                    input type="text" id=(f.key) name=(f.key) value=(cur);
+                                                    input type="hidden" name=(format!("orig__{}", f.key)) value=(cur);
+                                                }
                                             }
                                         }
-                                        div class="help" { (f.help) }
+                                        div class="help" {
+                                            (f.help)
+                                            @if is_pinned {
+                                                " Set by the deployment environment; edit the compose .env instead."
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -637,6 +679,12 @@ async fn h_settings(State(s): State<Arc<AppState>>) -> Html<String> {
 fn collect_changes(form: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for f in FIELDS {
+        // Process-env values outrank this layer, so never queue a write the
+        // daemon cannot apply. The form already renders those fields disabled;
+        // this also covers a hand-crafted POST.
+        if crate::config::env_pinned(f.key) {
+            continue;
+        }
         let orig = form
             .get(&format!("orig__{}", f.key))
             .map(|v| v.trim().to_string())
@@ -669,19 +717,60 @@ fn collect_changes(form: &HashMap<String, String>) -> Vec<(String, String)> {
     out
 }
 
-/// Reject non-numeric values for `Number` fields before they reach disk.
+/// Reject values `Config::load` cannot parse for `Number` fields before they
+/// reach disk. Integer fields (the ones whose default has no decimal point) are
+/// validated as integers, so `MAX_EPS_PER_RUN=4.5` is refused here instead of
+/// being saved and then silently replaced by the default at load.
 fn invalid_number(pairs: &[(String, String)]) -> Option<String> {
     for (k, v) in pairs {
         if v.is_empty() {
             continue;
         }
         if let Some(f) = FIELDS.iter().find(|f| f.key == k) {
-            if f.kind == FieldKind::Number && v.parse::<f64>().is_err() {
-                return Some(k.clone());
+            if f.kind == FieldKind::Number {
+                let ok = if f.default.contains('.') {
+                    v.parse::<f64>().is_ok()
+                } else {
+                    v.parse::<u64>().is_ok()
+                };
+                if !ok {
+                    return Some(k.clone());
+                }
             }
         }
     }
     None
+}
+
+/// Pinned keys this request actually tried to change (the form renders them
+/// read-only, so this only fires for a hand-crafted POST).
+fn shadowed_attempts(cfg: &Config, form: &HashMap<String, String>) -> Vec<&'static str> {
+    FIELDS
+        .iter()
+        .filter(|f| crate::config::env_pinned(f.key))
+        .filter(|f| {
+            let submitted = match f.kind {
+                FieldKind::Bool => {
+                    if form.contains_key(f.key) {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    }
+                }
+                _ => form
+                    .get(f.key)
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default(),
+            };
+            let current = field_display_value(cfg, f.key, f.default);
+            if f.kind == FieldKind::Bool {
+                truthy(&submitted) != truthy(&current)
+            } else {
+                !submitted.is_empty() && submitted != current
+            }
+        })
+        .map(|f| f.key)
+        .collect()
 }
 
 async fn h_config_save(
@@ -693,11 +782,24 @@ async fn h_config_save(
         let html = settings_frag(&s.cfg, Some((false, UNAUTH_MSG.to_string()))).into_string();
         return (StatusCode::UNAUTHORIZED, Html(html)).into_response();
     }
+    let shadowed = shadowed_attempts(&s.cfg, &form);
     let pairs = collect_changes(&form);
-    let msg = if pairs.is_empty() {
+    let msg = if !shadowed.is_empty() {
+        (
+            false,
+            format!(
+                "{} is set by the deployment environment (compose) and cannot be changed here. \
+                 Nothing saved.",
+                shadowed.join(", ")
+            ),
+        )
+    } else if pairs.is_empty() {
         (true, "No changes to save.".to_string())
     } else if let Some(bad) = invalid_number(&pairs) {
-        (false, format!("{bad} must be a number. Nothing saved."))
+        (
+            false,
+            format!("{bad} must be a whole number. Nothing saved."),
+        )
     } else {
         match crate::config::write_overrides(&pairs) {
             Ok(_) => (
@@ -710,7 +812,12 @@ async fn h_config_save(
             Err(e) => (false, format!("Save failed: {e}")),
         }
     };
-    Html(settings_frag(&s.cfg, Some(msg)).into_string()).into_response()
+    // Re-render from what is on disk now (Config::load) instead of the running
+    // config, so the form and its hidden baselines match the persisted state.
+    // Otherwise the operator sees pre-save values and a second identical save
+    // reports "no changes" while the file differs from the running daemon.
+    let view = crate::config::Config::load().unwrap_or_else(|_| s.cfg.clone());
+    Html(settings_frag(&view, Some(msg)).into_string()).into_response()
 }
 
 // ----------------------------------------------------------- mutations ----
@@ -748,7 +855,12 @@ async fn h_control(
             s.wake.notify_one();
             "Woken."
         }
-        _ => return (StatusCode::NOT_FOUND, "unknown control action").into_response(),
+        _ => {
+            let html = overview_frag(&s, Some(("Unknown control action.", true)))
+                .await
+                .into_string();
+            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+        }
     };
     let html = overview_frag(&s, Some((msg, false))).await.into_string();
     (StatusCode::OK, Html(html)).into_response()
@@ -768,14 +880,21 @@ async fn h_episode_action(
     }
     let (eid, kind) = match crate::api::parse_episode_id(&id) {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => {
+            // Every error branch returns a rendered fragment so htmx can swap a
+            // visible banner (see the beforeSwap handler in SHELL_JS).
+            let html = library_frag(&s, &q, Some((&e, true))).await.into_string();
+            return (StatusCode::BAD_REQUEST, Html(html)).into_response();
+        }
     };
     let msg: String = match action.as_str() {
         "exclude" => {
             let rec =
                 serde_json::json!({"episode_id": eid, "reason": "ui", "ts": state::utc_now_iso()});
             if let Err(e) = state::append_jsonl(&s.cfg.exclusions_file, &rec) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                let msg = format!("Exclude failed: {e}");
+                let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
+                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
             }
             format!("Excluded {id}.")
         }
@@ -793,20 +912,29 @@ async fn h_episode_action(
                 .filter(|e| e.episode_id != Some(eid))
                 .collect();
             if let Err(e) = state::rewrite_jsonl(&s.cfg.exclusions_file, &kept) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                let msg = format!("Unexclude failed: {e}");
+                let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
+                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
             }
             format!("Unexcluded {id}.")
         }
         typ @ ("retry" | "skip" | "delete") => {
             if let Err(e) = crate::api::enqueue_action(&s.cfg, typ, eid, kind, None) {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+                let msg = format!("Queue failed: {e}");
+                let html = library_frag(&s, &q, Some((&msg, true))).await.into_string();
+                return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
             }
             if typ != "skip" {
                 s.wake.notify_one();
             }
             format!("Queued {typ} for {id}.")
         }
-        _ => return (StatusCode::NOT_FOUND, "unknown episode action").into_response(),
+        _ => {
+            let html = library_frag(&s, &q, Some(("Unknown episode action.", true)))
+                .await
+                .into_string();
+            return (StatusCode::NOT_FOUND, Html(html)).into_response();
+        }
     };
     let html = library_frag(&s, &q, Some((&msg, false)))
         .await

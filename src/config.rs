@@ -262,6 +262,63 @@ pub struct Config {
     pub max_cue_ms: u32,
 }
 
+/// Parse an integer from the merged config, warning instead of silently
+/// falling back when a value was *set* but cannot be parsed.
+///
+/// The settings form accepts anything `f64`-parseable for a numeric field, so
+/// `MAX_EPS_PER_RUN=4.5` or `WEBHOOK_PORT=70000` used to be saved, reported as
+/// written, and then quietly replaced by the default at load.
+fn parse_int<T>(raw: &HashMap<String, String>, key: &str, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+{
+    match raw.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                key,
+                value = v,
+                "unparseable integer in config; using the default ({default})"
+            );
+            default
+        }),
+        None => default,
+    }
+}
+
+/// [`parse_int`] for float-valued keys.
+fn parse_float(raw: &HashMap<String, String>, key: &str, default: f64) -> f64 {
+    match raw.get(key).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                key,
+                value = v,
+                "unparseable number in config; using the default ({default})"
+            );
+            default
+        }),
+        None => default,
+    }
+}
+
+/// `scheme://user:pass@host/path` → `scheme://***:***@host/path`.
+/// `None` when the value carries no URL userinfo.
+fn redact_userinfo(value: &str) -> Option<String> {
+    let (scheme, rest) = value.split_once("://")?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let at = authority.find('@')?;
+    let userinfo = &authority[..at];
+    if userinfo.is_empty() {
+        return None;
+    }
+    let masked = if userinfo.contains(':') {
+        "***:***"
+    } else {
+        "***"
+    };
+    Some(format!("{scheme}://{masked}{}", &rest[at..]))
+}
+
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let raw = RawConfig::load().0;
@@ -275,13 +332,19 @@ impl Config {
         };
         let get_path = |k: &str, d: &str| PathBuf::from(get(k, d));
         let dir = cfg_dir();
+        // An empty value means "unset" everywhere else in this loader (`get`,
+        // `parse_*`), so a Bool must fall back to its default too. Treating ""
+        // as false made the settings form — which renders the default for an
+        // empty value — disagree with the daemon, and made a default-true
+        // switch impossible to turn on from the dashboard.
         let bool_of = |k: &str, d: bool| {
             raw.get(k)
-                .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes"))
                 .unwrap_or(d)
         };
-        let parse_usize =
-            |k: &str, d: usize| raw.get(k).and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+        let parse_usize = |k: &str, d: usize| parse_int(&raw, k, d);
         let target_langs = {
             let tl = get("TARGET_LANGS", "id,en");
             let tl = tl.trim();
@@ -359,43 +422,19 @@ impl Config {
                 &dir.join("glossary.json").to_string_lossy(),
             ),
             ai_marker_cue: bool_of("AI_MARKER_CUE", true),
-            ai_marker_cue_ms: raw
-                .get("AI_MARKER_CUE_MS")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(1500),
+            ai_marker_cue_ms: parse_int(&raw, "AI_MARKER_CUE_MS", 1500),
             sdh_placeholders,
-            cps_merge_max: raw
-                .get("CPS_MERGE_MAX")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(20.0),
+            cps_merge_max: parse_float(&raw, "CPS_MERGE_MAX", 20.0),
             cps_merge_max_chars: parse_usize("CPS_MERGE_MAX_CHARS", 84),
-            cps_merge_max_dur_ms: raw
-                .get("CPS_MERGE_MAX_DUR_MS")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(7000),
-            cps_merge_max_gap_ms: raw
-                .get("CPS_MERGE_MAX_GAP_MS")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(1000),
-            webhook_port: raw
-                .get("WEBHOOK_PORT")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(8085),
+            cps_merge_max_dur_ms: parse_int(&raw, "CPS_MERGE_MAX_DUR_MS", 7000),
+            cps_merge_max_gap_ms: parse_int(&raw, "CPS_MERGE_MAX_GAP_MS", 1000),
+            webhook_port: parse_int(&raw, "WEBHOOK_PORT", 8085),
             control_api_key_file: get_path("CONTROL_API_KEY_FILE", "/run/secrets/control_api_key"),
             ladder_min_cues: parse_usize("LADDER_MIN_CUES", 40),
             ladder_min_chars: parse_usize("LADDER_MIN_CHARS", 1500),
-            ladder_min_cjk: raw
-                .get("LADDER_MIN_CJK")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0.6),
-            ladder_span_tol: raw
-                .get("LADDER_SPAN_TOLERANCE")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(0.15),
-            max_cue_ms: raw
-                .get("MAX_CUE_MS")
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(crate::asr::MAX_CUE_MS),
+            ladder_min_cjk: parse_float(&raw, "LADDER_MIN_CJK", 0.6),
+            ladder_span_tol: parse_float(&raw, "LADDER_SPAN_TOLERANCE", 0.15),
+            max_cue_ms: parse_int(&raw, "MAX_CUE_MS", crate::asr::MAX_CUE_MS),
             anilist_cache: get_path(
                 "ANILIST_CACHE",
                 &dir.join("anilist_cache.json").to_string_lossy(),
@@ -416,16 +455,28 @@ impl Config {
     }
 
     /// Secrets-masked view for `/config` telemetry.
+    ///
+    /// Key-name hints catch every credential key in this tree; URL userinfo is
+    /// stripped as well, so a password smuggled inside a URL value
+    /// (`https://user:pass@host`) cannot reach an unauthenticated caller.
     pub fn masked(&self) -> HashMap<String, String> {
         const HINTS: [&str; 7] = ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASS", "AUTH", "CRED"];
         self.raw
             .iter()
             .map(|(k, v)| {
                 let secret = HINTS.iter().any(|h| k.to_uppercase().contains(h));
-                (
-                    k.clone(),
-                    if secret { "***".to_string() } else { v.clone() },
-                )
+                let shown = if secret {
+                    "***".to_string()
+                } else {
+                    match redact_userinfo(v) {
+                        Some(redacted) => {
+                            tracing::warn!(key = k.as_str(), "config value carries URL credentials; masking userinfo for /config");
+                            redacted
+                        }
+                        None => v.clone(),
+                    }
+                };
+                (k.clone(), shown)
             })
             .collect()
     }
@@ -821,9 +872,11 @@ pub const FIELDS: &[Field] = &[
 
 /// Keys owned by the pipeline but deliberately **not** in [`FIELDS`]. They are
 /// consumed by `std::env::var` at the point of use (`providers.rs`,
-/// `jimaku.rs`), so the `config.overrides.json` layer this UI writes would not
-/// reach them — exposing them would be a phantom knob. Set these in
-/// `pipeline.env` or the process environment instead.
+/// `jimaku.rs`), so neither this UI's `config.overrides.json` layer nor
+/// `pipeline.env` reaches them — `pipeline.env` is parsed into the config map,
+/// never exported into the process environment. Set them in the *container*
+/// environment: the compose `environment:` block or the optional `env_file`
+/// (`PROVIDER_KEYS_FILE`).
 pub const ENV_ONLY_KEYS: &[&str] = &[
     "LLM_PER_ENDPOINT_CONCURRENCY",
     "LLM_TIMEOUT_S",
@@ -841,14 +894,30 @@ pub fn is_editable_key(key: &str) -> bool {
     FIELDS.iter().any(|f| f.key == key)
 }
 
+/// True when the process environment defines `key`.
+///
+/// Process env outranks every config layer ([`RawConfig`] applies it last), and
+/// the shipped compose pins `NAS_MEDIA_PREFIX` and `WEBHOOK_PORT` that way
+/// because the bind mount and the reverse proxy must agree with them. A
+/// dashboard save for such a key would persist a value the daemon can never
+/// apply, so the UI renders those fields read-only and the config API rejects
+/// them instead of pretending to save.
+pub fn env_pinned(key: &str) -> bool {
+    std::env::var_os(key).is_some()
+}
+
 /// Merge `pairs` into `config.overrides.json` under the configured dir.
 ///
 /// The overrides layer beats `pipeline.env` but not process env (see module
-/// docs). Atomic replace under the same sidecar lock the ledgers use. An empty
-/// value is written as empty but `Config::load` treats empty as "unset", so to
-/// clear a value remove the key from the file — clearing is intentionally not
-/// expressible here.
+/// docs). Atomic replace under the same sidecar lock the ledgers use, and the
+/// file is created `0600`: secret-typed settings reach it, so it must never be
+/// world-readable. An empty value is written as empty but `Config::load`
+/// treats empty as "unset", so to clear a value remove the key from the file —
+/// clearing is intentionally not expressible here.
 pub fn write_overrides(pairs: &[(String, String)]) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
     let path = cfg_dir().join("config.overrides.json");
     crate::state::ensure_parent(&path)?;
     let lock_file = crate::state::open_lock(&path)?;
@@ -863,8 +932,20 @@ pub fn write_overrides(pairs: &[(String, String)]) -> anyhow::Result<PathBuf> {
         map.insert(k.clone(), Value::String(v.clone()));
     }
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(&serde_json::to_vec_pretty(&Value::Object(map))?)?;
+        f.flush()?;
+    }
     std::fs::rename(&tmp, &path)?;
+    // The rename carries the temp file's mode; this also repairs a file an
+    // older build (or an operator's umask) left group/world-readable.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     Ok(path)
 }
 
@@ -1044,6 +1125,7 @@ mod tests {
 
     #[test]
     fn write_overrides_merges_and_round_trips() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
         let r = write_overrides(&[
@@ -1069,5 +1151,93 @@ mod tests {
         assert_eq!(cfg.target_langs, vec!["id", "en", "es"]);
         assert_eq!(cfg.nas_media_prefix, "/srv/media");
         assert_eq!(cfg.max_eps_per_run, 4);
+    }
+
+    /// Serializes tests that point `ASRSUB_CONFIG_DIR` at a temp dir: the env
+    /// var is process-global and cargo runs test threads in parallel.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn override_file_is_never_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let written = write_overrides(&[(
+            "SONARR_API_KEY".to_string(),
+            "applied-value-not-a-real-key".to_string(),
+        )]);
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        let path = written.unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "secret-typed settings land in this file; it must not be readable by others"
+        );
+    }
+
+    #[test]
+    fn empty_bool_value_keeps_the_documented_default() {
+        // The settings form renders a field's default for an empty value, so
+        // the loader must read "" as unset too — otherwise a default-true
+        // switch could never be turned on from the dashboard.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pipeline.env"), "AI_MARKER_CUE=\n").unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let cfg = Config::load().unwrap();
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        assert!(
+            cfg.ai_marker_cue,
+            "empty value must not flip a true default"
+        );
+    }
+
+    #[test]
+    fn unparseable_numbers_fall_back_to_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pipeline.env"),
+            "MAX_EPS_PER_RUN=4.5\nWEBHOOK_PORT=not-a-port\n",
+        )
+        .unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let cfg = Config::load().unwrap();
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        // A warning is logged for each; the pass still runs on sane values.
+        assert_eq!(cfg.max_eps_per_run, 8);
+        assert_eq!(cfg.webhook_port, 8085);
+    }
+
+    #[test]
+    fn url_credentials_are_stripped_from_config_output() {
+        assert_eq!(
+            redact_userinfo("https://user:pw@bazarr.lan:6767/api").as_deref(),
+            Some("https://***:***@bazarr.lan:6767/api")
+        );
+        assert_eq!(
+            redact_userinfo("https://user@bazarr.lan/api").as_deref(),
+            Some("https://***@bazarr.lan/api")
+        );
+        assert_eq!(redact_userinfo("http://bazarr.lan:6767/api"), None);
+
+        // A key whose *name* carries no secret hint still loses its userinfo:
+        // `/config` is unauthenticated.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pipeline.env"),
+            "BAZARR_URL=https://user:pw@bazarr.lan:6767\n",
+        )
+        .unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let cfg = Config::load().unwrap();
+        let masked = cfg.masked();
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        assert_eq!(
+            masked.get("BAZARR_URL").map(String::as_str),
+            Some("https://***:***@bazarr.lan:6767")
+        );
     }
 }

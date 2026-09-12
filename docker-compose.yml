@@ -9,13 +9,19 @@ services:
     image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)}
     # No GPU runtime: all inference is remote (asrsub_providers.json).
     environment:
-      - TZ=${TZ:-Asia/Jakarta}
+      - TZ=Asia/Jakarta
       - CONTROL_API_KEY_FILE=/run/secrets/control_api_key
       # Host/NAS path this container sees media at. `/data/…` paths from
       # Sonarr/Radarr map here, and `/ready` checks it is mounted. Kept in
       # sync with the media mount below because a mount cannot read
       # pipeline.env; set it in the compose `.env`, not pipeline.env.
+      # Pinned for the container on purpose: the dashboard renders it
+      # read-only, because process env outranks every config layer and a
+      # saved value could never take effect.
       - NAS_MEDIA_PREFIX=${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}
+      # Port the daemon listens on. Pinned here as well so the healthcheck
+      # below and the reverse-proxy target cannot drift from the listener.
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-8085}
     # Provider API keys. The providers file ships with empty `api_key` values
     # and every entry falls back to its `key_env` name, which the daemon reads
     # from this environment file at start (docs/DEPLOY.md). Optional, so a
@@ -42,7 +48,9 @@ services:
     # Dependency-aware readiness gates the container; `/health` stays the
     # cheap liveness probe. Both are unauthenticated local-only checks.
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8085/ready"]
+      # Interpolated from the same variable the daemon reads, so changing the
+      # port cannot leave the container permanently unhealthy.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready"]
       interval: 30s
       timeout: 5s
       retries: 3

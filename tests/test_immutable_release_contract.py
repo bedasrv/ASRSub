@@ -316,5 +316,110 @@ class TestControlClientContract(unittest.TestCase):
         self.assertIn("/run/secrets/control_api_key", self.pctl)
 
 
+# Additions appended by the review-fix pass
+class TestDeploymentPinnedKeys(unittest.TestCase):
+    """Compose-pinned settings must stay a documented, UI-aware set.
+
+    Process env outranks every config layer, so a FIELDS key that compose
+    exports into the container can never be changed from the dashboard. The UI
+    renders those fields read-only (src/web.rs `pinned_keys`) and the
+    deployment pins exactly two: NAS_MEDIA_PREFIX (the bind-mount target) and
+    WEBHOOK_PORT (healthcheck + reverse-proxy target).
+    """
+
+    def setUp(self):
+        self.compose = COMPOSE.read_text(encoding="utf-8")
+        self.config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        self.web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+
+    def _fields_keys(self):
+        body = self.config.split("pub const FIELDS", 1)[1].split("\n];", 1)[0]
+        return set(re.findall(r'key: "([A-Z0-9_]+)"', body))
+
+    def _compose_env_keys(self):
+        keys = set()
+        in_env = False
+        for line in self.compose.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("environment:"):
+                in_env = True
+                continue
+            if not in_env:
+                continue
+            if stripped and not stripped.startswith(("-", "#")):
+                break
+            match = re.match(r"-\s*([A-Z0-9_]+)=", stripped)
+            if match:
+                keys.add(match.group(1))
+        return keys
+
+    def test_pinned_settings_are_exactly_the_documented_pair(self):
+        pinned = self._compose_env_keys() & self._fields_keys()
+        self.assertEqual(
+            pinned,
+            {"NAS_MEDIA_PREFIX", "WEBHOOK_PORT"},
+            msg="pinning another settings key in compose silently makes it uneditable; "
+            "update the pinned set and the UI copy together",
+        )
+
+    def test_dashboard_renders_pinned_fields_read_only(self):
+        self.assertIn("pub fn env_pinned", self.config)
+        self.assertIn("fn pinned_keys", self.web)
+        self.assertIn("crate::config::env_pinned", self.web)
+        self.assertIn("readonly disabled", self.web)
+
+    def test_healthcheck_follows_the_configured_port(self):
+        # A hard-coded port in the healthcheck left the container permanently
+        # unhealthy for a deployment that moved WEBHOOK_PORT.
+        self.assertNotRegex(self.compose, r"curl[^\n]*127\.0\.0\.1:8085/ready")
+        self.assertIn("${WEBHOOK_PORT:-8085}/ready", self.compose)
+
+    def test_ready_counts_resolvable_provider_keys(self):
+        api = (REPO / "src" / "api.rs").read_text(encoding="utf-8")
+        self.assertIn("llm_keyed", api)
+        self.assertRegex(api, r"llm_keyed\s*>\s*0")
+        self.assertIn("whisper_keyed", api)
+        # A missing bind mount leaves an empty dir behind: is_dir() is not a
+        # media check on its own.
+        self.assertIn("is_mount_point", api)
+
+    def test_build_context_excludes_operator_secrets(self):
+        ignore = (REPO / ".dockerignore").read_text(encoding="utf-8")
+        for needle in ("asrsub_providers.json", "secrets/", "*.env"):
+            self.assertIn(needle, ignore, msg=f".dockerignore must exclude {needle}")
+
+    def test_override_file_is_written_owner_only(self):
+        self.assertIn("mode(0o600)", self.config)
+        self.assertIn("set_permissions", self.config)
+
+
+class TestDocsMatchTheEnvironmentMechanism(unittest.TestCase):
+    """The provider-key contract must stay wired, not just documented."""
+
+    def setUp(self):
+        self.compose = COMPOSE.read_text(encoding="utf-8")
+        self.deploy_md = DEPLOY_MD.read_text(encoding="utf-8") if DEPLOY_MD.exists() else ""
+        self.env_example = (REPO / "pipeline.env.example").read_text(encoding="utf-8")
+
+    def test_compose_loads_the_provider_key_environment_file(self):
+        # docs/DEPLOY.md promises key_env fallback; without this wiring every
+        # keyless provider entry resolves to "" and the pipeline silently
+        # performs no ASR or translation at all.
+        self.assertIn("env_file:", self.compose)
+        self.assertIn("provider_keys.env", self.compose)
+        self.assertIn("PROVIDER_KEYS_FILE", self.compose)
+        self.assertIn("required: false", self.compose)
+
+    def test_rotation_semantics_are_documented_honestly(self):
+        self.assertNotIn("apply without restart", self.deploy_md)
+        self.assertIn("docker compose up -d", self.deploy_md)
+
+    def test_env_only_knobs_are_not_advertised_as_pipeline_env(self):
+        # pipeline.env is never exported to the process environment, so
+        # env-only knobs there are silently ignored.
+        self.assertNotIn("must be set here", self.env_example)
+        self.assertIn("CONTAINER environment", self.env_example)
+
+
 if __name__ == "__main__":
     unittest.main()

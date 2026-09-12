@@ -138,8 +138,9 @@ fn resolve_key(api_key: &str, key_env: &str) -> String {
 }
 
 impl LlmProvider {
-    /// API key: embedded value wins, otherwise `$key_env` at call time so
-    /// rotated keys apply without restart.
+    /// API key: embedded value wins, otherwise `$key_env` from the process
+    /// environment. The environment is fixed when the container starts, so a
+    /// rotated key needs a container recreate, not a live reload.
     pub fn api_key(&self) -> String {
         resolve_key(&self.api_key, &self.key_env)
     }
@@ -239,6 +240,27 @@ impl ProviderPool {
     /// Number of configured Whisper endpoints (primary + fallbacks).
     pub fn whisper_len(&self) -> usize {
         self.inner.whisper.len()
+    }
+
+    /// LLM endpoints whose key actually resolves. A keyless endpoint is
+    /// skipped by the pipeline (`translate.rs`), so counting configured
+    /// endpoints overstates a pool whose `key_env` vars were never injected —
+    /// the exact failure `/ready` exists to catch.
+    pub fn keyed_len(&self) -> usize {
+        self.inner
+            .providers
+            .iter()
+            .filter(|p| !p.api_key().is_empty())
+            .count()
+    }
+
+    /// Whisper endpoints whose key resolves (see [`Self::keyed_len`]).
+    pub fn whisper_keyed_len(&self) -> usize {
+        self.inner
+            .whisper
+            .iter()
+            .filter(|p| !p.api_key().is_empty())
+            .count()
     }
 
     pub fn http(&self) -> &reqwest::Client {
