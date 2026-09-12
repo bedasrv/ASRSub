@@ -1,20 +1,23 @@
 # ASRSub Health / Readiness Contract
 
 This document defines the local health and readiness story for the ASRSub
-pipeline: a single Rust `asrsub` binary running as two compose services
-(orchestrator on :8085, dashboard/API replica on :8080). It is the
-authoritative contract for deployment and monitoring.
+pipeline: a single Rust `asrsub` binary running as one compose service (the
+daemon serves both the dashboard and the API on `WEBHOOK_PORT`, default
+`:8085`). It is the authoritative contract for deployment and monitoring.
 
 ## Endpoints (actually served)
 
 - `GET /health` — **Liveness** (unauthenticated, always open). Returns `200
-  {"ok": true}` if the process is running. Does not check external
-  dependencies. Use for container liveness probes. (Also at `/api2/health`.)
+  {"ok": true}` if the process is running. Does **not** check any
+  dependency; use it for container liveness probes. (Also `/api2/health`.)
+- `GET /ready` — **Readiness** (unauthenticated). Evaluates the local
+  prerequisites below and returns `200` when ready, `503` otherwise. It
+  never makes remote calls and never gates on Sonarr/Bazarr/Jellyfin, so a
+  slow or down integration cannot flap readiness. (Also `/api2/ready`.)
 - `GET /status` — Daemon state (unauthenticated): `paused`, `uptime_s`,
   `last_pass{at,scanned,done,failed}`, `current`, `started_at`,
-  `run_once_requested`, `media_ok` (NAS media root present — a dead mount
-  no longer looks like "idle"). This is the
-  readiness signal today: healthy = 200 + a recent `last_pass.at` (see below).
+  `run_once_requested`, `media_ok` (the configured media root is present — a
+  dead mount no longer looks like "idle").
 - `GET /config` — Merged config with secrets masked.
 - `POST /pause /resume /run-once /wake /webhook` — Control (require
   `X-API-Key` (or the `X-Control-Key` alias that media-server notification
@@ -22,18 +25,52 @@ authoritative contract for deployment and monitoring.
   env `CONTROL_API_KEY` is test fallback only).
 - `/api2/*` — Telemetry + episode actions (same auth rule for POSTs).
 
-There is **no `/ready` endpoint yet** (planned). Gate releases on `/health`
-plus `/status` instead:
+### `/ready` contract
+
+```jsonc
+{
+  "ready": true,                       // 200 when true, 503 when false
+  "checks": {
+    "media_root": {"ok": true, "path": "/mnt/nas/share/media"},
+    "providers":  {"ok": true, "llm": 14, "whisper": 1},
+    "state_dir":  {"ok": true, "path": "/home/user/.config/asr-pipeline"}
+  },
+  "integrations": {                    // diagnostics ONLY — never gate ready
+    "sonarr": true,
+    "bazarr": true,
+    "jellyfin": false,
+    "jellyfin_misconfigured": false    // API key set but JELLYFIN_URL empty
+  }
+}
+```
+
+Readiness requires all three gating checks:
+
+1. **`media_root`** — the directory named by `NAS_MEDIA_PREFIX` exists and is
+   a directory. This is where `/data/…` paths from Sonarr/Radarr are mapped
+   and what the daemon reads; it must be the mounted media tree.
+2. **`providers`** — at least one LLM model and at least one Whisper
+   endpoint are configured in `asrsub_providers.json`. The daemon refuses to
+   start without an LLM, so a running-but-LLM-less process is impossible;
+   the Whisper count catches a file that omits STT.
+3. **`state_dir`** — the directory containing `STATE_FILE` is writable (a
+   short-lived probe file is created and removed). State lives here.
+
+`integrations` reports whether the optional `SONARR_URL`, `BAZARR_URL` and
+`JELLYFIN_URL`/key pairs are configured. `jellyfin_misconfigured` is `true`
+whenever a Jellyfin key is set without a URL (no site-specific default
+ships in code, so refresh is silently off until the URL is set).
+
+Use `/health` for liveness and `/ready` for readiness:
 
 ```bash
 curl -sf http://127.0.0.1:8085/health | jq .
-curl -sf http://127.0.0.1:8085/status | jq '{paused, last_pass}'
+curl -sf http://127.0.0.1:8085/ready  | jq .   # non-zero exit when 503
 ```
 
 ## Operational prerequisites
 
-Still true operationally, checked by the operator (not yet gated in code —
-the daemon logs and degrades instead of refusing to start):
+Checked by `/ready` (media root, state dir, providers) or by the operator:
 
 ### 1. Local State Directory
 
@@ -48,16 +85,23 @@ the daemon logs and degrades instead of refusing to start):
   test -w /home/user/.config/asr-pipeline
   ```
 
-### 2. NFS Media Mount
+### 2. Media Mount
 
-- **What**: `/mnt/nas/share/media` must be mounted and contain the media tree.
+- **What**: the directory named by `NAS_MEDIA_PREFIX` (default
+  `/mnt/nas/share/media`) must be mounted and contain the media tree. The
+  compose file mounts the host media directory (`MEDIA_HOST_PATH`) there.
+- **Jellyfin mapping**: `JELLYFIN_MEDIA_ROOT` (default `/media`) is the path
+  prefix the **Jellyfin server** reports for the same files. It is a string
+  mapping used only for the refresh lookup — the daemon does not read it
+  from disk. Keep it aligned with the Jellyfin server's container path.
 - **Why**: Missing media must never trigger destructive cleanup — episodes
   without files on disk error the pass item (`failed`, state row `error`)
   and are retried next pass; nothing is pruned.
 - **How**:
   ```bash
-  mountpoint -q /mnt/nas/share/media || grep -q " /mnt/nas/share/media " /proc/mounts
-  test -d /mnt/nas/share/media/jellyfin
+  mountpoint -q "${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}" || \
+    grep -q " ${NAS_MEDIA_PREFIX:-/mnt/nas/share/media} " /proc/mounts
+  curl -sf http://127.0.0.1:8085/ready | jq .checks.media_root
   ```
 
 ### 3. Webhooks (no inbox ledger)
@@ -85,23 +129,25 @@ those belonged to the retired Python daemon). Hold/resume at runtime:
 ```bash
 curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" -X POST http://127.0.0.1:8085/pause
 curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/status | jq .paused
-# To resume: POST /resume (or /api2/resume on :8080)
+# To resume: POST /resume (or /api2/resume)
 ```
 
 ## Operational Notes
 
-- **No secret values** appear in health/readiness responses, logs, or dashboards. `CONTROL_API_KEY` is loaded from `/run/secrets/control_api_key` (or `CONTROL_API_KEY_FILE`); `pipeline.env` at `/home/user/.config/asr-pipeline/pipeline.env` holds non-control settings (BAZARR_URL, SONARR_URL, etc.) and is mounted as a volume, not injected as environment variables.
-- **Dashboard vs orchestrator**: Dashboard mounts the state volume read-only (`:ro`) to prevent unintended state writes. Both services share the immutable `${ASRSUB_IMAGE}` (`asrsub:<full-git-sha>`) image but use distinct commands; the compose file retains all data mounts and fails closed if `ASRSUB_IMAGE` is unset.
+- **No secret values** appear in health/readiness responses, logs, or dashboards. `CONTROL_API_KEY` is loaded from `/run/secrets/control_api_key` (or `CONTROL_API_KEY_FILE`); `pipeline.env` at `/home/user/.config/asr-pipeline/pipeline.env` holds non-control settings (BAZARR_URL, SONARR_URL, JELLYFIN_URL, …) and is mounted as a volume, not injected as environment variables.
+- **One daemon serves the dashboard**: exactly one `orchestrator` service runs the daemon, which serves the UI at `/` and the API at `/api2/*` on `WEBHOOK_PORT` (default 8085). There is no separate dashboard replica: running a second full daemon on a read-only state mount caused an `EROFS` restart loop and risked competing state writers.
 - **Build vs deploy**: images are built by CI and pushed to GHCR as immutable `ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (`build.sh` is local/dev builds only and never pushes); deploy pulls an explicit tag (`docker compose pull`, then `up -d --no-build`). The compose file fails closed if `ASRSUB_IMAGE` is unset. Deployment detail lives in `DEPLOY.md`.
-- **Probes** (orchestrator `:8085`; dashboard replica on `:8080` serves the same):
+- **Probes** (compose ships this healthcheck; `/health` for liveness, `/ready` for readiness):
   ```yaml
   healthcheck:
-    test: ["CMD", "curl", "-sf", "http://127.0.0.1:8085/health"]
+    test: ["CMD", "curl", "-sf", "http://127.0.0.1:8085/ready"]
     interval: 30s
     timeout: 5s
     retries: 3
+    start_period: 20s
   ```
-  Release gating: `/health` 200 plus a fresh `/status` `last_pass.at`.
+  Release gating: `/ready` 200. Rollout gating (e.g. `depends_on:
+  condition: service_healthy`) should also use `/ready`.
 
 ## Verification (local)
 
@@ -109,7 +155,8 @@ curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/s
 cargo test            # Rust suite (offline; includes full-program simulation)
 python3 -m unittest tests.test_immutable_release_contract tests.test_release_descriptor_execution
 curl -sf http://127.0.0.1:8085/health | jq .
-curl -sf http://127.0.0.1:8085/status | jq '{paused, last_pass}'
+curl -sf http://127.0.0.1:8085/ready  | jq .
+curl -sf http://127.0.0.1:8085/status | jq '{paused, media_ok, last_pass}'
 # Authenticated config (secrets masked):
 curl -H "X-API-Key: $(cat /run/secrets/control_api_key 2>/dev/null || echo $CONTROL_API_KEY)" http://127.0.0.1:8085/config | jq .
 ```

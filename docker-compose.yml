@@ -1,34 +1,43 @@
 name: asrsub
 
+# Single service. The daemon serves the dashboard/API itself on
+# WEBHOOK_PORT (default 8085) at `/` and `/api2/*`; there is no separate
+# dashboard replica (a second full daemon on a read-only state mount only
+# restarted with EROFS and competed for writers). See docs/HEALTH.md.
 services:
   orchestrator:
     image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)}
     # No GPU runtime: all inference is remote (asrsub_providers.json).
     environment:
-      - TZ=Asia/Jakarta
+      - TZ=${TZ:-Asia/Jakarta}
       - CONTROL_API_KEY_FILE=/run/secrets/control_api_key
+      # Host/NAS path this container sees media at. `/data/…` paths from
+      # Sonarr/Radarr map here, and `/ready` checks it is mounted. Kept in
+      # sync with the media mount below because a mount cannot read
+      # pipeline.env; set it in the compose `.env`, not pipeline.env.
+      - NAS_MEDIA_PREFIX=${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}
     secrets:
       - control_api_key
     network_mode: host
     volumes:
+      # Media at the daemon's configured host prefix ...
+      - ${MEDIA_HOST_PATH:-/mnt/nas/share/media}:${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}
+      # ... and at the Jellyfin server's media path so the refresh-lookup
+      # string mapping resolves to a path that exists in both containers.
+      # JELLYFIN_MEDIA_ROOT for the app stays in pipeline.env (this mount is
+      # not read by the daemon); align the two. If NAS_MEDIA_PREFIX equals
+      # the Jellyfin root, remove this second mount (duplicate target).
+      - ${MEDIA_HOST_PATH:-/mnt/nas/share/media}:${JELLYFIN_MEDIA_ROOT:-/media}:ro
       - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline
       - /home/user/.cache/asr-pipeline:/home/user/.cache/asr-pipeline
-      - /mnt/nas/share/media:/mnt/nas/share/media
-    restart: unless-stopped
-    command: [daemon]
-
-  dashboard:
-    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)}
-    network_mode: host
-    environment:
-      - TZ=Asia/Jakarta
-      - WEBHOOK_PORT=8080
-      - CONTROL_API_KEY_FILE=/run/secrets/control_api_key
-    secrets:
-      - control_api_key
-    volumes:
-      - /home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline:ro
-      - /mnt/nas/share/media:/mnt/nas/share/media:ro
+    # Dependency-aware readiness gates the container; `/health` stays the
+    # cheap liveness probe. Both are unauthenticated local-only checks.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8085/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
     command: [daemon]
 

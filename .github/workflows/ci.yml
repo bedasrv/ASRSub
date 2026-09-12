@@ -26,6 +26,7 @@ jobs:
           python-version: "3.13"
       - run: python3 -m unittest discover -s tests -p "test_*.py"
       - run: bash -n build.sh
+      - run: bash -n scripts/deploy_smoke.sh
       - run: ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:ci docker compose config -q
 
   docker:

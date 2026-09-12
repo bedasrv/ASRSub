@@ -14,12 +14,16 @@ via `asrsub_providers.json`. See `docs/` for deploy and health contracts.
 src/            Rust binary (daemon + CLI)
 tests/          Rust integration tests (binary boundary) + release-contract
                 tests (stdlib unittest, no pytest needed)
-assets/         dashboard.html, served by the daemon at /
+assets/         app.css + htmx.min.js, embedded in the binary (include_str!);
+                the dashboard is server-rendered from src/web.rs at /
 asrsub_providers.json(.example)
                 Remote endpoints for Whisper STT + LLM translation
                 (live file untracked — copy the .example and fill keys)
-Dockerfile / docker-compose.yml / build.sh / pctl / .github/workflows
-                 (CI gates; release workflow pushes GHCR SHA-tagged images)
+pipeline.env.example
+                Non-secret service settings (copy to pipeline.env)
+Dockerfile / docker-compose.yml / build.sh / pctl / scripts/
+                 (compose, CI gates; release workflow pushes GHCR SHA-tagged
+                 images; scripts/deploy_smoke.sh verifies a live deployment)
 docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 (port checklist; the retired Python implementation was
                 deleted 2026-09-08 and removed from `main` 2026-09-09 —
@@ -31,7 +35,7 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 72 unit + 4 integration (offline simulation incl.)
+cargo test                     # 88 unit + 4 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -50,7 +54,8 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | --- | ------- |
 | `SONARR_URL` / `SONARR_API_KEY` | Episode + series lookup |
 | `BAZARR_URL`(+`_2`) / `BAZARR_API_KEY`(+`_2`) | Wanted list, uploads, wanted refill |
-| `JELLYFIN_URL` / `JELLYFIN_API_KEY` / `JELLYFIN_MEDIA_ROOT` | Library refresh after subtitle events (off without key) |
+| `JELLYFIN_URL` / `JELLYFIN_API_KEY` / `JELLYFIN_MEDIA_ROOT` | Library refresh after subtitle events (off without key; **no default URL** — set it explicitly, e.g. `http://jellyfin.lan:8096`) |
+| `NAS_MEDIA_PREFIX` | Host/NAS path this daemon reads media at (default `/mnt/nas/share/media`); `/data/…` maps here |
 | `JIMAKU_API_KEY` / `JIMAKU_DIRECT_ENABLED` | Direct Jimaku source rung (off without key) |
 | `TARGET_LANGS` | e.g. `id,en` (default) |
 | `MAX_EPS_PER_RUN` / `EPISODE_CONCURRENCY` | Pass cap / parallel episodes |
@@ -77,13 +82,22 @@ the whole model list already *is* the fallback list.)
 
 GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
 
-- `/health` liveness · `/status` daemon state · `/config` masked config · `/` dashboard UI
+- `/` server-rendered operator dashboard (htmx, embedded; no asset files).
+  Read views are open; mutations use the control key from the browser's
+  `sessionStorage` via `hx-headers`.
+- `/health` liveness · `/ready` readiness (media/providers/state) · `/status` daemon state · `/config` masked config
 - `/pause` `/resume` `/run-once` `/wake` control · `/webhook` Tdarr wake + embedded-sub extract
-- `/api2/status /health /config /provenance /wanted /library /activity /exclusions`
+- `/api2/status /health /ready /config /provenance /wanted /library /activity /exclusions`
+- `POST /api2/config` writes the settings schema's keys to `config.overrides.json`
+  (only editable keys accepted; applied on restart)
 - `/api2/episode/{id|m:id|e:id}/retry|skip|delete|exclude|unexclude`
   (`m:` = movie/radarr id; retry/delete accept `{"language","kind"}`)
 
 `pctl` (repo root, stdlib-only) talks to the same routes.
+
+The dashboard's settings form is generated from `config::FIELDS`
+(`src/config.rs`), the single source of truth shared with the daemon; a test
+guarantees every field is a pipeline-owned key, so the UI cannot drift.
 
 ## Pipeline notes
 
@@ -96,4 +110,8 @@ GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
   Bazarr's rescan); `delete` additionally refreshes Jellyfin.
 - Only 204/transport-error/429/5xx Bazarr outcomes retry; 400/401/404 fail fast.
 - Untagged audio tracks transcribe as Japanese (anime-library default).
-- No `/ready` endpoint and no paused-boot yet — see `docs/HEALTH.md`.
+- `/ready` gates on local prerequisites (media root, providers, writable
+  state dir) and reports integrations as diagnostics; `/health` stays cheap.
+  No paused-boot yet — see `docs/HEALTH.md`.
+- One compose service: the daemon serves the dashboard/API on 8085; deploy
+  smoke test in `scripts/deploy_smoke.sh`.

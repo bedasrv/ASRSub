@@ -236,9 +236,11 @@ merge into `main` when their track is done and verified.
     "ReplaceAllMetadata":false,"ReplaceAllImages":false} (204). Verified live
     on NAS 10.10.20.160:8096 (container jellyfin; realtime monitor off, no
     scan interval — refresh is required to pick up/drop subtitle files).
-    Env keys: JELLYFIN_URL (default http://10.10.20.160:8096),
-    JELLYFIN_API_KEY (empty = feature off), JELLYFIN_MEDIA_ROOT (default
-    /media). No-op without the API key.
+    Env keys: JELLYFIN_URL, JELLYFIN_API_KEY (empty = feature off),
+    JELLYFIN_MEDIA_ROOT (default /media). No-op without the API key.
+    (Historical: the Python daemon compiled in `http://10.10.20.160:8096`;
+    the Rust port ships no site-specific JELLYFIN_URL default — it is empty
+    and refresh stays disabled until set, see src/config.rs.)
   - actions.jsonl (dashboard control_api_v2 schema: {"ts", "type":
     "retry"|"skip"|"delete", "episode_id", "language", "source", "note"},
     "action" accepted as type alias): consumed once per pass at run_pass

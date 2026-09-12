@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+# The dashboard (htmx/CSS) is embedded via include_str!, so it must be present
+# at compile time even though it is not copied into the runtime stage.
+COPY assets ./assets
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release && cp target/release/asrsub /asrsub
@@ -22,8 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 COPY --from=build /asrsub /usr/local/bin/asrsub
 # Provider template baked keyless: images never carry keys. At runtime leave
 # api_key empty and export the key_env vars (see docs/DEPLOY.md).
+# The dashboard (htmx + CSS) is embedded in the binary via include_str!.
 COPY asrsub_providers.json.example /app/asrsub_providers.json
-COPY assets/dashboard.html /app/assets/dashboard.html
 WORKDIR /app
 USER asrsub
 ENTRYPOINT ["asrsub"]
