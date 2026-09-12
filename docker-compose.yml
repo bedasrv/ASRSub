@@ -16,6 +16,15 @@ services:
       # sync with the media mount below because a mount cannot read
       # pipeline.env; set it in the compose `.env`, not pipeline.env.
       - NAS_MEDIA_PREFIX=${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}
+    # Provider API keys. The providers file ships with empty `api_key` values
+    # and every entry falls back to its `key_env` name, which the daemon reads
+    # from this environment file at start (docs/DEPLOY.md). Optional, so a
+    # deployment without provider keys still validates; override the path with
+    # PROVIDER_KEYS_FILE. After editing it, recreate the container — values
+    # enter the process environment at start.
+    env_file:
+      - path: ${PROVIDER_KEYS_FILE:-/home/user/.config/asr-pipeline/secrets/provider_keys.env}
+        required: false
     secrets:
       - control_api_key
     network_mode: host

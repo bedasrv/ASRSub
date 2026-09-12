@@ -11,10 +11,15 @@ Single statically-built `asrsub` Rust binary + ffmpeg + ca-certs on
 Debian slim. **No Python, no model weights, no GPU runtime** — all Whisper
 and LLM inference is remote via `asrsub_providers.json`, of which the image
 bakes only the **keyless template** (`asrsub_providers.json.example`):
-images never carry keys. At runtime leave `api_key` empty and export the
-`key_env` vars (e.g. from
-`~/.config/asr-pipeline/secrets/provider_keys.env`, `chmod 600`),
-which the daemon reads at call time so rotated keys apply without restart.
+images never carry keys. At runtime leave `api_key` empty and supply the
+`key_env` vars in
+`/home/user/.config/asr-pipeline/secrets/provider_keys.env` (`chmod 600`;
+override the path with `PROVIDER_KEYS_FILE`), which the shipped compose loads
+into the container environment through `env_file`. `resolve_key` prefers a
+non-empty `api_key` and otherwise reads `$key_env` from the process
+environment at call time, and Docker populates that environment when the
+container starts — so after rotating a key, re-run `docker compose up -d`
+(Compose recreates the container when the rendered environment changes).
 The operator dashboard is server-rendered by the daemon at `/` (htmx + CSS
 embedded in the binary — no runtime asset files). Read views are open; the
 settings form and episode actions require the control key, entered once in the
@@ -47,7 +52,24 @@ environment: `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
   ```
   The file is mounted as a Docker Compose secret at `/run/secrets/control_api_key` inside containers. Environment `CONTROL_API_KEY` is only for hermetic tests.
 
-- Non-control settings remain in `/home/user/.config/asr-pipeline/pipeline.env` (mounted as a volume, not injected as env); copy `pipeline.env.example` as a starting point. Do not put `CONTROL_API_KEY` there, and do not put API keys in it — keys live in `asrsub_providers.json` (or its `key_env` exports).
+- Provider API keys, if the providers file leaves `api_key` empty. One
+  `KEY_ENV=value` line per `key_env` name the file references:
+  ```bash
+  printf '%s\n' 'OPENROUTER_API_KEY=...' 'OPENCODE_ZEN_API_KEY=...' \
+    'COMMANDCODE_API_KEY=...' 'NOUS_API_KEY=...' \
+    > /home/user/.config/asr-pipeline/secrets/provider_keys.env
+  chmod 600 /home/user/.config/asr-pipeline/secrets/provider_keys.env
+  # Verify the rendered container environment picks them up (names only):
+  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:$(git rev-parse HEAD) docker compose config \
+    | grep -E '^ *[A-Z_]+_API_KEY:'
+  ```
+  The compose `env_file` entry is `required: false`, so a deployment that
+  keeps every key inside the mode-600 providers file still validates. Values
+  are readable by anyone who can run `docker inspect` on the container — on a
+  single-admin host that is the same exposure as the providers file it
+  replaces, and it keeps keys out of the config the daemon re-reads.
+
+- Non-control settings remain in `/home/user/.config/asr-pipeline/pipeline.env` (mounted as a volume, not injected as env); copy `pipeline.env.example` as a starting point. Do not put `CONTROL_API_KEY` there, and do not put provider API keys in it — provider keys live in the providers file or, preferably, in `secrets/provider_keys.env` via each entry's `key_env` (see above).
 
 - Media layout (see `HEALTH.md`). Two settings describe the same media from
   two vantage points and are both configurable:

@@ -68,9 +68,13 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 Remote endpoints, models, and keys live in `asrsub_providers.json`
 (LLM list sorted fastest-first with per-endpoint limits + breakers).
 That file is UNTRACKED (live keys — purged from git history 2026-09-08):
-copy `asrsub_providers.json.example`, fill `api_key` (or export the
-`key_env` vars — empty `api_key` falls back to env), `chmod 600`, never
-commit it. It ships inside the Docker image (see `docs/DEPLOY.md`).
+copy `asrsub_providers.json.example`, fill `api_key` (or leave it empty and
+put the `key_env` vars in `~/.config/asr-pipeline/secrets/provider_keys.env`,
+which compose loads via `env_file`), `chmod 600`, never commit it. A
+non-empty `api_key` wins over its `key_env` fallback, and either way the
+value enters the process environment at container start — rotate by editing
+the env file and re-running `docker compose up -d`. The keyless template
+ships inside the Docker image (see `docs/DEPLOY.md`).
 
 Failover: every LLM chunk races all configured models fastest-first (404
 or error → next model, 3 straight failures → 60 s breaker); Whisper tries
