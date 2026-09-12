@@ -18,7 +18,7 @@ the *decisions*.
 - Rust coverage **at the time of the port**: 72 unit `#[test]` (incl. the
   full-program sim, 40+ asserts across phases A–G) + 4 binary-boundary
   integration tests + 21 stdlib-unittest release-contract cases. The tree has
-  grown since: 112 unit tests + 4 integration tests (`cargo test`; `README.md`
+  grown since: 115 unit tests + 4 integration tests (`cargo test`; `README.md`
   quotes the same pair) and 53 release-contract cases (`python3 -m unittest
   tests.test_immutable_release_contract tests.test_release_descriptor_execution`).
   This file records the port decision, not the current counts.
