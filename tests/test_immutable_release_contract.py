@@ -30,11 +30,10 @@ class TestComposeImmutableRelease(unittest.TestCase):
         self.assertNotRegex(self.compose, r"(?m)^\s*build\s*:", msg="docker-compose.yml must not contain 'build:' (immutable release)")
 
     def test_compose_image_is_fail_closed_ASRSUB_IMAGE(self):
-        # Both services must use ${ASRSUB_IMAGE:? ...} and no default latest.
-        # Require at least two occurrences (orchestrator + dashboard).
+        # Every service must use ${ASRSUB_IMAGE:? ...} and no default latest.
         pattern = r"\$\{ASRSUB_IMAGE:\?"
         matches = re.findall(pattern, self.compose)
-        self.assertGreaterEqual(len(matches), 2, msg="compose must reference ${ASRSUB_IMAGE:?} for both services (fail-closed)")
+        self.assertGreaterEqual(len(matches), 1, msg="compose must reference ${ASRSUB_IMAGE:?} (fail-closed)")
         # Must NOT contain a fallback default like :- or :?
         # Actually :? is required, but :- would be mutable default — forbid :- for ASRSUB_IMAGE
         self.assertNotIn("ASRSUB_IMAGE:-", self.compose, msg="compose must not use :- default for ASRSUB_IMAGE")
@@ -56,17 +55,22 @@ class TestComposeImmutableRelease(unittest.TestCase):
         self.assertIn("CONTROL_API_KEY_FILE_HOST", self.compose)
 
     def test_compose_preserves_all_mounts_and_state(self):
-        # All existing volumes must remain.
-        required_mounts = [
+        # State, cache and media mounts must remain. The media host path is
+        # configurable but defaults to the historical location, and the
+        # daemon's container prefix must match the mount target.
+        self.assertIn(
             "/home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline",
+            self.compose,
+        )
+        self.assertIn(
             "/home/user/.cache/asr-pipeline:/home/user/.cache/asr-pipeline",
-            "/mnt/nas/share/media:/mnt/nas/share/media",
-        ]
-        for m in required_mounts:
-            self.assertIn(m, self.compose, msg=f"compose must preserve mount {m!r}")
-        # dashboard read-only config
-        self.assertIn("/home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline:ro", self.compose)
-        self.assertIn("/mnt/nas/share/media:/mnt/nas/share/media:ro", self.compose)
+            self.compose,
+        )
+        # Media mounted at the configurable host prefix ...
+        self.assertIn("${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}", self.compose)
+        self.assertIn("${MEDIA_HOST_PATH:-/mnt/nas/share/media}", self.compose)
+        # ... and at the Jellyfin server path (issue #4).
+        self.assertIn("${JELLYFIN_MEDIA_ROOT:-/media}", self.compose)
         # restart policy preserved
         self.assertIn("restart: unless-stopped", self.compose)
         self.assertIn("network_mode: host", self.compose)
@@ -76,11 +80,26 @@ class TestComposeImmutableRelease(unittest.TestCase):
         self.assertNotIn("huggingface", self.compose)
         self.assertNotIn("runtime: nvidia", self.compose)
 
+    def test_compose_single_daemon_serves_dashboard(self):
+        # Issue #3: no separate read-only dashboard replica (it looped on
+        # EROFS). The orchestrator serves `/` and `/api2/*` itself.
+        self.assertNotRegex(self.compose, r"(?m)^\s{dashboard}:")
+        self.assertNotIn("dashboard.py", self.compose)
+        # Read-only state mount is gone with it.
+        self.assertNotIn(
+            "/home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline:ro",
+            self.compose,
+        )
+
+    def test_compose_healthcheck_uses_readiness(self):
+        # Issue #7: readiness gates the container; liveness stays /health.
+        self.assertIn("/ready", self.compose)
+        self.assertIn("healthcheck:", self.compose)
+
     def test_compose_preserves_service_commands(self):
         # Rust binary entrypoint (was: orchestrator.py / dashboard.py).
         self.assertIn("command: [daemon]", self.compose)
         self.assertNotIn("orchestrator.py", self.compose)
-        self.assertNotIn("dashboard.py", self.compose)
 
 
 class TestBuildReleaseMetadata(unittest.TestCase):
@@ -180,6 +199,121 @@ class TestDeployDocsMatch(unittest.TestCase):
 
     def test_docs_describe_release_descriptor(self):
         self.assertRegex(self.md, r"\.release\.env|release\.env|release\.json|release descriptor", msg="DEPLOY.md must describe the release descriptor/env emitted by build.sh")
+
+
+class TestHealthAndJellyfinContract(unittest.TestCase):
+    """Cross-file guards for issues #2/#4/#5/#7/#8."""
+
+    def setUp(self):
+        self.compose = COMPOSE.read_text(encoding="utf-8")
+        self.config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        self.health = (REPO / "docs" / "HEALTH.md").read_text(encoding="utf-8")
+        self.deploy_md = DEPLOY_MD.read_text(encoding="utf-8") if DEPLOY_MD.exists() else ""
+        self.env_example = (REPO / "pipeline.env.example").read_text(encoding="utf-8")
+
+    def test_no_site_specific_jellyfin_url_default(self):
+        # Issue #8: no compiled-in private address in source, docs or example.
+        for text, name in (
+            (self.config, "src/config.rs"),
+            (self.deploy_md, "docs/DEPLOY.md"),
+            (self.env_example, "pipeline.env.example"),
+        ):
+            self.assertNotIn(
+                "10.10.20.160", text, msg=f"{name} must not carry a site-specific default"
+            )
+        self.assertRegex(self.config, r'DEFAULT_JELLYFIN_URL:\s*&str\s*=\s*""')
+        # The example config keeps the required URL visible.
+        self.assertIn("JELLYFIN_URL", self.env_example)
+
+    def test_ready_endpoint_documented_and_gated(self):
+        # Issue #7: /ready contract + compose healthcheck on /ready.
+        self.assertIn("/ready", self.health)
+        self.assertIn("/ready", self.compose)
+
+    def test_deploy_smoke_script_present(self):
+        # Issue #4: smoke test checks media root + host/Jellyfin mapping.
+        smoke = REPO / "scripts" / "deploy_smoke.sh"
+        self.assertTrue(smoke.exists(), msg="scripts/deploy_smoke.sh must exist")
+        text = smoke.read_text(encoding="utf-8")
+        for needle in ("/ready", "NAS_MEDIA_PREFIX", "JELLYFIN_MEDIA_ROOT"):
+            self.assertIn(needle, text)
+
+    def test_reverse_proxy_documented(self):
+        # Issue #6: port 8085, firewall/ACL, probes, SSO vs upstream.
+        self.assertIn("8085", self.deploy_md)
+        self.assertIn("firewall", self.deploy_md.lower())
+        self.assertIn("/ready", self.deploy_md)
+
+    def test_jellyfin_uses_media_authorization_header(self):
+        # Issue #2: every request uses MediaBrowser auth, never X-Emby-Token.
+        jellyfin = (REPO / "src" / "jellyfin.rs").read_text(encoding="utf-8")
+        self.assertNotIn('X-Emby-Token", &self.key', jellyfin)
+        self.assertIn("MediaBrowser Token=", jellyfin)
+        # All four protected call sites use the shared helper.
+        self.assertEqual(jellyfin.count('"Authorization", self.auth_value()'), 4)
+
+
+class TestServerRenderedDashboard(unittest.TestCase):
+    """The htmx dashboard replaces the retired single-file dashboard.html."""
+
+    def setUp(self):
+        self.web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+        self.dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+        self.assets = REPO / "assets"
+
+    def test_old_dashboard_removed(self):
+        self.assertFalse(
+            (self.assets / "dashboard.html").exists(),
+            msg="assets/dashboard.html is replaced by the server-rendered dashboard",
+        )
+
+    def test_htmx_and_css_embedded(self):
+        for name in ("htmx.min.js", "app.css"):
+            self.assertTrue((self.assets / name).exists(), msg=f"missing asset {name}")
+        # Embedded at compile time, not read from disk at runtime.
+        self.assertIn("include_str!", self.web)
+        self.assertIn("htmx.min.js", self.web)
+        self.assertIn("app.css", self.web)
+
+    def test_settings_generated_from_rust_schema(self):
+        # The field schema is the single source of truth, shared with the daemon.
+        config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
+        self.assertIn("pub const FIELDS", config)
+        self.assertIn("pub fn is_editable_key", config)
+        self.assertIn("FIELDS", self.web)
+
+    def test_docker_build_stage_copies_assets(self):
+        # include_str! needs assets/ present during `cargo build`.
+        self.assertIn("COPY assets ./assets", self.dockerfile)
+
+    def test_config_write_endpoint_documented(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("POST /api2/config", readme)
+        self.assertIn("config.overrides.json", readme)
+
+
+class TestControlClientContract(unittest.TestCase):
+    """`pctl` must match the unified single-service API."""
+
+    def setUp(self):
+        self.pctl = (REPO / "pctl").read_text(encoding="utf-8")
+
+    def test_uses_unified_control_host(self):
+        self.assertNotIn("127.0.0.1:8080", self.pctl)
+        self.assertNotIn("PIPE_API2_HOST", self.pctl)
+        self.assertNotIn("get_api2_host", self.pctl)
+        self.assertNotIn("control_api_v2", self.pctl)
+        self.assertNotIn("FastAPI", self.pctl)
+        self.assertNotIn("ControlHandler", self.pctl)
+
+    def test_uses_supported_config_endpoint(self):
+        self.assertIn('post("/api2/config"', self.pctl)
+        self.assertNotIn('"/config"', self.pctl.replace('get("/config")', ""))
+        self.assertNotIn("config unset", self.pctl)
+
+    def test_does_not_read_control_key_from_pipeline_env(self):
+        self.assertNotIn("CONTROL_API_KEY in pipeline.env", self.pctl)
+        self.assertIn("/run/secrets/control_api_key", self.pctl)
 
 
 if __name__ == "__main__":

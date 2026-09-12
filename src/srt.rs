@@ -2,9 +2,8 @@
 //!
 //! Hot-path code is allocation-conscious: timestamps are `u32` millis,
 //! parsing reuses a single pass over the input, and the CPS-merge pass works
-//! in place over `Vec<Cue>`. Behavior mirrors the Python orchestrator:
-//! AI-marker first cue, contiguity clamp, CPS reading-speed merge, timeline
-//! validation, echo/wrong-script guards.
+//! in place over `Vec<Cue>`: AI-marker first cue, contiguity clamp, CPS
+//! reading-speed merge, timeline validation, echo/wrong-script guards.
 
 use anyhow::Result;
 
@@ -61,9 +60,9 @@ fn parse_ts_line(line: &str) -> Option<(u32, u32)> {
 }
 
 /// Tolerant SRT parser: skips index lines, tolerates missing numbering and
-/// `\r\n`, drops empty bodies. Multi-line bodies collapse with `" "` —
-/// matching `parse_srt` in orchestrator.py, so `cps_merge` line-counts and
-/// re-read char counts behave identically on ladder/embedded input.
+/// `\r\n`, drops empty bodies. Multi-line bodies collapse with `" "`, so
+/// `cps_merge` line-counts and re-read char counts stay consistent on
+/// ladder/embedded input.
 pub fn parse_srt(text: &str) -> Vec<Cue> {
     let mut cues = Vec::new();
     // Normalize then split on blank lines without allocating per block twice.
@@ -284,20 +283,13 @@ pub fn cps_merge(
     out
 }
 
-/// Structural timeline checks: monotonic, non-overlapping (after contiguity
-/// this only fires on zero-duration), bounded duration, non-empty text.
-/// Returns human-readable violation strings (callers only need the count,
-/// but the messages make warn logs actionable).
-/// Structural timeline gate: per-cue sanity plus the file-level checks the
-/// retired Python `validate_srt_timeline` pinned (Dungeon People S01E09: a
-/// retime collapsed 9 cues onto one timestamp after a 326 s hole and the
-/// file was written anyway). Starts must be non-decreasing ("monotonic")
-/// with at most `MAX_PILEUP` cues sharing one identical start ("pileup");
-/// with a known video duration the span must cover `MIN_COVERAGE` of it
-/// ("coverage") with no single inter-cue gap exceeding `MAX_GAP_FRAC`
-/// ("gap"). Thresholds are the legacy-verified defaults, now consts (the
-/// env knobs were pruned as dead). Returns violation strings; empty means
-/// clean.
+/// Structural timeline gate: per-cue sanity plus file-level checks. Returns
+/// human-readable violation strings. Starts
+/// must be non-decreasing ("monotonic") with at most `MAX_PILEUP` cues
+/// sharing one identical start ("pileup"); with a known video duration the
+/// span must cover `MIN_COVERAGE` of it ("coverage") with no single inter-cue
+/// gap exceeding `MAX_GAP_FRAC` ("gap"). Thresholds are consts. Returns
+/// violation strings; empty means clean.
 pub fn validate_timeline(cues: &[Cue], max_cue_ms: u32, duration_s: Option<f64>) -> Vec<String> {
     const MAX_PILEUP: u32 = 2;
     const MIN_COVERAGE: f64 = 0.80;

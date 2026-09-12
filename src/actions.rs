@@ -1,11 +1,14 @@
 //! Dashboard action handling: `skip` / `retry` / `delete`.
 //!
 //! Consumed once per pass from `actions.jsonl` (atomic drain in
-//! `state::consume_actions`). Mirrors `consume_actions` in orchestrator.py:
-//! `skip` excludes ids from the pass; `retry` clears state rows AND removes
-//! subtitle files (Bazarr only re-wants missing files); `delete` additionally
-//! refreshes Jellyfin. `kind` (`series`/`movie`) routes each record and
-//! `language` scopes it (null = whole episode).
+//! `state::consume_actions`):
+//! - `skip` excludes ids from the pass;
+//! - `retry` clears state rows AND removes subtitle files (Bazarr only
+//!   re-wants missing files);
+//! - `delete` additionally refreshes Jellyfin.
+//!
+//! `kind` (`series`/`movie`) routes each record and `language` scopes it
+//! (null = whole episode).
 
 use std::path::Path;
 
@@ -27,8 +30,6 @@ impl Pipeline {
     /// Process pending actions once per pass; returns ids to skip this pass
     /// plus retry specs for SAME-pass reprocessing (see `run_pass`).
     ///
-    /// Mirrors `consume_actions` in orchestrator.py:
-    ///
     /// - `skip`: episode excluded from this pass's candidates.
     /// - `retry`: state rows cleared AND subtitle files removed (same deleter
     ///   as `delete`) — Bazarr only re-wants episodes with missing files, so
@@ -46,7 +47,7 @@ impl Pipeline {
         if records.is_empty() {
             return (skip_ids, no_retries);
         }
-        // Group retry/delete by (id -> kinds + langs) like Python.
+        // Group retry/delete by (id -> kinds + langs).
         let mut retry: std::collections::HashMap<
             i64,
             (

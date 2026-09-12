@@ -31,6 +31,7 @@ mod sonarr;
 mod srt;
 mod state;
 mod translate;
+mod web;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -141,6 +142,22 @@ async fn load_stack(
     providers_override: Option<PathBuf>,
 ) -> Result<(config::Config, providers::ProviderPool, reqwest::Client)> {
     let cfg = config::Config::load()?;
+    // There is no site-specific JELLYFIN_URL default: a set key with no URL
+    // leaves refresh disabled. Say so loudly rather than failing silently.
+    if !cfg.jellyfin_api_key.is_empty() && cfg.jellyfin_url.is_empty() {
+        tracing::warn!(
+            "JELLYFIN_API_KEY is set but JELLYFIN_URL is empty; Jellyfin refresh is disabled. Set JELLYFIN_URL explicitly."
+        );
+    }
+    // Validate the media mount at startup: a vanished NAS is the most common
+    // cause of "healthy but doing nothing". `/ready` reports the same check
+    // and the daemon degrades (no destructive cleanup) rather than exiting.
+    if !std::path::Path::new(&cfg.nas_media_prefix).is_dir() {
+        tracing::warn!(
+            prefix = %cfg.nas_media_prefix,
+            "media root is not a directory; /ready will report not-ready until the mount is fixed"
+        );
+    }
     let http = build_http();
     let ppath = providers_override
         .or_else(|| std::env::var("PROVIDERS_FILE").ok().map(PathBuf::from))
@@ -445,11 +462,10 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
     // Control API server.
     let app = api::router(app_state.clone());
     // Webhook route shares the port: tdarr POST /webhook wakes + extracts.
-    // Authenticated like every other control POST (legacy parity: the retired
-    // Python ControlHandler 401'd ALL POST paths, webhooks included) — an
-    // unauthenticated caller must not be able to trigger ffmpeg runs, media-dir
-    // writes, or wake-induced API spend. OPS: the Tdarr/Sonarr notification
-    // must send X-API-Key (or X-Control-Key) == CONTROL_API_KEY.
+    // Authenticated like every other control POST — an unauthenticated caller
+    // must not be able to trigger ffmpeg runs, media-dir writes, or
+    // wake-induced API spend. OPS: the Tdarr/Sonarr notification must send
+    // X-API-Key (or X-Control-Key) == CONTROL_API_KEY.
     let webhook_inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let app = app.route(

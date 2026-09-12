@@ -1,9 +1,9 @@
 //! Control + telemetry HTTP API (axum).
 //!
-//! v1 routes (`/status /config /pause /resume /run-once /wake /health`) keep
-//! the dashboard/pctl contract; `/api2/*` exposes the richer telemetry
-//! surface. GETs are open (browser dashboard holds no token); POSTs require
-//! `X-API-Key == CONTROL_API_KEY`.
+//! Unversioned routes (`/status /config /pause /resume /run-once /wake
+//! /health`) preserve the operator control contract; `/api2/*` exposes the
+//! richer telemetry surface. GETs are open (browser dashboard holds no
+//! token); POSTs require `X-API-Key == CONTROL_API_KEY`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -62,15 +62,15 @@ impl AppState {
 }
 
 pub(crate) fn check_token(cfg: &Config, headers: &HeaderMap) -> bool {
-    // Deny-by-default when no key is configured (same posture as the v1
-    // ControlHandler): an unconfigured daemon never accepts control POSTs.
+    // Deny-by-default when no key is configured: an unconfigured daemon
+    // never accepts control POSTs.
     let key = cfg.control_key();
     if key.is_empty() {
         return false;
     }
     // Accept either sender header: `X-API-Key` (dashboard/pctl) or
-    // `X-Control-Key` (media-server notification plugins, as the retired
-    // Python ControlHandler did). Either must equal CONTROL_API_KEY.
+    // `X-Control-Key` (media-server notification plugins). Either must equal
+    // CONTROL_API_KEY.
     let token = headers
         .get("x-api-key")
         .or_else(|| headers.get("x-control-key"))
@@ -94,9 +94,10 @@ fn secure_eq(a: &str, b: &str) -> bool {
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
-        .route("/", get(h_index))
+        .route("/", get(crate::web::h_index))
         .route("/status", get(h_status))
         .route("/health", get(h_health))
+        .route("/ready", get(h_ready))
         .route("/config", get(h_config))
         .route("/pause", post(h_pause))
         .route("/resume", post(h_resume))
@@ -104,7 +105,8 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/wake", post(h_wake))
         .route("/api2/status", get(h_api2_status))
         .route("/api2/health", get(h_health))
-        .route("/api2/config", get(h_config))
+        .route("/api2/ready", get(h_ready))
+        .route("/api2/config", get(h_config).post(h_config_put))
         .route("/api2/provenance", get(h_provenance))
         .route("/api2/wanted", get(h_wanted))
         .route("/api2/library", get(h_library))
@@ -119,6 +121,7 @@ pub fn router(state: Arc<AppState>) -> axum::Router {
         .route("/api2/resume", post(h_resume))
         .route("/api2/run-once", post(h_run_once))
         .route("/api2/wake", post(h_wake))
+        .merge(crate::web::routes())
         .with_state(state)
 }
 
@@ -132,17 +135,15 @@ async fn h_status(State(s): State<Arc<AppState>>) -> Json<Value> {
         "last_pass": {"at": last.at, "scanned": last.scanned, "done": last.done, "failed": last.failed},
         "current": current,
         "started_at": s.started_at,
-        // Readiness remainder (row 15): the one automatable legacy check —
-        // media root present — as an additive boolean. A vanished NAS no
-        // longer looks identical to "idle" (done=0 naps); full btrfs/ledger
-        // gates belonged to the retired Python boot, not this daemon.
-        "media_ok": media_present(),
+        // Media root present, as an additive boolean. A vanished NAS no
+        // longer looks identical to "idle" (done=0 naps).
+        "media_ok": media_present(&s.cfg.nas_media_prefix),
     }))
 }
 
-/// The NAS media root `map_path` points `/data/` at still exists.
-fn media_present() -> bool {
-    std::path::Path::new(crate::config::NAS_MEDIA_PREFIX).is_dir()
+/// The host/NAS media root `map_path` points `/data/` at still exists.
+fn media_present(prefix: &str) -> bool {
+    std::path::Path::new(prefix).is_dir()
 }
 
 async fn h_api2_status(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -162,33 +163,126 @@ async fn h_health() -> Json<Value> {
     Json(json!({"ok": true}))
 }
 
-async fn h_index() -> impl axum::response::IntoResponse {
-    // Serve the operator dashboard when the HTML ships alongside the binary
-    // (repo layout: assets/; Docker image: /app/assets/). Legacy fallbacks
-    // cover older checkouts with dashboard.html at the root.
-    for cand in [
-        "assets/dashboard.html",
-        "/app/assets/dashboard.html",
-        "dashboard.html",
-        "/app/dashboard.html",
-    ] {
-        if let Ok(html) = tokio::fs::read_to_string(cand).await {
-            return axum::response::Response::builder()
-                .header("content-type", "text/html; charset=utf-8")
-                .body(axum::body::Body::from(html))
-                .unwrap();
-        }
+/// Dependency-aware readiness (`/ready`, also `/api2/ready`).
+///
+/// Unlike `/health` (process liveness), this gates on local prerequisites and
+/// answers `503` until they hold. External services are diagnostics only so a
+/// slow or down Sonarr/Bazarr/Jellyfin never flaps the probe.
+async fn h_ready(State(s): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let (ready, body) = readiness(&s.cfg, s.pipeline.pool.len(), s.pipeline.pool.whisper_len());
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(body))
+}
+
+/// Pure readiness evaluation (see [`h_ready`]). `llm`/`whisper` are the
+/// configured provider counts. Returns `(ready, payload)`.
+pub(crate) fn readiness(cfg: &Config, llm: usize, whisper: usize) -> (bool, Value) {
+    let media_ok = media_present(&cfg.nas_media_prefix);
+    // ASR needs Whisper and translation needs at least one LLM endpoint.
+    let providers_ok = llm > 0 && whisper > 0;
+    let state_ok = state_dir_writable(&cfg.state_file);
+    let ready = media_ok && providers_ok && state_ok;
+    let state_dir = cfg
+        .state_file
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let jellyfin_on = !cfg.jellyfin_url.is_empty() && !cfg.jellyfin_api_key.is_empty();
+    (
+        ready,
+        json!({
+            "ready": ready,
+            "checks": {
+                "media_root": {"ok": media_ok, "path": cfg.nas_media_prefix},
+                "providers": {"ok": providers_ok, "llm": llm, "whisper": whisper},
+                "state_dir": {"ok": state_ok, "path": state_dir},
+            },
+            "integrations": {
+                "sonarr": !cfg.sonarr_url.is_empty(),
+                "bazarr": !cfg.bazarr_url.is_empty(),
+                "jellyfin": jellyfin_on,
+                // A key with no URL silently disables refresh: surface it.
+                "jellyfin_misconfigured": !cfg.jellyfin_api_key.is_empty()
+                    && cfg.jellyfin_url.is_empty(),
+            },
+        }),
+    )
+}
+
+/// Probe the state directory for writability without leaving an artifact.
+fn state_dir_writable(state_file: &std::path::Path) -> bool {
+    let dir = state_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
     }
-    axum::response::Response::builder()
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(
-            r#"{"ok":true,"ui":"dashboard.html not bundled"}"#,
-        ))
-        .unwrap()
+    let probe = dir.join(".asrsub-ready-probe");
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 async fn h_config(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(serde_json::to_value(s.cfg.masked()).unwrap_or(json!({})))
+}
+
+/// Write settings overrides (`POST /api2/config`). Body is a flat JSON object
+/// of `{KEY: value}`; only keys exposed by the settings schema are accepted, so
+/// a typo cannot pin an ignored key. Persists to `config.overrides.json`; the
+/// daemon applies it on the next restart.
+async fn h_config_put(
+    State(s): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authed_state(&s, headers).await?;
+    let Some(obj) = body.as_object() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "body must be a JSON object"})),
+        ));
+    };
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (k, v) in obj {
+        if !crate::config::is_editable_key(k) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("unknown or non-editable key: {k}")})),
+            ));
+        }
+        let sval = match v {
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        pairs.push((k.clone(), sval));
+    }
+    crate::config::write_overrides(&pairs).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+    })?;
+    Ok(Json(
+        json!({"ok": true, "written": pairs.len(), "restart_required": true}),
+    ))
 }
 
 async fn h_provenance(State(s): State<Arc<AppState>>) -> Json<Value> {
@@ -202,7 +296,7 @@ async fn h_provenance(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"rows": rows.len(), "by_lang": by_lang}))
 }
 
-async fn wanted_payload(s: &Arc<AppState>) -> Value {
+pub(crate) async fn wanted_payload(s: &Arc<AppState>) -> Value {
     const TTL_S: u64 = 10;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -291,7 +385,7 @@ async fn h_activity(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"items": activity_items(40, &s.cfg.state_file)}))
 }
 
-fn activity_items(n: usize, state_file: &std::path::Path) -> Vec<Value> {
+pub(crate) fn activity_items(n: usize, state_file: &std::path::Path) -> Vec<Value> {
     let rows: Vec<StateEntry> = crate::state::load_jsonl(state_file);
     rows.into_iter()
         .rev()
@@ -383,7 +477,7 @@ async fn h_wake(
 /// Action record writer. `kind` is `series` (default) or `movie` so the
 /// daemon routes the record at consume time; without it a dashboard
 /// Retry/Delete on a movie would target a nonexistent series id.
-fn enqueue_action(
+pub(crate) fn enqueue_action(
     cfg: &Config,
     typ: &str,
     id: i64,
@@ -404,9 +498,8 @@ fn enqueue_action(
 }
 
 /// Split an episode path id into `(id, kind)`: `m:5` → movie, `e:5` or `5`
-/// → series. Prefix match is case-insensitive (`M:5` works). Mirrors the
-/// `m:`/`e:` routing in control_api_v2.
-fn parse_episode_id(raw: &str) -> Result<(i64, &'static str), String> {
+/// → series. Prefix match is case-insensitive (`M:5` works).
+pub(crate) fn parse_episode_id(raw: &str) -> Result<(i64, &'static str), String> {
     let lower = raw.to_lowercase();
     if let Some(n) = lower.strip_prefix("m:") {
         return n
@@ -599,8 +692,8 @@ mod tests {
 
     #[test]
     fn control_token_accepts_either_sender_header() {
-        // Either sender header authorizes (legacy parity: dashboard/pctl use
-        // X-API-Key, media-server notification plugins X-Control-Key).
+        // Either sender header authorizes: dashboard/pctl use X-API-Key,
+        // while media-server notification plugins use X-Control-Key.
         let dir = tempfile::tempdir().unwrap();
         let kf = dir.path().join("control_api_key");
         std::fs::write(&kf, "s3cret\n").unwrap();
@@ -650,5 +743,51 @@ mod tests {
         let body = h_status(State(st)).await.0;
         assert_eq!(body.get("paused"), Some(&serde_json::Value::Bool(false)));
         assert!(body.get("media_ok").and_then(|v| v.as_bool()).is_some());
+    }
+
+    #[test]
+    fn state_dir_writable_probes_without_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("nested").join("state.jsonl");
+        assert!(state_dir_writable(&state));
+        // The writability probe must clean up after itself.
+        assert!(!dir
+            .path()
+            .join("nested")
+            .join(".asrsub-ready-probe")
+            .exists());
+    }
+
+    #[test]
+    fn readiness_gates_on_local_prereqs_not_integrations() {
+        // Local prerequisites: configured media root + state dir + providers.
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let state = dir.path().join("state.jsonl");
+        std::env::set_var("NAS_MEDIA_PREFIX", media.to_str().unwrap());
+        std::env::set_var("STATE_FILE", state.to_str().unwrap());
+        std::env::set_var("JELLYFIN_API_KEY", "placeholder");
+        std::env::set_var("JELLYFIN_URL", "");
+        let cfg = crate::config::Config::load().expect("config loads");
+        std::env::remove_var("NAS_MEDIA_PREFIX");
+        std::env::remove_var("STATE_FILE");
+        std::env::remove_var("JELLYFIN_API_KEY");
+        std::env::remove_var("JELLYFIN_URL");
+
+        // Providers missing → not ready even though the local dirs are fine.
+        let (ready, body) = readiness(&cfg, 0, 0);
+        assert!(!ready);
+        assert_eq!(body["checks"]["media_root"]["ok"], json!(true));
+        assert_eq!(body["checks"]["providers"]["ok"], json!(false));
+        assert_eq!(body["checks"]["state_dir"]["ok"], json!(true));
+
+        // All local prerequisites met → ready; integrations are diagnostics.
+        let (ready, body) = readiness(&cfg, 3, 1);
+        assert!(ready);
+        assert_eq!(body["ready"], json!(true));
+        assert_eq!(body["integrations"]["jellyfin"], json!(false));
+        // Key without URL is surfaced, not silently ignored.
+        assert_eq!(body["integrations"]["jellyfin_misconfigured"], json!(true));
     }
 }

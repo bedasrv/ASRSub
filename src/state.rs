@@ -91,7 +91,7 @@ pub(crate) fn ensure_parent(path: &Path) -> Result<()> {
 /// Open (creating) the `.lock` sidecar for read+write. Shared by the append
 /// and rewrite paths; the drain path stays best-effort (a missing ledger is
 /// not an error there).
-fn open_lock(path: &Path) -> Result<std::fs::File> {
+pub(crate) fn open_lock(path: &Path) -> Result<std::fs::File> {
     let lock_path = lock_for(path);
     // Ensure the lock file exists without truncating the ledger.
     std::fs::OpenOptions::new()

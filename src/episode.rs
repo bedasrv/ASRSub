@@ -375,8 +375,7 @@ impl Pipeline {
     }
 
     /// Provenance commit. ASR rows carry `source = "asr"` with NO
-    /// `source_kind` (matching `registry_upsert(stem, lang, "asr", ...)` in
-    /// orchestrator.py); ladder rows carry `jpn`/`eng` + `external`.
+    /// `source_kind`; ladder rows carry `jpn`/`eng` + `external`.
     /// Paths are recorded for human debugging; nothing verifies hashes, so
     /// none are stored (and no file re-read happens here).
     async fn commit_registry(&self, c: RegistryCommit<'_>) {
@@ -463,8 +462,8 @@ mod tests {
 
     #[test]
     fn sidecar_exists_covers_alias_variants() {
-        // Adoption ladder (row 5): a legacy `jpn` sidecar satisfies a `ja`
-        // target without reprocessing — and vice versa.
+        // Adoption ladder: an existing alias sidecar (for example, `jpn`
+        // for a `ja` target) satisfies the target without reprocessing.
         let dir = tempfile::tempdir().unwrap();
         let stem = dir.path().join("ep").to_string_lossy().to_string();
         assert!(!sidecar_exists(&stem, "ja"));

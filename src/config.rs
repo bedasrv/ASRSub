@@ -10,11 +10,18 @@ use serde_json::Value;
 
 use crate::lang::normalize_lang;
 
-pub const DEFAULT_JELLYFIN_URL: &str = "http://10.10.20.160:8096";
+/// Jellyfin base URL. Empty by default: no site-specific private address is
+/// compiled in, so a deployment that omits `JELLYFIN_URL` simply leaves the
+/// integration disabled instead of silently targeting someone else's network.
+/// Set it explicitly whenever `JELLYFIN_API_KEY` is configured.
+pub const DEFAULT_JELLYFIN_URL: &str = "";
 pub const DEFAULT_JELLYFIN_MEDIA_ROOT: &str = "/media";
-/// NAS-local media prefix on this host (mirrors the hardcoded
-/// `/mnt/nas/share/media` in Python `map_path`). See `Config::map_path`.
-pub const NAS_MEDIA_PREFIX: &str = "/mnt/nas/share/media";
+/// Default host/NAS media prefix where this daemon mounts the media tree.
+/// Override with `NAS_MEDIA_PREFIX`. Intentionally distinct from
+/// `JELLYFIN_MEDIA_ROOT`: this is the path *this* process reads, while
+/// `jellyfin_media_root` is the *Jellyfin container's* view used only for the
+/// refresh-lookup string mapping. See `Config::map_path`.
+pub const DEFAULT_NAS_MEDIA_PREFIX: &str = "/mnt/nas/share/media";
 
 fn cfg_dir() -> PathBuf {
     std::env::var("ASRSUB_CONFIG_DIR")
@@ -94,18 +101,13 @@ fn unquote(v: &str) -> String {
 /// Process-env keys the pipeline owns. The environment wins over files, but
 /// ONLY for these keys or keys already present from files — arbitrary env
 /// (`PATH`, `HOSTNAME`, …) must never leak into the config map or `/config`.
-/// Process-env keys the pipeline owns. The environment wins over files, but
-/// ONLY for these keys or keys already present from files — arbitrary env
-/// (`PATH`, `HOSTNAME`, …) must never leak into the config map or `/config`.
 ///
-/// Deliberately absent: the Python-era surface this port did not implement
-/// — `RETIME_*`, `ALIGN_*`, ladder upgrade/hunt budgets, `REGEN/
-/// MOVIE_LIBRARY`, `MAX_TRANSLATE_WORKERS`, local-inference keys
-/// (`TRANSLATE_BASE/MODEL/API_KEY`, `TRANSLATE_CONTEXT_LINES`), and
-/// outbound-webhook keys (`WEBHOOK_URLS/SECRET/EVENTS`, `HERMES_*`).
-/// Env-provided values for these are ignored outright; file-provided ones
-/// still echo in `/config` but nothing consumes them. Listing them here
-/// would promise knobs that do nothing.
+/// Deliberately absent: unimplemented retiming/alignment, ladder
+/// upgrade/hunt budgets, regeneration/library switches, worker-count aliases,
+/// local-inference keys, and outbound-webhook keys. Env-provided values for
+/// these are ignored outright; file-provided ones still echo in `/config`
+/// but nothing consumes them. Listing them here would promise knobs that do
+/// nothing.
 const ENV_ALLOWLIST: &[&str] = &[
     "SONARR_URL",
     "SONARR_API_KEY",
@@ -116,6 +118,7 @@ const ENV_ALLOWLIST: &[&str] = &[
     "JELLYFIN_URL",
     "JELLYFIN_API_KEY",
     "JELLYFIN_MEDIA_ROOT",
+    "NAS_MEDIA_PREFIX",
     "JIMAKU_API_KEY",
     "JIMAKU_DIRECT_ENABLED",
     "JIMAKU_BASE_URL",
@@ -222,6 +225,9 @@ pub struct Config {
     pub jellyfin_url: String,
     pub jellyfin_api_key: String,
     pub jellyfin_media_root: String,
+    /// Host/NAS path this process reads media from; `/data/…` container
+    /// paths from Sonarr/Radarr map here. See [`Config::map_path`].
+    pub nas_media_prefix: String,
     pub jimaku_api_key: String,
     pub jimaku_direct_enabled: bool,
     pub target_langs: Vec<String>,
@@ -322,6 +328,7 @@ impl Config {
             jellyfin_url: get("JELLYFIN_URL", DEFAULT_JELLYFIN_URL),
             jellyfin_api_key: get("JELLYFIN_API_KEY", ""),
             jellyfin_media_root: get("JELLYFIN_MEDIA_ROOT", DEFAULT_JELLYFIN_MEDIA_ROOT),
+            nas_media_prefix: get("NAS_MEDIA_PREFIX", DEFAULT_NAS_MEDIA_PREFIX),
             jimaku_api_key: get("JIMAKU_API_KEY", ""),
             jimaku_direct_enabled: bool_of("JIMAKU_DIRECT_ENABLED", true),
             target_langs,
@@ -397,19 +404,15 @@ impl Config {
         })
     }
 
-    /// Map a `/data/...` container path onto the NAS media root.
-    /// Map a Sonarr/Radarr `/data/...` container path onto the NAS-local
-    /// path. The NAS prefix is intentionally NOT `jellyfin_media_root`:
-    /// Python `map_path` hardcodes `/mnt/nas/share/media` (where this host
-    /// mounts the media), while `jellyfin_media_root` is the *Jellyfin
-    /// container's* view used only for the refresh lookup in `jellyfin.rs`.
-    /// Mixing them breaks refresh silently on any NAS move.
+    /// Map a Sonarr/Radarr `/data/...` container path onto this host's
+    /// media prefix (`NAS_MEDIA_PREFIX`, default `/mnt/nas/share/media`).
+    /// The host prefix is intentionally NOT `jellyfin_media_root`: this is
+    /// where the daemon reads the file, while the Jellyfin root is the
+    /// *Jellyfin container's* view used only for the refresh lookup (see
+    /// [`map_host_to_jellyfin`]). Mixing them breaks refresh silently on any
+    /// mount change, so both are configurable and kept distinct.
     pub fn map_path(&self, container_path: &str) -> String {
-        if let Some(rest) = container_path.strip_prefix("/data/") {
-            format!("{NAS_MEDIA_PREFIX}/{rest}")
-        } else {
-            container_path.to_string()
-        }
+        map_container_path(&self.nas_media_prefix, container_path)
     }
 
     /// Secrets-masked view for `/config` telemetry.
@@ -449,6 +452,446 @@ impl Config {
     }
 }
 
+/// Input widget for a settings field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Text,
+    Secret,
+    Bool,
+    Number,
+    Csv,
+}
+
+/// One settings field. The dashboard renders the settings form from [`FIELDS`],
+/// so the UI can never expose a knob the daemon does not read (every key is in
+/// [`ENV_ALLOWLIST`], enforced by a test).
+#[derive(Debug, Clone, Copy)]
+pub struct Field {
+    pub group: &'static str,
+    pub key: &'static str,
+    pub label: &'static str,
+    pub kind: FieldKind,
+    pub help: &'static str,
+    /// Display hint shown when the key is not explicitly set. The settings form
+    /// always submits the value it rendered as a hidden baseline, so an
+    /// inaccurate hint can never cause a spurious write.
+    pub default: &'static str,
+}
+
+/// Ordered settings groups `(id, title)`.
+pub const FIELD_GROUPS: &[(&str, &str)] = &[
+    ("media", "Media services"),
+    ("ai", "Providers & languages"),
+    ("workflow", "Processing"),
+    ("state", "Paths & state"),
+    ("advanced", "Advanced"),
+];
+
+/// Single source of truth for the settings UI.
+pub const FIELDS: &[Field] = &[
+    Field {
+        group: "media",
+        key: "SONARR_URL",
+        label: "Sonarr URL",
+        kind: FieldKind::Text,
+        help: "Base URL of Sonarr, including /api/v3.",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "SONARR_API_KEY",
+        label: "Sonarr API key",
+        kind: FieldKind::Secret,
+        help: "Sonarr API key.",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "BAZARR_URL",
+        label: "Bazarr URL (primary)",
+        kind: FieldKind::Text,
+        help: "Primary Bazarr (Japanese profile).",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "BAZARR_API_KEY",
+        label: "Bazarr API key (primary)",
+        kind: FieldKind::Secret,
+        help: "API key for the primary Bazarr.",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "BAZARR_URL_2",
+        label: "Bazarr URL (secondary)",
+        kind: FieldKind::Text,
+        help: "Secondary Bazarr for the id/en profile (optional).",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "BAZARR_API_KEY_2",
+        label: "Bazarr API key (secondary)",
+        kind: FieldKind::Secret,
+        help: "API key for the secondary Bazarr.",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "JELLYFIN_URL",
+        label: "Jellyfin URL",
+        kind: FieldKind::Text,
+        help: "Base URL of Jellyfin. No compiled-in default: leave empty to disable refresh.",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "JELLYFIN_API_KEY",
+        label: "Jellyfin API key",
+        kind: FieldKind::Secret,
+        help: "API key for Jellyfin refresh (needs JELLYFIN_URL set).",
+        default: "",
+    },
+    Field {
+        group: "media",
+        key: "JELLYFIN_MEDIA_ROOT",
+        label: "Jellyfin media root",
+        kind: FieldKind::Text,
+        help: "Path prefix the Jellyfin server reports for the same media.",
+        default: "/media",
+    },
+    Field {
+        group: "media",
+        key: "NAS_MEDIA_PREFIX",
+        label: "Host media prefix",
+        kind: FieldKind::Text,
+        help: "Host/NAS path this daemon reads media at; /data/... maps here.",
+        default: "/mnt/nas/share/media",
+    },
+    Field {
+        group: "ai",
+        key: "TARGET_LANGS",
+        label: "Target languages",
+        kind: FieldKind::Csv,
+        help: "Languages to generate subtitles for, e.g. id,en.",
+        default: "id,en",
+    },
+    Field {
+        group: "ai",
+        key: "PROVIDERS_FILE",
+        label: "Providers file",
+        kind: FieldKind::Text,
+        help: "Path to asrsub_providers.json (LLM + Whisper endpoints).",
+        default: "asrsub_providers.json",
+    },
+    Field {
+        group: "ai",
+        key: "JIMAKU_API_KEY",
+        label: "Jimaku API key",
+        kind: FieldKind::Secret,
+        help: "Direct Jimaku source rung (empty disables it).",
+        default: "",
+    },
+    Field {
+        group: "ai",
+        key: "JIMAKU_DIRECT_ENABLED",
+        label: "Jimaku direct enabled",
+        kind: FieldKind::Bool,
+        help: "Try Jimaku for existing Japanese subtitles before ASR.",
+        default: "true",
+    },
+    Field {
+        group: "workflow",
+        key: "MAX_EPS_PER_RUN",
+        label: "Max episodes per run",
+        kind: FieldKind::Number,
+        help: "Cap on items processed per pass.",
+        default: "8",
+    },
+    Field {
+        group: "workflow",
+        key: "EPISODE_CONCURRENCY",
+        label: "Episode concurrency",
+        kind: FieldKind::Number,
+        help: "Parallel episodes per pass (default: cores, clamped 2-8).",
+        default: "4",
+    },
+    Field {
+        group: "workflow",
+        key: "ASR_CONCURRENCY",
+        label: "ASR concurrency",
+        kind: FieldKind::Number,
+        help: "Transcription fan-out per episode.",
+        default: "4",
+    },
+    Field {
+        group: "workflow",
+        key: "TRANSLATE_CONCURRENCY",
+        label: "Translate concurrency",
+        kind: FieldKind::Number,
+        help: "Translation fan-out per episode.",
+        default: "16",
+    },
+    Field {
+        group: "workflow",
+        key: "UPLOAD_CONCURRENCY",
+        label: "Upload concurrency",
+        kind: FieldKind::Number,
+        help: "Parallel Bazarr uploads across episodes.",
+        default: "8",
+    },
+    Field {
+        group: "workflow",
+        key: "TRANSLATE_CHUNK",
+        label: "Translate chunk size",
+        kind: FieldKind::Number,
+        help: "Lines per LLM translation request.",
+        default: "10",
+    },
+    Field {
+        group: "workflow",
+        key: "MAX_CUE_MS",
+        label: "Max cue duration (ms)",
+        kind: FieldKind::Number,
+        help: "Maximum subtitle cue duration.",
+        default: "8000",
+    },
+    Field {
+        group: "workflow",
+        key: "AI_MARKER_CUE",
+        label: "AI marker cue",
+        kind: FieldKind::Bool,
+        help: "Write [AI-generated by ASRSub] as the first cue.",
+        default: "true",
+    },
+    Field {
+        group: "workflow",
+        key: "AI_MARKER_CUE_MS",
+        label: "AI marker duration (ms)",
+        kind: FieldKind::Number,
+        help: "Duration of the AI marker cue.",
+        default: "1500",
+    },
+    Field {
+        group: "state",
+        key: "STATE_FILE",
+        label: "State file",
+        kind: FieldKind::Text,
+        help: "Pipeline state ledger (state.jsonl).",
+        default: "~/.config/asr-pipeline/state.jsonl",
+    },
+    Field {
+        group: "state",
+        key: "ACTIONS_FILE",
+        label: "Actions file",
+        kind: FieldKind::Text,
+        help: "Dashboard/pctl action queue (actions.jsonl).",
+        default: "~/.config/asr-pipeline/actions.jsonl",
+    },
+    Field {
+        group: "state",
+        key: "EXCLUSIONS_FILE",
+        label: "Exclusions file",
+        kind: FieldKind::Text,
+        help: "Excluded episode ids (exclusions.jsonl).",
+        default: "~/.config/asr-pipeline/exclusions.jsonl",
+    },
+    Field {
+        group: "state",
+        key: "REGISTRY_FILE",
+        label: "Registry file",
+        kind: FieldKind::Text,
+        help: "Subtitle provenance registry (subtitle_registry.jsonl).",
+        default: "~/.config/asr-pipeline/subtitle_registry.jsonl",
+    },
+    Field {
+        group: "state",
+        key: "REFINE_STATE_FILE",
+        label: "Refine state file",
+        kind: FieldKind::Text,
+        help: "Refine review ledger (refine_state.jsonl).",
+        default: "~/.config/asr-pipeline/refine_state.jsonl",
+    },
+    Field {
+        group: "state",
+        key: "GLOSSARY_FILE",
+        label: "Glossary file",
+        kind: FieldKind::Text,
+        help: "Series glossary JSON.",
+        default: "~/.config/asr-pipeline/glossary.json",
+    },
+    Field {
+        group: "state",
+        key: "ANILIST_CACHE",
+        label: "AniList cache",
+        kind: FieldKind::Text,
+        help: "AniList lookup cache JSON.",
+        default: "~/.config/asr-pipeline/anilist_cache.json",
+    },
+    Field {
+        group: "state",
+        key: "TMP_DIR",
+        label: "Temp dir",
+        kind: FieldKind::Text,
+        help: "Scratch directory for audio/subtitle work.",
+        default: "~/.config/asr-pipeline/tmp",
+    },
+    Field {
+        group: "state",
+        key: "WEBHOOK_PORT",
+        label: "Control/webhook port",
+        kind: FieldKind::Number,
+        help: "Port for the dashboard, control API, and /webhook.",
+        default: "8085",
+    },
+    Field {
+        group: "advanced",
+        key: "SDH_PLACEHOLDERS",
+        label: "Lyric placeholders",
+        kind: FieldKind::Csv,
+        help: "Placeholder tokens for foreign/lyric lines, e.g. （歌詞）.",
+        default: "（歌詞）",
+    },
+    Field {
+        group: "advanced",
+        key: "CPS_MERGE_MAX",
+        label: "Max reading speed",
+        kind: FieldKind::Number,
+        help: "Chars/sec cap before merging cues.",
+        default: "20.0",
+    },
+    Field {
+        group: "advanced",
+        key: "CPS_MERGE_MAX_CHARS",
+        label: "Max merged chars",
+        kind: FieldKind::Number,
+        help: "Max characters in a merged cue.",
+        default: "84",
+    },
+    Field {
+        group: "advanced",
+        key: "CPS_MERGE_MAX_DUR_MS",
+        label: "Max merged duration (ms)",
+        kind: FieldKind::Number,
+        help: "Max duration of a merged cue.",
+        default: "7000",
+    },
+    Field {
+        group: "advanced",
+        key: "CPS_MERGE_MAX_GAP_MS",
+        label: "Max merge gap (ms)",
+        kind: FieldKind::Number,
+        help: "Max gap bridged when merging cues.",
+        default: "1000",
+    },
+    Field {
+        group: "advanced",
+        key: "LADDER_MIN_CUES",
+        label: "Ladder min cues",
+        kind: FieldKind::Number,
+        help: "Minimum source cues to accept a sidecar.",
+        default: "40",
+    },
+    Field {
+        group: "advanced",
+        key: "LADDER_MIN_CHARS",
+        label: "Ladder min chars",
+        kind: FieldKind::Number,
+        help: "Minimum source characters to accept a sidecar.",
+        default: "1500",
+    },
+    Field {
+        group: "advanced",
+        key: "LADDER_MIN_CJK",
+        label: "Ladder min CJK ratio",
+        kind: FieldKind::Number,
+        help: "Minimum CJK ratio for Japanese sources.",
+        default: "0.6",
+    },
+    Field {
+        group: "advanced",
+        key: "LADDER_SPAN_TOLERANCE",
+        label: "Ladder span tolerance",
+        kind: FieldKind::Number,
+        help: "Max span/duration deviation for a sidecar.",
+        default: "0.15",
+    },
+];
+
+/// Keys owned by the pipeline but deliberately **not** in [`FIELDS`]. They are
+/// consumed by `std::env::var` at the point of use (`providers.rs`,
+/// `jimaku.rs`), so the `config.overrides.json` layer this UI writes would not
+/// reach them — exposing them would be a phantom knob. Set these in
+/// `pipeline.env` or the process environment instead.
+pub const ENV_ONLY_KEYS: &[&str] = &[
+    "LLM_PER_ENDPOINT_CONCURRENCY",
+    "LLM_TIMEOUT_S",
+    "WHISPER_CONCURRENCY",
+    "WHISPER_TIMEOUT_S",
+    "JIMAKU_BASE_URL",
+    "JIMAKU_CALL_SLEEP_MS",
+    "JIMAKU_TIMEOUT",
+    "ANILIST_TIMEOUT",
+];
+
+/// True when `key` is an editable settings field (used to reject unknown keys
+/// on `POST /api2/config`).
+pub fn is_editable_key(key: &str) -> bool {
+    FIELDS.iter().any(|f| f.key == key)
+}
+
+/// Merge `pairs` into `config.overrides.json` under the configured dir.
+///
+/// The overrides layer beats `pipeline.env` but not process env (see module
+/// docs). Atomic replace under the same sidecar lock the ledgers use. An empty
+/// value is written as empty but `Config::load` treats empty as "unset", so to
+/// clear a value remove the key from the file — clearing is intentionally not
+/// expressible here.
+pub fn write_overrides(pairs: &[(String, String)]) -> anyhow::Result<PathBuf> {
+    let path = cfg_dir().join("config.overrides.json");
+    crate::state::ensure_parent(&path)?;
+    let lock_file = crate::state::open_lock(&path)?;
+    let mut guard = fd_lock::RwLock::new(lock_file);
+    let _w = guard.write()?;
+    let mut map: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for (k, v) in pairs {
+        map.insert(k.clone(), Value::String(v.clone()));
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&Value::Object(map))?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// `/data/…` container path → host/NAS path (pure; see [`Config::map_path`]).
+fn map_container_path(prefix: &str, container_path: &str) -> String {
+    if let Some(rest) = container_path.strip_prefix("/data/") {
+        format!("{}/{rest}", prefix.trim_end_matches('/'))
+    } else {
+        container_path.to_string()
+    }
+}
+
+/// Host/NAS path → Jellyfin-reported path. Strip the host prefix, prepend
+/// `JELLYFIN_MEDIA_ROOT`; a path outside the host prefix passes through
+/// unchanged. Shared by the refresh lookup and the mapping tests.
+pub(crate) fn map_host_to_jellyfin(
+    host_prefix: &str,
+    jellyfin_root: &str,
+    host_path: &str,
+) -> String {
+    let host = host_prefix.trim_end_matches('/');
+    match host_path.strip_prefix(host) {
+        Some(rest) => format!("{}{rest}", jellyfin_root.trim_end_matches('/')),
+        None => host_path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,14 +923,151 @@ mod tests {
 
     #[test]
     fn map_path_rewrites_container_prefix_only() {
-        // Row 11 remainder: no sweep root chain exists (no sweep feature —
-        // webhook paths are sender-provided), but the /data/ → NAS mapping
-        // that every movie/series path flows through is pinned here.
-        let cfg = Config::load().expect("config loads");
+        // The /data/ → host-prefix mapping every movie/series path flows
+        // through is pinned here, including a non-default host prefix.
         assert_eq!(
-            cfg.map_path("/data/Shows/Ep.mkv"),
-            format!("{NAS_MEDIA_PREFIX}/Shows/Ep.mkv")
+            map_container_path(DEFAULT_NAS_MEDIA_PREFIX, "/data/Shows/Ep.mkv"),
+            "/mnt/nas/share/media/Shows/Ep.mkv"
         );
-        assert_eq!(cfg.map_path("/mnt/x/Ep.mkv"), "/mnt/x/Ep.mkv");
+        assert_eq!(
+            map_container_path("/srv/media", "/data/Movies/M.mkv"),
+            "/srv/media/Movies/M.mkv"
+        );
+        // A trailing slash on the configured prefix must not double up.
+        assert_eq!(
+            map_container_path("/srv/media/", "/data/Movies/M.mkv"),
+            "/srv/media/Movies/M.mkv"
+        );
+        assert_eq!(
+            map_container_path(DEFAULT_NAS_MEDIA_PREFIX, "/mnt/x/Ep.mkv"),
+            "/mnt/x/Ep.mkv"
+        );
+    }
+
+    #[test]
+    fn host_to_jellyfin_maps_non_default_roots() {
+        // Non-default host prefix AND non-default Jellyfin root.
+        assert_eq!(
+            map_host_to_jellyfin("/srv/media", "/jellyfin/media", "/srv/media/Shows/Ep.mkv"),
+            "/jellyfin/media/Shows/Ep.mkv"
+        );
+        // A path outside the host prefix passes through untouched.
+        assert_eq!(
+            map_host_to_jellyfin("/srv/media", "/media", "/other/Ep.mkv"),
+            "/other/Ep.mkv"
+        );
+    }
+
+    #[test]
+    fn sonarr_to_jellyfin_path_round_trip() {
+        // The full flow: Sonarr/Radarr container path → host path → the path
+        // Jellyfin reports, for default and fully custom layouts.
+        for (host, jelly, container, expected) in [
+            (
+                DEFAULT_NAS_MEDIA_PREFIX,
+                DEFAULT_JELLYFIN_MEDIA_ROOT,
+                "/data/Shows/Ep.mkv",
+                "/media/Shows/Ep.mkv",
+            ),
+            (
+                "/srv/media",
+                "/jellyfin/m",
+                "/data/Movies/M.mkv",
+                "/jellyfin/m/Movies/M.mkv",
+            ),
+        ] {
+            let mapped = map_container_path(host, container);
+            assert_eq!(map_host_to_jellyfin(host, jelly, &mapped), expected);
+        }
+    }
+
+    #[test]
+    fn jellyfin_url_defaults_empty_not_site_specific() {
+        // Regression: no compiled-in private address. An unconfigured
+        // deployment leaves Jellyfin disabled rather than targeting a
+        // particular LAN host.
+        assert_eq!(DEFAULT_JELLYFIN_URL, "");
+    }
+
+    #[test]
+    fn settings_schema_exposes_only_allowlisted_keys() {
+        // The dashboard field list must never drift from the daemon: every
+        // exposed key is one the pipeline actually reads.
+        assert!(!FIELDS.is_empty());
+        for f in FIELDS {
+            assert!(
+                ENV_ALLOWLIST.contains(&f.key),
+                "settings field {} is not a pipeline-owned key",
+                f.key
+            );
+            assert!(
+                FIELD_GROUPS.iter().any(|(id, _)| *id == f.group),
+                "field {} has unknown group {}",
+                f.key,
+                f.group
+            );
+        }
+        // No duplicate keys.
+        let mut keys: Vec<&str> = FIELDS.iter().map(|f| f.key).collect();
+        keys.sort_unstable();
+        let before = keys.len();
+        keys.dedup();
+        assert_eq!(before, keys.len(), "duplicate settings keys");
+        // Every group has at least one field (no empty sections in the UI).
+        for (id, _) in FIELD_GROUPS {
+            assert!(
+                FIELDS.iter().any(|f| f.group == *id),
+                "group {id} has no fields"
+            );
+        }
+        // Env-only knobs must never leak into the schema: they are read via
+        // `std::env::var`, so the overrides layer this UI writes cannot reach
+        // them. Exposing them would be a phantom knob.
+        for k in ENV_ONLY_KEYS {
+            assert!(
+                !FIELDS.iter().any(|f| f.key == *k),
+                "env-only key {k} must not be an editable field"
+            );
+            assert!(!is_editable_key(k), "env-only key {k} must not be editable");
+        }
+    }
+
+    #[test]
+    fn editable_key_rejects_unknown_and_accepts_known() {
+        assert!(is_editable_key("TARGET_LANGS"));
+        assert!(is_editable_key("NAS_MEDIA_PREFIX"));
+        // Python-era phantom knobs and strays are not editable.
+        assert!(!is_editable_key("TRANSLATE_MODEL"));
+        assert!(!is_editable_key("HERMES_WEBHOOK_URL"));
+        assert!(!is_editable_key("PATH"));
+    }
+
+    #[test]
+    fn write_overrides_merges_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let r = write_overrides(&[
+            ("TARGET_LANGS".to_string(), "id,en,es".to_string()),
+            ("NAS_MEDIA_PREFIX".to_string(), "/srv/media".to_string()),
+        ]);
+        // Second write must merge, not clobber the first key.
+        let r2 = write_overrides(&[("MAX_EPS_PER_RUN".to_string(), "4".to_string())]);
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        r.unwrap();
+        r2.unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("config.overrides.json")).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["TARGET_LANGS"], "id,en,es");
+        assert_eq!(v["NAS_MEDIA_PREFIX"], "/srv/media");
+        assert_eq!(v["MAX_EPS_PER_RUN"], "4");
+
+        // And Config::load picks the values up from that layer.
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let cfg = Config::load().unwrap();
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        assert_eq!(cfg.target_langs, vec!["id", "en", "es"]);
+        assert_eq!(cfg.nas_media_prefix, "/srv/media");
+        assert_eq!(cfg.max_eps_per_run, 4);
     }
 }

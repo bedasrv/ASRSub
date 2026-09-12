@@ -99,17 +99,15 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
         bit_rate,
     })
 }
-/// Source-track choice, mirroring `choose_source` in orchestrator.py.
+/// Source-track choice, called once per target language: an `en` target with
+/// an English-tagged track transcribes it directly
+/// (`needs_translate == false`); otherwise the Japanese-tagged track (or
+/// first track) is transcribed as `asr_lang`.
 ///
-/// Called once per target language: an `en` target with an English-tagged
-/// track transcribes it directly (`needs_translate == false`); otherwise the
-/// Japanese-tagged track (or first track) is transcribed as `asr_lang`.
-///
-/// Deliberate deviation: unknown/untagged tracks default to `"ja"`, not
-/// Python's `"en"`. For an anime library undetermined ≈ Japanese, and
-/// forcing Whisper `language=en` on Japanese audio mistranscribes the whole
-/// episode; mistranscribing hypothetical English audio as Japanese is the
-/// far rarer failure.
+/// Unknown/untagged tracks default to `"ja"`. For an anime library,
+/// undetermined ≈ Japanese; forcing Whisper `language=en` on Japanese audio
+/// mistranscribes the whole episode, while mistranscribing hypothetical
+/// English audio as Japanese is the far rarer failure.
 pub fn choose_source(streams: &[AudioStream], target_lang: &str) -> Option<AudioChoice> {
     if streams.is_empty() {
         return None;

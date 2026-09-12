@@ -95,6 +95,7 @@ impl Pipeline {
             &cfg.jellyfin_url,
             &cfg.jellyfin_api_key,
             &cfg.jellyfin_media_root,
+            &cfg.nas_media_prefix,
             http.clone(),
         );
         let jimaku =

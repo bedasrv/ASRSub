@@ -359,6 +359,7 @@ exit 0
         jellyfin_url: base.clone(),
         jellyfin_api_key: String::new(),
         jellyfin_media_root: "/media".into(),
+        nas_media_prefix: "/mnt/nas/share/media".into(),
         jimaku_api_key: String::new(),
         jimaku_direct_enabled: false,
         target_langs: vec!["id".into(), "en".into()],
