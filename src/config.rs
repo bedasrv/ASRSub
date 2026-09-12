@@ -340,17 +340,25 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
 ///
 /// * **Fail closed.** Anything that carries a colon before the `@` that ends the
 ///   userinfo is masked, whatever the host looks like: a trailing space, a
-///   non-ASCII or percent-encoded host, an alphabetic port, an empty host, a UNC
-///   path, an IPv6 zone id, a password that begins with digits and contains a
-///   separator. Host shape decides only whether a `@` sits in the path or the
-///   query, and even then only when nothing in front of the separator could be a
-///   `user:pass` pair — `https://user:1/2@host` is indistinguishable from
-///   `https://host:port/path@x`, so it is masked, and so is the harmless
-///   `https://bazarr.lan:6767/api?x=a@b`. Losing a readable base URL costs
-///   information; publishing `root:1234` costs the credential.
+///   non-ASCII or percent-encoded host, an alphabetic port, an empty host, an
+///   empty authority (`https:///root:1234@nas.lan`), a UNC path, an IPv6 zone id,
+///   a password that begins with digits and contains a separator. Host shape
+///   decides only whether a `@` sits in the path or the query, and even then only
+///   when *neither* the text in front of the separator *nor* the text in front of
+///   the `@` could be a `user:pass` pair — `https://user:1/2@host` is
+///   indistinguishable from `https://host:port/path@x`, so it is masked, and so
+///   is the harmless `https://bazarr.lan:6767/api?x=a@b`. Losing a readable base
+///   URL costs information; publishing `root:1234` costs the credential.
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
+/// * **One credential per value.** Only that userinfo is replaced; the tail after
+///   it is copied as it stands, so a value that embeds a *second* credentialed
+///   URL in its own path or query
+///   (`https://user:pw@gw.lan/redirect?url=http://a:b@c`) masks the outer pair
+///   and leaves the inner one visible. A documented limitation, not an oversight:
+///   it takes two `user:pass@` runs in one value, and re-scanning the tail made
+///   ordinary base URLs unreadable.
 ///
 /// A scheme-less value is masked only when a colon marks real credentials, which
 /// leaves plain `user@host` (an email address) untouched, and a non-hierarchical
@@ -369,10 +377,12 @@ fn redact_userinfo(value: &str) -> Option<String> {
     };
     // Where the authority ends: the first path/query/fragment separator.
     let sep = rest.find(['/', '?', '#']);
-    // A credential inside the authority is separated by the *first* `@` before
-    // that separator; anything later is a path or query character. When the
-    // authority holds no `@` the last `@` in the value is the candidate — and the
-    // branch below may still drop it as a path/query character.
+    // A credential inside the authority is separated by the *last* `@` before
+    // that separator (the WHATWG authority split, and the fail-closed choice:
+    // `user@user@host` loses both names rather than one); anything later is a
+    // path or query character. When the authority holds no `@` the last `@` in
+    // the value is the candidate — and the branch below may still drop it as a
+    // path/query character.
     let at = match sep {
         Some(s) if rest[..s].contains('@') => rest[..s].rfind('@')?,
         _ => rest.rfind('@')?,
@@ -400,9 +410,12 @@ fn redact_userinfo(value: &str) -> Option<String> {
     } else if let Some(s) = sep {
         // A `@` past the authority is a path or query character, not a userinfo —
         // unless the text in front of that separator could be a `user:pass` pair,
-        // which is what `https://root:1234/secret@nas.lan` looks like. Ambiguity
-        // is resolved by masking.
-        if s < at && !rest[..s].contains(':') {
+        // which is what `https://root:1234/secret@nas.lan` looks like, or the text
+        // in front of the `@` itself could be one, which is what an authority-less
+        // `https:///root:1234@nas.lan` looks like: there the separator sits at
+        // index 0, so the empty candidate carried no colon and the value was
+        // published verbatim. Ambiguity is resolved by masking.
+        if s < at && !rest[..s].contains(':') && !rest[..at].contains(':') {
             return None;
         }
     }
@@ -601,9 +614,11 @@ impl Config {
         // host access can edit, and a key read from there would keep
         // authenticating a deployment that deliberately removed it from the
         // environment — the documented contract is that the control key never
-        // comes from `pipeline.env`. An empty (or whitespace-only) variable
-        // therefore denies control access (`check_token` refuses an empty key)
-        // instead of falling back to a stale file value.
+        // comes from `pipeline.env`. Candidate *files* are tried first, so an
+        // empty (or whitespace-only) variable contributes no key and denies
+        // control access (`check_token` refuses an empty key) only when no key
+        // file exists: a key file outranks this variable, and disabling the
+        // control API takes removing the file as well.
         env_str("CONTROL_API_KEY").unwrap_or_default()
     }
 }
@@ -1583,7 +1598,7 @@ mod tests {
             Some("https://***:***@host.lan")
         );
         // A credential inside the authority is masked even when a second `@`
-        // follows it in the path: the first `@` before the separator ends the
+        // follows it in the path: the last `@` before the separator ends the
         // userinfo, and the tail is kept.
         assert_eq!(
             redact_userinfo("https://user:s3cr3t@host.lan/a@b").as_deref(),
@@ -1601,15 +1616,57 @@ mod tests {
             redact_userinfo("https://bazarr.lan:6767/api?x=a@b").as_deref(),
             Some("https://***:***@b")
         );
-        // Values with no authority at all are left alone: the last `@` is in the
-        // path, and nothing before the separator carries a colon.
+        // A `@` in a path with no credential in front of it is left alone: the
+        // last `@` is in the path, and neither the text before the separator nor
+        // the text before the `@` carries a colon.
         assert_eq!(redact_userinfo("file:///mnt/nas/a@b.mkv"), None);
         assert_eq!(redact_userinfo("https:///path@x"), None);
+        // An *empty authority* is the case that made "nothing in front of the
+        // separator carries a colon" true by construction, so `https:///user:pw@host`
+        // was published verbatim while `file:///path@x` stayed intact — they are
+        // told apart by the colon in front of the `@`, which wins. `/config` is
+        // answered without authentication, so this is the fail-closed direction.
+        for (value, want) in [
+            ("https:///user:pw@host.lan", "https://***:***@host.lan"),
+            ("file:///user:pw@host.lan", "file://***:***@host.lan"),
+            ("smb:///user:pw@server/share", "smb://***:***@server/share"),
+            ("http:////user:pw@host.lan", "http://***:***@host.lan"),
+            ("https://?x=user:pw@host.lan", "https://***:***@host.lan"),
+            ("https://#user:pw@host.lan", "https://***:***@host.lan"),
+            // ... and the same shape with the credential in a path segment;
+            // neither this commit nor its parent used to mask it.
+            ("https://nas.lan/root:1234@host", "https://***:***@host"),
+        ] {
+            assert_eq!(
+                redact_userinfo(value).as_deref(),
+                Some(want),
+                "credential published verbatim: {value:?}"
+            );
+        }
         // A scheme-qualified bare user name is masked by design (no colon before
         // the `@`, so it is `***`, not `***:***`), and the path `@` is kept.
         assert_eq!(
             redact_userinfo("https://user@bazarr.lan/api?x=a@b").as_deref(),
             Some("https://***@bazarr.lan/api?x=a@b")
+        );
+    }
+
+    /// The tail after the masked userinfo is copied as it stands, so a value that
+    /// embeds a *second* credentialed URL in its own path or query keeps that
+    /// inner pair visible. A documented limitation (see `redact_userinfo`), not an
+    /// oversight: it takes two `user:pass@` runs in one value, and re-scanning the
+    /// tail rewrote ordinary base URLs. Pinned so a change to it is deliberate.
+    #[test]
+    fn a_second_credential_in_the_tail_is_a_documented_limitation() {
+        assert_eq!(
+            redact_userinfo("https://user:pw@gw.lan/redirect?url=http://a:b@c").as_deref(),
+            Some("https://***:***@gw.lan/redirect?url=http://a:b@c")
+        );
+        // A base URL that merely embeds another URL, with no colon in front of a
+        // `@`, is still untouched.
+        assert_eq!(
+            redact_userinfo("https://gw.lan/redirect?url=http://nominal.lan/x"),
+            None
         );
     }
 
@@ -1642,21 +1699,17 @@ mod tests {
     }
 
     /// `pipeline.env` and `config.overrides.json` live in a mounted directory;
-    /// the control key is documented as never coming from them. Blanking the
-    /// environment variable must therefore deny control access instead of
-    /// reviving a file-layer key.
+    /// the control key is documented as never coming from them, so a key written
+    /// into a config file must not authenticate whatever else the host provides.
+    ///
+    /// The variable is the *last* candidate, ahead of it only files — so on a host
+    /// that ships `/run/secrets/control_api_key` the variable cannot be observed
+    /// at all, and this test asserts the file-first precedence there instead of
+    /// returning silently (a passing test whose body never ran is not evidence;
+    /// `cargo test` hides output unless `--show-output` is passed). Which branch
+    /// ran is visible in the message on failure and with `--show-output`.
     #[test]
     fn control_key_never_comes_from_a_config_file() {
-        if std::path::Path::new("/run/secrets/control_api_key").exists() {
-            // The shipped default secret would win before the environment is
-            // consulted, so this test cannot be deterministic on such a host.
-            // Say so out loud rather than passing vacuously.
-            eprintln!(
-                "SKIP control_key_never_comes_from_a_config_file: \
-                 /run/secrets/control_api_key exists on this host"
-            );
-            return;
-        }
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1671,24 +1724,44 @@ mod tests {
         std::env::remove_var("CONTROL_API_KEY_FILE");
         std::env::set_var("CONTROL_API_KEY", "");
         let cfg = Config::load().unwrap();
-        assert_eq!(
+        // Host-independent half: the config-file layer never supplies the key.
+        assert_ne!(
             cfg.control_key(),
-            "",
+            "file-layer-key",
             "a key in pipeline.env must not authenticate control requests"
         );
-        // Empty *and* whitespace-only deny: `check_token` refuses an empty key,
-        // and a variable with only spaces is not a key anybody typed.
-        std::env::set_var("CONTROL_API_KEY", "   ");
-        assert_eq!(
-            cfg.control_key(),
-            "",
-            "a whitespace-only variable must deny, not authenticate"
-        );
-        std::env::set_var("CONTROL_API_KEY", "env-layer-key");
-        assert_eq!(cfg.control_key(), "env-layer-key");
-        // ... and a real value is trimmed before it is used.
-        std::env::set_var("CONTROL_API_KEY", " env-layer-key \n");
-        assert_eq!(cfg.control_key(), "env-layer-key");
+        if std::path::Path::new("/run/secrets/control_api_key").exists() {
+            assert!(
+                !cfg.control_key().is_empty(),
+                "a host that ships the secret file must authenticate from the file"
+            );
+            std::env::set_var("CONTROL_API_KEY", "env-layer-key");
+            assert_ne!(
+                cfg.control_key(),
+                "env-layer-key",
+                "a key file outranks the environment variable"
+            );
+        } else {
+            // No key file anywhere: an empty variable contributes no key, and one
+            // holding only spaces is not a key anybody typed — `check_token`
+            // refuses an empty key, so control access is denied.
+            assert_eq!(
+                cfg.control_key(),
+                "",
+                "an empty variable with no key file must deny, not authenticate"
+            );
+            std::env::set_var("CONTROL_API_KEY", "   ");
+            assert_eq!(
+                cfg.control_key(),
+                "",
+                "a whitespace-only variable must deny, not authenticate"
+            );
+            std::env::set_var("CONTROL_API_KEY", "env-layer-key");
+            assert_eq!(cfg.control_key(), "env-layer-key");
+            // ... and a real value is trimmed before it is used.
+            std::env::set_var("CONTROL_API_KEY", " env-layer-key \n");
+            assert_eq!(cfg.control_key(), "env-layer-key");
+        }
         match prev_key {
             Some(v) => std::env::set_var("CONTROL_API_KEY", v),
             None => std::env::remove_var("CONTROL_API_KEY"),

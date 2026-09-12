@@ -44,7 +44,9 @@ reaches the pipeline.
 An **empty** variable is not a value: it pins nothing, it is skipped when the
 layers merge, it is treated as unset by the consumers above, and a file value
 survives it. `WEBHOOK_PORT=` in the compose `.env` therefore cannot blank a
-setting. Note the other direction too: blanking a variable does **not** clear a
+setting. One exception: an empty `RUST_LOG` is a *valid empty filter* for
+`EnvFilter`, so it silences the daemon instead of falling back to the default
+level — unset the variable, or set a level. Note the other direction too: blanking a variable does **not** clear a
 value that lives in `pipeline.env` or `config.overrides.json`. To clear one,
 edit that file, `POST /api2/config {"KEY":""}`, or delete the key from
 `config.overrides.json` — the settings form never submits an empty `Secret`.
@@ -227,19 +229,26 @@ at `:8080` — proxies, bookmarks, uptime monitors.
 
 `pctl` follows the same single-service API. Two subcommands changed:
 `status2` is now `api-status`, and `config unset` was removed (delete the key
-from `config.overrides.json` instead). The control key comes from a file —
-`CONTROL_API_KEY_FILE` if set, else the shipped default
-`/run/secrets/control_api_key` — or, as a test-only fallback, the
-`CONTROL_API_KEY` **environment variable**. The *token* is never read from a
-config *value*: a key written into `pipeline.env` or `config.overrides.json`
-does not authenticate, and the daemon no longer reads `PIPE_TOKEN`. The
-*path* in `CONTROL_API_KEY_FILE` is an ordinary config key, so any layer may
-point it somewhere else (`CONTROL_API_KEY_FILE=/srv/keys/asrsub` in
-`pipeline.env` works and that file's contents then authenticate). Blanking the
-environment variable therefore denies control access rather than falling back
-to a file value. The bundled `pctl` client is separate: it still accepts
-`PIPE_TOKEN` as a convenience override and also looks for
-`<config dir>/secrets/control_api_key`.
+from `config.overrides.json` instead). A key file outranks the variable, and the
+candidates are tried in this order: `CONTROL_API_KEY_FILE` (the environment
+variable if set, else that config key, whose shipped default is
+`/run/secrets/control_api_key`), then the literal
+`/run/secrets/control_api_key`, and only then the `CONTROL_API_KEY`
+**environment variable**, which exists as a test fallback. An empty
+`CONTROL_API_KEY` therefore contributes no key, and with no key file present
+every control request is refused — but blanking the variable alone does **not**
+disable the control API while a key file is there; remove the secret file (or
+point `CONTROL_API_KEY_FILE` at nothing) as well. The *token* is never read
+from a config *value*: a key written into `pipeline.env` or
+`config.overrides.json` does not authenticate, and the daemon no longer reads
+`PIPE_TOKEN`. The *path* in `CONTROL_API_KEY_FILE` is an ordinary config key,
+so any layer may point it somewhere else
+(`CONTROL_API_KEY_FILE=/srv/keys/asrsub` in `pipeline.env` works and that
+file's contents then authenticate). The bundled `pctl` client is separate and
+reads the sources in the **opposite** order — `PIPE_TOKEN`, then
+`CONTROL_API_KEY`, then `CONTROL_API_KEY_FILE`, `/run/secrets/control_api_key`
+and `<config dir>/secrets/control_api_key` — so a client whose environment
+holds a stale `PIPE_TOKEN` sends a token the daemon will not accept.
 
 ## Rollback (immutable: pull previous SHA)
 
