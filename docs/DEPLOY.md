@@ -40,8 +40,12 @@ the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
 way and is not in the settings form either.
 
 An **empty** variable is not a value: it pins nothing, it is skipped when the
-layers merge, and a file value survives it. `WEBHOOK_PORT=` in the compose
-`.env` therefore cannot blank a setting — remove the line instead.
+layers merge, it is treated as unset by the consumers above, and a file value
+survives it. `WEBHOOK_PORT=` in the compose `.env` therefore cannot blank a
+setting. Note the other direction too: blanking a variable does **not** clear a
+value that lives in `pipeline.env` or `config.overrides.json`. To clear one,
+edit that file, `POST /api2/config {"KEY":""}`, or delete the key from
+`config.overrides.json` — the settings form never submits an empty `Secret`.
 
 Two settings are **pinned by the shipment**, because the bind mount and the
 reverse proxy must agree with the daemon: `NAS_MEDIA_PREFIX` and
@@ -221,10 +225,13 @@ at `:8080` — proxies, bookmarks, uptime monitors.
 
 `pctl` follows the same single-service API. Two subcommands changed:
 `status2` is now `api-status`, and `config unset` was removed (delete the key
-from `config.overrides.json` instead). The control key is read from
-`CONTROL_API_KEY`/`PIPE_TOKEN`, `CONTROL_API_KEY_FILE`,
-`/run/secrets/control_api_key`, or `<config dir>/secrets/control_api_key` —
-never from `pipeline.env`.
+from `config.overrides.json` instead). The control key comes from a file —
+`CONTROL_API_KEY_FILE` if set, else the shipped default
+`/run/secrets/control_api_key` — or, as a test-only fallback, the
+`CONTROL_API_KEY` **environment variable**. It is never read from a config
+*value*: a key written into `pipeline.env` or `config.overrides.json` does not
+authenticate, and `PIPE_TOKEN` is no longer read at all. Blanking the variable
+therefore denies control access rather than falling back to a file value.
 
 ## Rollback (immutable: pull previous SHA)
 

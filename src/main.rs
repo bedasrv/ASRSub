@@ -160,7 +160,7 @@ async fn load_stack(
     }
     let http = build_http();
     let ppath = providers_override
-        .or_else(|| std::env::var("PROVIDERS_FILE").ok().map(PathBuf::from))
+        .or_else(|| crate::config::env_str("PROVIDERS_FILE").map(PathBuf::from))
         .unwrap_or_else(|| cfg.providers_file.clone());
     let file = providers::ProvidersFile::load(&ppath)
         .with_context(|| format!("load providers {ppath:?}"))?;

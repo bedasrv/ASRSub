@@ -509,6 +509,22 @@ class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
         if env_only is None:
             self.fail("ENV_ONLY_KEYS not found in src/config.rs")
         self.env_only = re.findall(r'"([A-Z0-9_]+)"', env_only.group(1))
+        # The merged environment map (`ENV_ALLOWLIST`) and the env-only list both
+        # name every settings key, so searching the whole file for a key proves
+        # nothing: deleting the loader read stays green as long as the allowlist
+        # entry is there. Keep both tables out of the text used below.
+        env_allow = re.search(
+            r"(?:pub )?const ENV_ALLOWLIST: &\[&str\] = &\[(.*?)\n\];",
+            self.config_rs,
+            re.S,
+        )
+        if env_allow is None:
+            self.fail("ENV_ALLOWLIST not found in src/config.rs")
+        self.rest = (
+            self.config_rs.replace(self.fields_block, "")
+            .replace(env_allow.group(1), "")
+            .replace(env_only.group(1), "")
+        )
 
     def test_finds_the_schema(self):
         # Guards the parsers above: an empty extraction would make the checks
@@ -518,13 +534,14 @@ class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
 
     def test_every_settings_field_is_read_by_the_loader(self):
         # A FIELDS entry the loader never reads is a knob that does nothing — and
-        # the dashboard renders the table, so the UI would offer it.
-        rest = self.config_rs.replace(self.fields_block, "")
+        # the dashboard renders the table, so the UI would offer it. The three
+        # tables are excluded (see setUp), and the key must appear in the text
+        # between them, i.e. in a loader call or a consumer in this file.
         for key in self.keys:
             self.assertIn(
                 f'"{key}"',
-                rest,
-                f"{key} is exposed in FIELDS but never read by Config::load",
+                self.rest,
+                f"{key} is exposed in FIELDS but never read outside the schema tables",
             )
 
     def test_env_only_keys_are_documented_in_the_example_env(self):
@@ -540,8 +557,15 @@ class TestSettingsSchemaMatchesTheLoader(unittest.TestCase):
 
     def test_empty_environment_variables_are_documented(self):
         # The rule the code enforces: an empty variable pins nothing and does not
-        # shadow a file value. If that ever changes, the docs must change with it.
-        for name, text in (("pipeline.env.example", self.env_example), ("DEPLOY.md", self.deploy_md)):
+        # shadow a file value. This test only checks that the rule is *documented*
+        # where operators will look — the behaviour itself is pinned by the Rust
+        # test `empty_env_value_does_not_shadow_the_file_layer`, referenced here
+        # so the pair cannot drift apart silently.
+        self.assertIn("empty_env_value_does_not_shadow_the_file_layer", self.config_rs)
+        for name, text in (
+            ("pipeline.env.example", self.env_example),
+            ("DEPLOY.md", self.deploy_md),
+        ):
             with self.subTest(doc=name):
                 self.assertIn("empty", text.lower())
                 self.assertIn("pins nothing", text)

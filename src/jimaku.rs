@@ -32,9 +32,8 @@ pub struct Jimaku {
 }
 
 fn env_secs(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
+    crate::config::env_str(key)
+        .and_then(|v| v.parse().ok())
         .unwrap_or(default)
 }
 
@@ -42,33 +41,31 @@ impl Jimaku {
     pub fn new(key: &str, http: reqwest::Client) -> Self {
         Self {
             key: key.trim().to_string(),
-            base: std::env::var("JIMAKU_BASE_URL").unwrap_or_else(|_| BASE_URL.to_string()),
-            anilist_url: std::env::var("ANILIST_BASE_URL")
-                .unwrap_or_else(|_| ANILIST_URL.to_string()),
+            base: crate::config::env_str("JIMAKU_BASE_URL").unwrap_or_else(|| BASE_URL.to_string()),
+            anilist_url: crate::config::env_str("ANILIST_BASE_URL")
+                .unwrap_or_else(|| ANILIST_URL.to_string()),
             http,
-            pace_ms: std::env::var("JIMAKU_CALL_SLEEP_MS")
-                .ok()
+            pace_ms: crate::config::env_str("JIMAKU_CALL_SLEEP_MS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
-            anilist_cache: std::env::var("ANILIST_CACHE")
+            anilist_cache: crate::config::env_str("ANILIST_CACHE")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| {
-                    std::env::var("HOME")
+                .unwrap_or_else(|| {
+                    crate::config::env_str("HOME")
                         .map(|h| {
                             std::path::PathBuf::from(h)
                                 .join(".config")
                                 .join("asr-pipeline")
                                 .join("anilist_cache.json")
                         })
-                        .unwrap_or_else(|_| std::path::PathBuf::from("anilist_cache.json"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("anilist_cache.json"))
                 }),
             pace_state: std::sync::Arc::new(tokio::sync::Mutex::new(
                 // Backdate by one interval so the first call fires immediately
                 // instead of sleeping a full pacing period for no reason.
                 std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_millis(
-                        std::env::var("JIMAKU_CALL_SLEEP_MS")
-                            .ok()
+                        crate::config::env_str("JIMAKU_CALL_SLEEP_MS")
                             .and_then(|v| v.parse().ok())
                             .unwrap_or(500),
                     ))
@@ -464,6 +461,52 @@ fn has_ep_tag(lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty environment variable means "unset" for the consumers that read
+    /// the process environment directly — before this, `JIMAKU_BASE_URL=` gave
+    /// the client an empty base and every request went to a relative URL.
+    #[test]
+    fn empty_env_vars_leave_the_documented_defaults() {
+        let _guard = crate::config::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = (
+            std::env::var_os("JIMAKU_BASE_URL"),
+            std::env::var_os("ANILIST_BASE_URL"),
+            std::env::var_os("ANILIST_CACHE"),
+            std::env::var_os("JIMAKU_CALL_SLEEP_MS"),
+        );
+        std::env::set_var("JIMAKU_BASE_URL", "");
+        std::env::set_var("ANILIST_BASE_URL", "   ");
+        std::env::set_var("ANILIST_CACHE", "");
+        std::env::set_var("JIMAKU_CALL_SLEEP_MS", "");
+        let j = Jimaku::new("k", reqwest::Client::new());
+        assert_eq!(j.base, BASE_URL);
+        assert_eq!(j.anilist_url, ANILIST_URL);
+        assert_eq!(j.pace_ms, 500);
+        assert!(
+            j.anilist_cache.ends_with("anilist_cache.json"),
+            "empty cache path must fall back to the default location, got {:?}",
+            j.anilist_cache
+        );
+        // A real value still wins, trimmed.
+        std::env::set_var("JIMAKU_BASE_URL", " https://mirror.example/api \n");
+        assert_eq!(
+            Jimaku::new("k", reqwest::Client::new()).base,
+            "https://mirror.example/api"
+        );
+        for (name, v) in [
+            ("JIMAKU_BASE_URL", prev.0),
+            ("ANILIST_BASE_URL", prev.1),
+            ("ANILIST_CACHE", prev.2),
+            ("JIMAKU_CALL_SLEEP_MS", prev.3),
+        ] {
+            match v {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
 
     // ---- pure shape/selection/ranking (ported from test_jimaku_api.py) ----
 

@@ -24,15 +24,33 @@ pub const DEFAULT_JELLYFIN_MEDIA_ROOT: &str = "/media";
 pub const DEFAULT_NAS_MEDIA_PREFIX: &str = "/mnt/nas/share/media";
 
 fn cfg_dir() -> PathBuf {
-    std::env::var("ASRSUB_CONFIG_DIR")
+    env_str("ASRSUB_CONFIG_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_home().join(".config").join("asr-pipeline"))
+        .unwrap_or_else(|| dirs_home().join(".config").join("asr-pipeline"))
+}
+
+/// The process environment's value for `key`, treating an empty or
+/// whitespace-only variable as unset — the same rule every config layer applies
+/// (see [`RawConfig::load`]).
+///
+/// A few knobs are read straight from the environment by their consumers rather
+/// than through the config map (`PROVIDERS_FILE`, `JIMAKU_BASE_URL`,
+/// `ANILIST_BASE_URL`, `ANILIST_CACHE`, `ASRSUB_CONFIG_DIR`). `std::env::var`
+/// returns `Ok("")` for `KEY=`, which for those readers means an empty base URL,
+/// an empty path, or a startup abort instead of the documented default — so an
+/// empty variable has to be filtered here too, or "empty means unset" is only
+/// true for some of the settings.
+pub(crate) fn env_str(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
+    env_str("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/home/user"))
+        .unwrap_or_else(|| PathBuf::from("/home/user"))
 }
 
 fn parse_env_file(path: &Path, out: &mut HashMap<String, String>) {
@@ -314,9 +332,13 @@ const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
 ];
 
 /// True when `s` starts with something shaped like the `host[:port]` a
-/// credential URL carries after its `@`. Keeps the scheme-less branch from
-/// masking values that merely happen to contain a colon (an email address, a
-/// query string) — masking those is information loss, not redaction.
+/// credential URL carries after its `@`.
+///
+/// Used by the scheme-qualified branch to recognise a `@` that belongs to the
+/// path or the query (a base URL like `https://bazarr.lan:6767/api?x=a@b`) and
+/// not to a userinfo, so a value with no credentials is left alone. It is never
+/// allowed to *suppress* masking of a `user:pass@` userinfo: masking must fail
+/// closed, because `/config` is answered without authentication.
 fn starts_with_authority(s: &str) -> bool {
     let host_port = s.split(['/', '?', '#']).next().unwrap_or("");
     if host_port.is_empty() {
@@ -339,42 +361,66 @@ fn starts_with_authority(s: &str) -> bool {
 ///
 /// `/config` is answered without authentication, so a credential embedded in an
 /// otherwise harmless key (a service URL whose name carries no KEY/TOKEN hint)
-/// must not be published either. The authority ends at the *last* `@`, so a
-/// password containing `@` cannot survive half-masked, and the part after it
-/// must look like a host. A scheme-less value is masked only when a colon marks
-/// real credentials, leaving plain `user@host` (or an email address) untouched.
-/// `None` when the value carries none.
+/// must not be published either. Two properties matter:
+///
+/// * **Fail closed.** Anything that carries a colon before the last `@` and
+///   looks like an address is masked even when the host is malformed — a
+///   trailing space, a non-ASCII or percent-encoded host, an alphabetic port, an
+///   empty host, a UNC path, an IPv6 zone id. Host-shapedness may only *add*
+///   masking (recognising a `@` that belongs to a path instead of a userinfo),
+///   never remove it; a shape the classifier does not recognise is published
+///   verbatim otherwise, and that is the wrong default for a credential.
+/// * **The userinfo is anchored on the last `@`**, not on the first path
+///   separator, so a password containing `/`, `?` or `#` cannot survive unmasked.
+///
+/// A scheme-less value is masked only when a colon marks real credentials, which
+/// leaves plain `user@host` (an email address) untouched, and a non-hierarchical
+/// scheme (`mailto:admin@example.com`, `urn:isbn:…@x`) that carries no port is
+/// left alone because it has no password to hide. `None` when the value carries
+/// no credential-shaped userinfo.
 fn redact_userinfo(value: &str) -> Option<String> {
+    // A trailing space or newline is a copy/paste artefact, not part of a host.
+    let value = value.trim();
     let (prefix, rest) = match value.split_once("://") {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
         None => (String::new(), value),
     };
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..authority_end];
-    let at = authority.rfind('@')?;
-    let userinfo = &authority[..at];
-    if userinfo.is_empty() || !starts_with_authority(&authority[at + 1..]) {
+    let at = rest.rfind('@')?;
+    let userinfo = &rest[..at];
+    let after = &rest[at + 1..];
+    let host = after.split(['/', '?', '#']).next().unwrap_or("");
+    if userinfo.is_empty() {
         return None;
     }
-    let masked = if userinfo.contains(':') {
-        if prefix.is_empty() {
-            let word = userinfo
-                .split(':')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) {
-                return None;
-            }
+    if prefix.is_empty() {
+        // Scheme-less: a colon is what distinguishes `user:pass@host` from a
+        // bare address, and the listed schemes have no password at all.
+        if !userinfo.contains(':') {
+            return None;
         }
+        let word = userinfo
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) && !host.contains(':') {
+            return None;
+        }
+    } else if userinfo.contains(['/', '?', '#']) {
+        // The `@` sits past the authority. Unless the text in front of it is
+        // itself host-shaped, this is a password containing a separator and must
+        // still be masked.
+        let first = userinfo.split(['/', '?', '#']).next().unwrap_or("");
+        if starts_with_authority(first) {
+            return None;
+        }
+    }
+    let masked = if userinfo.contains(':') {
         "***:***"
-    } else if prefix.is_empty() {
-        // Scheme-less without a colon: a bare user name, nothing to redact.
-        return None;
     } else {
         "***"
     };
-    Some(format!("{prefix}{masked}{}", &rest[at..]))
+    Some(format!("{prefix}{masked}@{after}"))
 }
 
 impl Config {
@@ -559,7 +605,15 @@ impl Config {
                 }
             }
         }
-        self.raw.get("CONTROL_API_KEY").cloned().unwrap_or_default()
+        // The *process environment* only. `pipeline.env` and
+        // `config.overrides.json` live in a mounted directory that anybody with
+        // host access can edit, and a key read from there would keep
+        // authenticating a deployment that deliberately removed it from the
+        // environment — the documented contract is that the control key never
+        // comes from `pipeline.env`. An empty variable therefore denies control
+        // access (`check_token` refuses an empty key) instead of falling back to
+        // a stale file value.
+        std::env::var("CONTROL_API_KEY").unwrap_or_default()
     }
 }
 
@@ -975,7 +1029,12 @@ pub fn is_editable_key(key: &str) -> bool {
 /// refuses 70000 even though it parses as a `u64`.
 pub fn value_requirement(key: &str, value: &str) -> Option<String> {
     let f = FIELDS.iter().find(|f| f.key == key)?;
-    if value.trim().is_empty() {
+    // Validate the *trimmed* value: every consumer trims (`parse_env_file`,
+    // `parse_int`, `get`, and the form's `collect_changes`), so a padded `" 5"`
+    // loads as 5 and must not be refused here — the two write paths would
+    // otherwise disagree about the same logical input.
+    let value = value.trim();
+    if value.is_empty() {
         // Empty means unset, not invalid.
         return None;
     }
@@ -1425,6 +1484,23 @@ mod tests {
             redact_userinfo("https://user:pw@[::1]:8080/api").as_deref(),
             Some("https://***:***@[::1]:8080/api")
         );
+        // A password containing a path/query separator used to hide the whole
+        // credential, because the authority was cut at the first '/' or '?'.
+        assert_eq!(
+            redact_userinfo("https://user:pa/ss@bazarr.lan:6767").as_deref(),
+            Some("https://***:***@bazarr.lan:6767")
+        );
+        assert_eq!(
+            redact_userinfo("user:pa?ss@sonarr.lan:8989").as_deref(),
+            Some("***:***@sonarr.lan:8989")
+        );
+        // Known, pre-existing over-masking: these carry no password but have a
+        // colon before the last '@', and nothing distinguishes them from a
+        // `user:pass@host` value. Masking is the safe direction.
+        assert_eq!(
+            redact_userinfo("fe80::1@host.lan").as_deref(),
+            Some("***:***@host.lan")
+        );
 
         // A key whose *name* carries no secret hint still loses its userinfo:
         // `/config` is unauthenticated.
@@ -1443,5 +1519,137 @@ mod tests {
             masked.get("BAZARR_URL").map(String::as_str),
             Some("https://***:***@bazarr.lan:6767")
         );
+    }
+
+    /// The redaction boundary must fail closed: a credential is masked whatever
+    /// the host looks like. The regression this pins was a host-shape *filter*
+    /// that returned `None` — publishing `user:pass@…` verbatim — for a host with
+    /// a trailing space, a non-ASCII or percent-encoded name, an alphabetic port,
+    /// an empty host, a UNC path or an IPv6 zone id. A trailing space is a plain
+    /// copy/paste artefact, so this is the common case, not an exotic one.
+    #[test]
+    fn url_credentials_are_masked_even_when_the_host_is_malformed() {
+        for (value, want) in [
+            (
+                "https://user:s3cr3t@sonarr.lan ",
+                "https://***:***@sonarr.lan",
+            ),
+            (
+                "https://user:s3cr3t@sonarr.lan\t",
+                "https://***:***@sonarr.lan",
+            ),
+            (
+                "https://user:pw@bazarr.lan:6767\n",
+                "https://***:***@bazarr.lan:6767",
+            ),
+            ("user:s3cr3t@sonarr.lan ", "***:***@sonarr.lan"),
+            (
+                "https://user:pw@sonarr.lan:http",
+                "https://***:***@sonarr.lan:http",
+            ),
+            ("https://user:pw@:8080/api", "https://***:***@:8080/api"),
+            ("https://user:pw@/api", "https://***:***@/api"),
+            ("https://user:pw@café.host/x", "https://***:***@café.host/x"),
+            (
+                "https://user:pw@host%20name/x",
+                "https://***:***@host%20name/x",
+            ),
+            (
+                "https://user:pw@[fe80::1%eth0]:8080/api",
+                "https://***:***@[fe80::1%eth0]:8080/api",
+            ),
+            ("\\\\user:pw@nas\\share", "***:***@nas\\share"),
+            // A scheme-less value whose user name happens to be a scheme word is
+            // still a credential when a port follows the host.
+            ("tel:pw@host.lan:22", "***:***@host.lan:22"),
+        ] {
+            assert_eq!(
+                redact_userinfo(value).as_deref(),
+                Some(want),
+                "credential published verbatim: {value:?}"
+            );
+        }
+        // Documented trade-off: with no port after the host, a scheme-less value
+        // whose first word is a non-hierarchical scheme is read as that URI and
+        // left alone. `mailto:`/`urn:` are the reason the list exists; the cost
+        // is a credential whose *user name* is `data`, `tel`, … and which has no
+        // port. Masking it would publish `***:***@…` for every email address.
+        assert_eq!(redact_userinfo("data:pw@host.lan"), None);
+        // A `@` past a host-shaped authority is a path/query character, not a
+        // userinfo — that is the only thing host shape is allowed to decide.
+        assert_eq!(redact_userinfo("https://bazarr.lan:6767/api?x=a@b"), None);
+    }
+
+    /// `value_requirement` feeds both write paths, and every consumer trims, so
+    /// a padded number must be accepted rather than refused by one path and
+    /// loaded by the other.
+    #[test]
+    fn value_requirement_ignores_surrounding_whitespace() {
+        assert_eq!(value_requirement("MAX_EPS_PER_RUN", "   5   "), None);
+        assert_eq!(
+            value_requirement("WEBHOOK_PORT", " 70000 ").as_deref(),
+            Some("a whole number between 0 and 65535")
+        );
+        assert_eq!(value_requirement("LADDER_MIN_CJK", " 0.55\n"), None);
+    }
+
+    /// An empty or whitespace-only variable is unset for the consumers that read
+    /// the environment directly (they cannot see `Config`'s merge).
+    #[test]
+    fn env_str_treats_an_empty_variable_as_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ASRSUB_TEST_ENV_STR", "");
+        assert_eq!(env_str("ASRSUB_TEST_ENV_STR"), None);
+        std::env::set_var("ASRSUB_TEST_ENV_STR", "   ");
+        assert_eq!(env_str("ASRSUB_TEST_ENV_STR"), None);
+        std::env::set_var("ASRSUB_TEST_ENV_STR", " value \n");
+        assert_eq!(env_str("ASRSUB_TEST_ENV_STR").as_deref(), Some("value"));
+        std::env::remove_var("ASRSUB_TEST_ENV_STR");
+        assert_eq!(env_str("ASRSUB_TEST_ENV_STR"), None);
+    }
+
+    /// `pipeline.env` and `config.overrides.json` live in a mounted directory;
+    /// the control key is documented as never coming from them. Blanking the
+    /// environment variable must therefore deny control access instead of
+    /// reviving a file-layer key.
+    #[test]
+    fn control_key_never_comes_from_a_config_file() {
+        if std::path::Path::new("/run/secrets/control_api_key").exists() {
+            // The shipped default secret would win before the environment is
+            // consulted, so this test cannot be deterministic on such a host.
+            return;
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("pipeline.env"),
+            "CONTROL_API_KEY=file-layer-key\n",
+        )
+        .unwrap();
+        let prev_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
+        let prev_file = std::env::var_os("CONTROL_API_KEY_FILE");
+        let prev_key = std::env::var_os("CONTROL_API_KEY");
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        std::env::remove_var("CONTROL_API_KEY_FILE");
+        std::env::set_var("CONTROL_API_KEY", "");
+        let cfg = Config::load().unwrap();
+        assert_eq!(
+            cfg.control_key(),
+            "",
+            "a key in pipeline.env must not authenticate control requests"
+        );
+        std::env::set_var("CONTROL_API_KEY", "env-layer-key");
+        assert_eq!(cfg.control_key(), "env-layer-key");
+        match prev_key {
+            Some(v) => std::env::set_var("CONTROL_API_KEY", v),
+            None => std::env::remove_var("CONTROL_API_KEY"),
+        }
+        if let Some(v) = prev_file {
+            std::env::set_var("CONTROL_API_KEY_FILE", v);
+        }
+        match prev_dir {
+            Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
+            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+        }
     }
 }

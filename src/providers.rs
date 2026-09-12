@@ -133,7 +133,11 @@ fn resolve_key(api_key: &str, key_env: &str) -> String {
         return api_key.to_string();
     }
     if !key_env.is_empty() {
-        return std::env::var(key_env).unwrap_or_default();
+        // Trimmed and empty-filtered like every other environment read: a key
+        // pasted with a trailing newline must still work, and `KEY=` means
+        // "no key", which leaves the endpoint unkeyed instead of sending
+        // whitespace as a bearer token.
+        return crate::config::env_str(key_env).unwrap_or_default();
     }
     String::new()
 }
@@ -201,8 +205,7 @@ struct PoolInner {
 
 impl ProviderPool {
     pub fn new(file: ProvidersFile, http: reqwest::Client) -> Self {
-        let per_endpoint = std::env::var("LLM_PER_ENDPOINT_CONCURRENCY")
-            .ok()
+        let per_endpoint = crate::config::env_str("LLM_PER_ENDPOINT_CONCURRENCY")
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
         let health = file
@@ -210,8 +213,7 @@ impl ProviderPool {
             .iter()
             .map(|_| EndpointHealth::new(per_endpoint))
             .collect();
-        let whisper_permits: usize = std::env::var("WHISPER_CONCURRENCY")
-            .ok()
+        let whisper_permits: usize = crate::config::env_str("WHISPER_CONCURRENCY")
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
         // Primary first, then fallbacks (may be empty: fully backward
@@ -373,16 +375,14 @@ impl ProviderPool {
     /// Deadline for one LLM attempt: bounded so a hung free-tier endpoint
     /// cannot stall the whole library sweep.
     pub fn llm_timeout() -> Duration {
-        let s: u64 = std::env::var("LLM_TIMEOUT_S")
-            .ok()
+        let s: u64 = crate::config::env_str("LLM_TIMEOUT_S")
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
         Duration::from_secs(s.clamp(30, 900))
     }
 
     pub fn whisper_timeout() -> Duration {
-        let s: u64 = std::env::var("WHISPER_TIMEOUT_S")
-            .ok()
+        let s: u64 = crate::config::env_str("WHISPER_TIMEOUT_S")
             .and_then(|v| v.parse().ok())
             .unwrap_or(600);
         Duration::from_secs(s.clamp(60, 1800))

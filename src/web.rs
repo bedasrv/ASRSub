@@ -1118,6 +1118,62 @@ mod tests {
     }
 
     #[test]
+    /// The bound in the table above is only right if it is the maximum of the
+    /// type the *struct field* actually has — the drift the review reproduced was
+    /// `webhook_port: u16` → `u32`, which left the table and the UI agreeing with
+    /// each other while disagreeing with the loader. Reading the field widths off
+    /// a loaded `Config` ties the table to the struct itself.
+    fn integer_bounds_match_the_struct_field_width() {
+        let _guard = crate::config::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let cfg = crate::config::Config::load().unwrap();
+        std::env::remove_var("ASRSUB_CONFIG_DIR");
+        let mut seen: Vec<&str> = Vec::new();
+        for (key, bound) in FIELDS.iter().filter_map(|f| match f.kind {
+            FieldKind::Int(max) => Some((f.key, max)),
+            _ => None,
+        }) {
+            // Width of the struct field this key is loaded into. The match arm
+            // list is the point: a new field fails to compile until it is added.
+            let width = match key {
+                "MAX_EPS_PER_RUN" => std::mem::size_of_val(&cfg.max_eps_per_run),
+                "EPISODE_CONCURRENCY" => std::mem::size_of_val(&cfg.episode_concurrency),
+                "ASR_CONCURRENCY" => std::mem::size_of_val(&cfg.asr_concurrency),
+                "TRANSLATE_CONCURRENCY" => std::mem::size_of_val(&cfg.translate_concurrency),
+                "UPLOAD_CONCURRENCY" => std::mem::size_of_val(&cfg.upload_concurrency),
+                "TRANSLATE_CHUNK" => std::mem::size_of_val(&cfg.translate_chunk),
+                "CPS_MERGE_MAX_CHARS" => std::mem::size_of_val(&cfg.cps_merge_max_chars),
+                "LADDER_MIN_CUES" => std::mem::size_of_val(&cfg.ladder_min_cues),
+                "LADDER_MIN_CHARS" => std::mem::size_of_val(&cfg.ladder_min_chars),
+                "MAX_CUE_MS" => std::mem::size_of_val(&cfg.max_cue_ms),
+                "AI_MARKER_CUE_MS" => std::mem::size_of_val(&cfg.ai_marker_cue_ms),
+                "CPS_MERGE_MAX_DUR_MS" => std::mem::size_of_val(&cfg.cps_merge_max_dur_ms),
+                "CPS_MERGE_MAX_GAP_MS" => std::mem::size_of_val(&cfg.cps_merge_max_gap_ms),
+                "WEBHOOK_PORT" => std::mem::size_of_val(&cfg.webhook_port),
+                other => panic!("{other} is an Int field with no struct field here"),
+            };
+            let bound_width = if bound == usize::MAX as u64 {
+                std::mem::size_of::<usize>()
+            } else if bound == u32::MAX as u64 {
+                4
+            } else if bound == u16::MAX as u64 {
+                2
+            } else {
+                panic!("{key} has a bound that is not a type maximum: {bound}")
+            };
+            assert_eq!(
+                width, bound_width,
+                "{key}: FIELDS allows up to {bound} but the struct field is {width} bytes"
+            );
+            seen.push(key);
+        }
+        assert_eq!(seen.len(), 14, "integer fields covered: {seen:?}");
+    }
+
+    #[test]
     fn error_fragments_echo_only_known_target_ids() {
         assert_eq!(sanitize_target("#settings-body"), "settings-body");
         assert_eq!(sanitize_target(" overview-body "), "overview-body");
