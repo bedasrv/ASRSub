@@ -1,8 +1,6 @@
 .git
-__pycache__
-*.pyc
-venv/
-.venv/
+# The Python implementation this repo used to carry is gone; nothing here
+# matches *.pyc, __pycache__ or a venv any more.
 *.srt
 *.wav
 *.ass

@@ -213,10 +213,12 @@ class TestHealthAndJellyfinContract(unittest.TestCase):
 
     def test_no_site_specific_jellyfin_url_default(self):
         # Issue #8: no compiled-in private address in source, docs or example.
+        plan_md = (REPO / "docs" / "PLAN.md").read_text(encoding="utf-8")
         for text, name in (
             (self.config, "src/config.rs"),
             (self.deploy_md, "docs/DEPLOY.md"),
             (self.env_example, "pipeline.env.example"),
+            (plan_md, "docs/PLAN.md"),
         ):
             self.assertNotIn(
                 "10.10.20.160", text, msg=f"{name} must not carry a site-specific default"

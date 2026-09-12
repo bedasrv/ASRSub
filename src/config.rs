@@ -327,14 +327,21 @@ fn parse_float(raw: &HashMap<String, String>, key: &str, default: f64) -> f64 {
 /// Schemes whose `:` separates a scheme from an opaque payload rather than a
 /// user name from a password. Without this list the scheme-less branch below
 /// reads `mailto:admin@example.com` as a login and publishes `***:***@example.com`.
+/// How many percent-escape layers [`carries_credential_colon`] peels back before
+/// giving up. Eight is far past any value a person or a config generator writes,
+/// and the doc names the bound rather than claiming "any depth": a fourth-layer
+/// escape used to be published while the doc promised it was caught.
+const PERCENT_ESCAPE_LAYERS: usize = 8;
+
 const NON_HIERARCHICAL_SCHEMES: &[&str] = &[
     "mailto", "data", "urn", "tel", "sms", "geo", "magnet", "bitcoin",
 ];
 
 /// A colon that can separate a user name from a password, written any of the
-/// ways a value can carry one: a literal `:`, a percent-encoded `%3A` at any
-/// escape depth, an HTML entity (`&#58;`, `&#x3a;`, `&colon;`) or the full-width
-/// `\u{FF1A}`. Matching only the literal byte published
+/// ways a value can carry one: a literal `:`, a percent-encoded `%3A` up to
+/// [`PERCENT_ESCAPE_LAYERS`] layers deep, an HTML entity (`&#58;`, `&#x3a;`,
+/// `&colon;`, semicolon optional and any case) or the full-width `\u{FF1A}` /
+/// small `\u{FE55}`. Matching only the literal byte published
 /// `https:///user%3Apw@host` verbatim while the literal spelling of the same
 /// value was masked, so the empty-authority class was only half closed.
 fn carries_credential_colon(s: &str) -> bool {
@@ -343,7 +350,9 @@ fn carries_credential_colon(s: &str) -> bool {
             return true;
         }
         let lower = s.to_ascii_lowercase();
-        lower.contains("&#58;") || lower.contains("&#x3a;") || lower.contains("&colon;")
+        // Semicolon-less forms count too: `&colon` and `&#58` are what a sloppy
+        // HTML encoder emits, and the trailing `;` is not what makes it a colon.
+        lower.contains("&#58") || lower.contains("&#x3a") || lower.contains("&colon")
     }
 
     if colon_like(s) {
@@ -352,7 +361,7 @@ fn carries_credential_colon(s: &str) -> bool {
     // Escape layers: `%3A` is a colon, `%253A` is one layer further down, and a
     // value that arrives double- or triple-encoded still carries a credential.
     let mut current = s.to_string();
-    for _ in 0..3 {
+    for _ in 0..PERCENT_ESCAPE_LAYERS {
         match percent_decode_once(&current) {
             Some(decoded) => {
                 if colon_like(&decoded) {
@@ -397,17 +406,35 @@ fn percent_decode_once(s: &str) -> Option<String> {
     decoded.then_some(out)
 }
 
+/// Whether `prefix` — the text in front of the first `://` — is a URL scheme.
+///
+/// `split_once("://")` finds the first occurrence *anywhere*, so without this
+/// check a scheme-less `user:pw@host/redir?url=http://x@y` was parsed as though
+/// `user:pw@host/redir?url=http` were the scheme: the credential in front of the
+/// first `@` was never examined and was published while only the embedded URL
+/// was masked.
+fn is_scheme(prefix: &str) -> bool {
+    let mut chars = prefix.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// Mask every credential-shaped run in `tail`, the part of a value that follows
 /// the authority's userinfo.
 ///
-/// A run starts after the innermost `scheme://` in front of the `@` when there is
-/// one — so `?url=http://svc:pa/ss@inner` is caught even though its password
-/// contains a separator — and after the last `/`, `?` or `#` otherwise, so a
-/// *scheme-less* tail password containing a separator is the one shape this
-/// cannot see. A run with no colon is a plain address or path
-/// (`?to=nominal@host`, `b.mkv`) and is left as it stands. The readable prefix is
-/// always kept, which is what makes a redirected URL legible:
-/// `...?url=http://***:***@inner`. `None` when nothing in `tail` is masked.
+/// For each `@`, candidates for the start of the credential are taken right to
+/// left — after the innermost `scheme://`, after the last `/`, `?` or `#`, then
+/// the start of the segment — and the rightmost candidate whose run carries a
+/// colon is the one masked. Widening leftwards when the narrowest run has no
+/// colon is what catches a password that contains a separator
+/// (`er:p/ss@host`, `?to=svc:pa/ss@inner`), which a fixed one-separator rule
+/// published. A run that never carries a colon is a plain address or path
+/// (`?to=nominal@host`, `b.mkv`) and is left as it stands, so a redirected URL
+/// stays legible where it can: `...?url=http://***:***@inner`. `None` when
+/// nothing in `tail` is masked.
 fn mask_tail_runs(tail: &str) -> Option<String> {
     if !tail.contains('@') {
         return None;
@@ -417,17 +444,27 @@ fn mask_tail_runs(tail: &str) -> Option<String> {
     let mut masked = false;
     while let Some(at) = rest.find('@') {
         let head = &rest[..at];
-        let start = match head.rfind("://") {
-            Some(i) => i + 3,
-            None => head.rfind(['/', '?', '#']).map(|i| i + 1).unwrap_or(0),
-        };
-        let run = &head[start..];
-        if run.is_empty() || !carries_credential_colon(run) {
-            out.push_str(head);
-        } else {
-            out.push_str(&head[..start]);
-            out.push_str("***:***");
-            masked = true;
+        let mut starts: Vec<usize> = vec![0];
+        for (i, _) in head.match_indices("://") {
+            starts.push(i + 3);
+        }
+        for (i, c) in head.char_indices() {
+            if matches!(c, '/' | '?' | '#') {
+                starts.push(i + 1);
+            }
+        }
+        starts.sort_unstable_by(|a, b| b.cmp(a));
+        starts.dedup();
+        let start = starts
+            .into_iter()
+            .find(|&s| !head[s..].is_empty() && carries_credential_colon(&head[s..]));
+        match start {
+            Some(s) => {
+                out.push_str(&head[..s]);
+                out.push_str("***:***");
+                masked = true;
+            }
+            None => out.push_str(head),
         }
         out.push('@');
         rest = &rest[at + 1..];
@@ -454,9 +491,10 @@ fn mask_tail_runs(tail: &str) -> Option<String> {
 ///   indistinguishable from `https://host:port/path@x`, so it is masked, and so
 ///   is the harmless `https://bazarr.lan:6767/api?x=a@b`. Losing a readable base
 ///   URL costs information; publishing `root:1234` costs the credential. The
-///   colon may be spelled literally, percent-encoded at any depth, as an HTML
-///   entity or as the full-width `\u{FF1A}`, so no spelling slips through (see
-///   `carries_credential_colon`).
+///   colon may be spelled literally, percent-encoded up to
+///   [`PERCENT_ESCAPE_LAYERS`] layers deep, as an HTML entity or as the full-width
+///   `\u{FF1A}` (see `carries_credential_colon`, which also names the two shapes
+///   that are not recognised).
 /// * **The userinfo is the one inside the authority** when the value has an
 ///   authority, and the last `@` otherwise, so neither a password containing
 ///   `/`, `?` or `#` nor an `@` inside a password survives unmasked.
@@ -466,9 +504,10 @@ fn mask_tail_runs(tail: &str) -> Option<String> {
 ///   (`https://user:pw@gw.lan/redirect?url=http://a:b@c`) masks both pairs and
 ///   stays legible: `https://***:***@gw.lan/redirect?url=http://***:***@c`. A run
 ///   with no colon is an address or a path, not a credential
-///   (`?to=nominal@host`), and is left as it stands. Scanning the tail is safe
-///   because a run starts after the innermost `scheme://` or after the last
-///   path/query separator, so the readable prefix is never swallowed.
+///   (`?to=nominal@host`), and is left as it stands. The run widens leftwards
+///   only while it has no colon, so the readable prefix survives wherever it
+///   honestly can and a password containing `/`, `?` or `#` no longer hides
+///   behind the separator.
 ///
 /// A scheme-less value is masked only when a colon marks real credentials, which
 /// leaves plain `user@host` (an email address) untouched, and a non-hierarchical
@@ -478,18 +517,22 @@ fn mask_tail_runs(tail: &str) -> Option<String> {
 /// name is literally `mailto`/`data`/`tel`/… and whose host carries no port is
 /// read as that URI and published.
 ///
-/// Two narrower exceptions, both pinned by tests: a *colon-free* authority-less
-/// userinfo is published (`https://///pw@host`, `https:///path@x`) — the extra
-/// slashes make it a user name with no password, and masking every path that
-/// contains an `@` would be the wrong default — and a *scheme-less* tail password
-/// that contains a path separator is not recognised, because its run begins after
-/// that separator. `None` when the value carries no credential-shaped userinfo.
+/// A *colon-free* authority-less userinfo is published
+/// (`https://///pw@host`, `https:///path@x`) — the extra slashes make it a user
+/// name with no password, and masking every path that contains an `@` would be
+/// the wrong default. A *scheme-qualified* bare user name is masked down to `***`
+/// even though it carries no password (`ssh://git@github.com/owner/repo`), because
+/// a scheme says the value has an authority and the name in it is replaced; the
+/// scheme-less `user@host` spelling is left alone, and that inconsistency is
+/// deliberate — a `git@` in a clone URL is not a credential, but telling the two
+/// apart without publishing one by mistake is not possible. `None` when the value
+/// carries no credential-shaped userinfo.
 fn redact_userinfo(value: &str) -> Option<String> {
     // A trailing space or newline is a copy/paste artefact, not part of a host.
     let value = value.trim();
     let (prefix, rest) = match value.split_once("://") {
-        Some((scheme, rest)) => (format!("{scheme}://"), rest),
-        None => (String::new(), value),
+        Some((scheme, rest)) if is_scheme(scheme) => (format!("{scheme}://"), rest),
+        _ => (String::new(), value),
     };
     // Where the authority ends: the first path/query/fragment separator.
     let sep = rest.find(['/', '?', '#']);
@@ -1875,12 +1918,102 @@ mod tests {
             Some("https://***@host.lan/api?x=a@b")
         );
         assert_eq!(redact_userinfo("http://@host.lan"), None);
-        // Documented residue: a *scheme-less* tail password containing a separator
-        // begins its run after that separator, so it is not recognised.
+        // A *scheme-less* tail credential whose user name contains a separator is
+        // masked too, because the run widens leftwards until it carries a colon.
         assert_eq!(
             redact_userinfo("https://nominal@host.lan/redir?to=a:b/c@d").as_deref(),
-            Some("https://***@host.lan/redir?to=a:b/c@d")
+            Some("https://***@host.lan/redir?***:***@d")
         );
+    }
+
+    /// A user name that itself contains an `@` must not hide the password. The
+    /// authority split takes the *last* `@` inside the authority, so everything
+    /// after the first one is a tail credential and is scanned as one. Round eight
+    /// published this whole family — 372 of its corpus's leak hits, closed at
+    /// `ae6efa2`, reopened by `c45f091` and still open in `099ed42`.
+    #[test]
+    fn an_at_sign_inside_the_user_name_does_not_publish_the_password() {
+        assert_eq!(
+            redact_userinfo("https://us@er:p/ss@host.lan").as_deref(),
+            Some("https://***@***:***@host.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://user@corp.lan:s3cr3t@nas.lan").as_deref(),
+            Some("https://***:***@nas.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://user@corp.lan:s3cr3t/x@nas.lan").as_deref(),
+            Some("https://***@***:***@nas.lan")
+        );
+        for value in ["https://us@er:p?ss@host.lan", "https://us@er:p#ss@host.lan"] {
+            let out = redact_userinfo(value).unwrap_or_else(|| value.to_string());
+            assert!(
+                !out.contains("p?ss") && !out.contains("p#ss"),
+                "password published: {out:?}"
+            );
+        }
+    }
+
+    /// `split_once("://")` finds the first `://` *anywhere*, so a value with no
+    /// scheme whose own text embeds a URL used to be read as though the text in
+    /// front of that `://` were the scheme: the credential in front of the first
+    /// `@` was never examined and was published. `is_scheme` now decides, and the
+    /// embedded URL is still masked as a tail run.
+    #[test]
+    fn a_scheme_less_value_carrying_a_url_still_masks_its_own_credential() {
+        assert_eq!(
+            redact_userinfo("admin:SECRET@host.lan/redir?url=http://a:b@c").as_deref(),
+            Some("***:***@host.lan/redir?url=http://***:***@c")
+        );
+        assert_eq!(
+            redact_userinfo("user:pw@host.lan?next=https://example.com").as_deref(),
+            Some("***:***@host.lan?next=https://example.com")
+        );
+        assert_eq!(
+            redact_userinfo("root:1234@nas.lan/path/https://y").as_deref(),
+            Some("***:***@nas.lan/path/https://y")
+        );
+    }
+
+    /// The run widens leftwards until it carries a colon, so a password that
+    /// contains a separator — or the literal `://` — no longer hides behind it.
+    #[test]
+    fn a_tail_password_that_contains_a_separator_is_masked() {
+        assert_eq!(
+            redact_userinfo("https://nominal@host.lan/redir?to=svc:pa/ss@inner.lan").as_deref(),
+            Some("https://***@host.lan/redir?***:***@inner.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://nominal@h/x://a:b://c@d").as_deref(),
+            Some("https://***@h/x://***:***@d")
+        );
+    }
+
+    /// The escape depth is bounded and the bound is documented, and the semicolon
+    /// is optional on the entity forms — a fourth-layer escape used to be published
+    /// while the doc promised "any depth".
+    #[test]
+    fn deeper_escape_layers_and_semicolon_less_entities_are_evidence() {
+        assert_eq!(
+            redact_userinfo("https:///user%2525253Apw@host.lan").as_deref(),
+            Some("https://***:***@host.lan")
+        );
+        assert_eq!(
+            redact_userinfo("user%2525253Apw@host.lan").as_deref(),
+            Some("***:***@host.lan")
+        );
+        for value in [
+            "https:///user&colonpw@host.lan",
+            "https:///user&#58pw@host.lan",
+            "https:///user&#X3Apw@host.lan",
+            "https:///user%26%23%35%38%3Bpw@host.lan",
+        ] {
+            assert_eq!(
+                redact_userinfo(value).as_deref(),
+                Some("https://***:***@host.lan"),
+                "{value}"
+            );
+        }
     }
 
     /// The colon separating a user name from a password is not always a literal
