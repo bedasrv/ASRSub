@@ -109,6 +109,30 @@ enum Cmd {
     ConfigShow,
 }
 
+/// Renders an error and its causes the way `Result`'s own printer would, with
+/// every cause masked. This is the single sink for error text: a cause can carry
+/// a configured value without the site that built it knowing — `reqwest` puts the
+/// request URL into its error, the providers loader puts the path into its
+/// "tried" list — so masking the rendered chain closes the class instead of
+/// chasing the sites. It is a function rather than a block inside `main` so a
+/// test can pin the layout and the mask together; a grep over the source cannot.
+fn masked_error_report(e: &anyhow::Error) -> String {
+    let mask = |t: String| crate::config::mask_for_log(&t).into_owned();
+    let mut out = format!("Error: {}", mask(e.to_string()));
+    let causes: Vec<String> = e.chain().skip(1).map(|c| mask(c.to_string())).collect();
+    match causes.len() {
+        0 => {}
+        1 => out.push_str(&format!("\n\nCaused by:\n    {}", causes[0])),
+        _ => {
+            out.push_str("\n\nCaused by:");
+            for (i, cause) in causes.iter().enumerate() {
+                out.push_str(&format!("\n    {i}: {cause}"));
+            }
+        }
+    }
+    out
+}
+
 fn main() {
     let cli = Cli::parse();
     init_tracing();
@@ -130,25 +154,7 @@ fn main() {
     let Err(e) = rt.block_on(async_main(cli)) else {
         return;
     };
-    // One sink for every error text. A cause chain can carry a configured value
-    // without the site that built it knowing: `reqwest` puts the request URL into
-    // its error, the providers loader puts the path into its "tried" list.
-    // Masking the rendered chain here closes the class instead of chasing the
-    // sites, and reproduces `Result`'s own layout (`Error:`, then `Caused by:`)
-    // so operators see the shape they expect.
-    let mask = |t: String| crate::config::mask_for_log(&t).into_owned();
-    eprintln!("Error: {}", mask(e.to_string()));
-    let causes: Vec<String> = e.chain().skip(1).map(|c| mask(c.to_string())).collect();
-    match causes.len() {
-        0 => {}
-        1 => eprintln!("\nCaused by:\n    {}", causes[0]),
-        _ => {
-            eprintln!("\nCaused by:");
-            for (i, cause) in causes.iter().enumerate() {
-                eprintln!("    {i}: {cause}");
-            }
-        }
-    }
+    eprint!("{}", masked_error_report(&e));
     std::process::exit(1);
 }
 
@@ -492,7 +498,10 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
         .open(&lock_path)?;
     let mut flock = fd_lock::RwLock::new(lock_file);
     let Ok(_guard) = flock.try_write() else {
-        anyhow::bail!("another asrsub daemon holds {lock_path:?}");
+        anyhow::bail!(
+            "another asrsub daemon holds {}",
+            crate::config::mask_for_log(&format!("{lock_path:?}"))
+        );
     };
     tracing::info!("asrsub daemon starting (remote-API, no local models)");
 
@@ -797,5 +806,25 @@ mod tests {
         assert!(claim_inflight(&set, "/m/b.mkv").await);
         set.lock().await.remove("/m/a.mkv");
         assert!(claim_inflight(&set, "/m/a.mkv").await);
+    }
+
+    #[test]
+    fn the_error_report_masks_every_cause_and_keeps_its_layout() {
+        let err = anyhow::anyhow!("load providers \"/tmp/user:PWZ9K@host/providers.json\"")
+            .context("another asrsub daemon holds \"/tmp/user:PWZ9K@host/st.daemon.lock\"");
+        let out = masked_error_report(&err);
+        // The secret is gone from every part of the report...
+        assert!(!out.contains("PWZ9K"), "{out}");
+        // ...the shape `Result` itself would have printed is kept...
+        assert!(out.starts_with("Error: "), "{out}");
+        assert!(out.contains("\nCaused by:\n    "), "{out}");
+        // ...and the mask is applied here rather than pinned by a source grep.
+        // The price, measured rather than assumed: masking the rendered chain
+        // replaces the prose with the mask too, because a scheme-less string
+        // holding an `@` reads as a single userinfo. Keeping a colon-free prefix
+        // was tried and reverted — it published fragments of the credential
+        // spelling (`a@b&#***:***@host.lan`) — so the whole message is the price.
+        assert!(out.contains("***"), "{out}");
+        assert!(!out.contains("daemon holds"), "{out}");
     }
 }

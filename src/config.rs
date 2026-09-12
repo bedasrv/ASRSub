@@ -436,7 +436,9 @@ fn entity_decode_once(s: &str) -> Option<String> {
         let tail = &rest[i..];
         let lower = tail.to_ascii_lowercase();
         // The semicolon is optional in the spelling a sloppy encoder emits, and
-        // HTML5 accepts the legacy `&amp` without one: `&amp#58` is then a colon
+        // A value can also carry the ampersand of an entity encoded — one extra
+        // encoder layer down, `&amp#58` is a colon — so the legacy semicolon-less
+        // `&amp` is read as the start of one
         // one layer down (`a&amp#58s3cr3t@host:6767/x@y` was published whole by
         // the unauthenticated `/config`). A legacy spelling is only read as one
         // when the next character could not continue a name, which is what the
@@ -675,9 +677,44 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
         }
         starts.sort_unstable_by(|a, b| b.cmp(a));
         starts.dedup();
-        let start = starts
-            .into_iter()
+        let chosen = starts
+            .iter()
+            .copied()
             .find(|&s| !head[s..].is_empty() && carries_credential_colon(&head[s..]));
+        // A colon written as an escape is a credential colon too, and the run
+        // chosen above can sit to its right: masking only `w:q` in
+        // `h&colonZk1P?w:q` published the password that `&colon` introduces,
+        // because the run scan looked for a literal `:`. So a token — the text
+        // between two of these boundaries — that carries a colon in another
+        // spelling pins the start of the mask itself. The leftmost such token
+        // wins, since the mask runs to the `@`: taking a later one left the
+        // earlier token's password in the output. A token whose colon is literal
+        // is not evidence (`https`, a port, `mailto:`), which keeps
+        // `https://gw.lan/redir?url=http://***:***@inner` legible.
+        let mut hidden_start: Option<usize> = None;
+        for (i, &b) in starts.iter().enumerate() {
+            let end = if i == 0 { head.len() } else { starts[i - 1] };
+            let tok = &head[b..end];
+            if !tok.contains(':') && carries_credential_colon(tok) {
+                hidden_start = Some(b); // descending boundaries: the last write is the leftmost
+            }
+        }
+        // A run whose only colon evidence is an encoded spelling can sit to the
+        // right of a run carrying a literal colon, and choosing it published the
+        // literal one: `https://user@host.lan/x/s3cr3t://&amp#58@y` left
+        // `s3cr3t` in the output because the `&amp#58` boundary won. Encoded (and
+        // legacy) evidence may justify a mask, but it must not *position* one to
+        // the right of a literal colon, so fall back to the next boundary to the
+        // left that carries a literal one. `starts` is descending, so the first
+        // match is the nearest one to the left.
+        let start = match hidden_start.or(chosen) {
+            Some(s) if !head[s..].contains(':') => starts
+                .iter()
+                .copied()
+                .find(|&s2| s2 < s && head[s2..].contains(':'))
+                .or(Some(s)),
+            other => other,
+        };
         match start {
             Some(s) => {
                 out.push_str(&head[..s]);
@@ -715,14 +752,17 @@ fn mask_tail_runs(tail: &str, floor: usize) -> Option<String> {
 ///   colon may be spelled literally, percent-encoded up to
 ///   [`PERCENT_ESCAPE_LAYERS`] layers deep, as an HTML entity or as the full-width
 ///   `\u{FF1A}`, one encoding layer deeper (`&amp;#58`), and with the legacy
-///   semicolon-less `&amp` that HTML5 accepts (`&amp#58` — the same credential one
+///   semicolon-less `&amp` (`&amp#58` — the same credential one encoder layer
 ///   layer down, and decoding only the terminated spelling published
 ///   `a&amp#58s3cr3t@host:6767/x@y` whole). A numeric entity counts whatever
 ///   follows it: `&#580` is U+0244 and `&#x3afb` a CJK ideograph, but guarding on
 ///   the next character published `svc&#x3aabc@inner`, so the credential-free
 ///   `&#580` is the price of fail-closed masking. The slot right after the `@` is
-///   part of the authority and is checked too, not merely excluded from the
-///   widening: brackets that do not hold an IPv6 literal (`[root:s3cr3t]`,
+///   part of the authority and is checked too — including when the `@` in front
+///   of it sits past a path separator or after a non-hierarchical scheme, so the
+///   decision is not discarded on those returns — not merely excluded from the
+///   widening: brackets that do not parse as an IPv6 literal with an optional
+///   port (`[root:s3cr3t]`, `[::1]x`),
 ///   `[svc:pw]`) and a colon there in any other spelling (`b&#58Zk1P`,
 ///   `b%3AZk3P`) are masked with the name. A *malformed port* keeps its colon
 ///   where a colon belongs, so `sonarr.lan:http` stays readable.
@@ -874,7 +914,13 @@ fn redact_userinfo(value: &str) -> Option<String> {
             .next()
             .unwrap_or("")
             .to_ascii_lowercase();
-        if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) && !host.contains(':') {
+        // `mailto:x@b&#58Zk1P` reads as a non-hierarchical scheme whose "host" is
+        // a credential, and the slot decision already knows that: returning here
+        // published it, which is what a doc sentence claiming the slot "is
+        // checked too" hid. A slot that is a credential is never published, even
+        // when the `@` in front of it is a path character by the split's reading.
+        if NON_HIERARCHICAL_SCHEMES.contains(&word.as_str()) && !host.contains(':') && !host_hidden
+        {
             return None;
         }
     } else if let Some(s) = sep {
@@ -885,7 +931,10 @@ fn redact_userinfo(value: &str) -> Option<String> {
         // `https:///root:1234@nas.lan` looks like: there the separator sits at
         // index 0, so the empty candidate carried no colon and the value was
         // published verbatim. Ambiguity is resolved by masking.
-        if s < at && !carries_credential_colon(&rest[..s]) && !carries_credential_colon(&rest[..at])
+        if s < at
+            && !carries_credential_colon(&rest[..s])
+            && !carries_credential_colon(&rest[..at])
+            && !host_hidden
         {
             return None;
         }
@@ -1978,6 +2027,48 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_colon_does_not_narrow_the_run_past_a_literal_password() {
+        // The `&amp#58` boundary sits to the right of `s3cr3t:`, and letting it
+        // position the mask published the literal-colon password to its left.
+        let out = redact_userinfo("https://user@host.lan/x/s3cr3t://&amp#58@y")
+            .expect("the credential pair must be masked");
+        assert!(!out.contains("s3cr3t"), "{out}");
+        assert_eq!(out, "https://***@host.lan/x/***:***@y");
+        let out = redact_userinfo("a@b/hunter2://&amp#58@y").expect("masked");
+        assert!(!out.contains("hunter2"), "{out}");
+        // Encoded evidence on its own still justifies a mask: nothing here is
+        // published just because no literal colon follows the boundary.
+        let out = redact_userinfo("nominal@host/url=&amp#58pw@inner").expect("masked");
+        assert!(!out.contains("pw"), "{out}");
+    }
+
+    #[test]
+    fn a_credential_in_the_host_slot_is_masked_past_a_separator_too() {
+        // The slot decision is computed before these returns, so discarding it
+        // published the credential the rule had just identified.
+        for value in [
+            "http://host.lan/a@[root:s3cr3t]",
+            "https://plex.lan/dav@svc%3Apw",
+            "mailto:x@b&#58Zk1P",
+            "http://gw.lan/redir@b&#58Zk1P",
+        ] {
+            let out = redact_userinfo(value);
+            for token in ["root:s3cr3t", "svc%3Apw", "Zk1P"] {
+                assert!(
+                    !out.clone().unwrap_or_default().contains(token),
+                    "{value} -> {out:?} published {token}"
+                );
+            }
+            assert!(out.is_some(), "{value} still published verbatim");
+        }
+        // The credential-free spellings these returns exist for are untouched.
+        assert_eq!(redact_userinfo("mailto:admin@example.com"), None);
+        assert_eq!(redact_userinfo("https://bazarr.lan/api?x=a@b"), None);
+        assert_eq!(redact_userinfo("file:///mnt/nas/a@b.mkv"), None);
+        assert_eq!(redact_userinfo("urn:isbn:1234@x"), None);
+    }
+
+    #[test]
     fn url_credentials_are_stripped_from_config_output() {
         assert_eq!(
             redact_userinfo("https://user:pw@bazarr.lan:6767/api").as_deref(),
@@ -2423,9 +2514,11 @@ mod tests {
 
     #[test]
     fn a_credential_without_a_host_after_it_is_not_a_pair() {
-        // The slot after the `@` is part of the authority, so an escaped colon
-        // there is a credential written where a host belongs (`b&#58Zk1P` reads as
-        // `b:Zk1P`) and is masked with the name instead of being published.
+        // Pins a deliberate trade-off rather than this commit's fix: it passes
+        // against the parent too. The slot after the `@` is part of the
+        // authority, so an escaped colon there is a credential written where a
+        // host belongs (`b&#58Zk1P` reads as `b:Zk1P`) and is masked with the
+        // name instead of being published.
         assert_eq!(redact_userinfo("a@b&#58Zk1P").as_deref(), Some("a@***:***"));
         // With no `@` at all there is nothing to attach a credential to: the scan
         // needs one.
@@ -2452,6 +2545,43 @@ mod tests {
         // The legacy spelling is only read as an entity when the next character
         // could not continue a name, so a `&amps` in prose is not rewritten.
         assert_eq!(redact_userinfo("https://bazarr.lan/a?x=1&ampy@b"), None);
+    }
+
+    #[test]
+    fn a_hidden_colon_in_a_later_segment_hides_its_password() {
+        // The fuzzer's F9b family: the credential colon is written as `&colon`
+        // (semicolon-less) in a segment that is neither the host slot nor a
+        // literal-colon run, so the slot rule and the run scan both stepped over
+        // it. Every one of these published a password from `/config`.
+        for leak in [
+            "user:Zk1P@x&colonZk1P?y&#58z@h",
+            "user:Zk1P@a&colonZk1P?x%3Ay@h",
+            "user:Zk1P@x&colonZk1P?y&#58z@h&colonZk1P?w:q@v",
+            "user:Zk1P@&colon;&colonZk1P&://&#58Zk1P?x@h",
+            "user:Zk1P@a&colonZk1P&://b&#58Zk1P?c@d",
+            "user:Zk1P@a&#58Zk1P?x:y@h",
+            "user:Zk1P@b&#58Zk1P?c%3Ad@e",
+        ] {
+            let got = redact_userinfo(leak);
+            let shown = got.clone().unwrap_or_else(|| leak.to_string());
+            assert!(
+                !shown.contains("Zk1P"),
+                "{leak} -> {shown} still publishes the password"
+            );
+            assert!(got.is_some(), "{leak} was published verbatim");
+        }
+        // The masked span is the same one the literal-colon rule already chose
+        // for this shape, so the anchor is legibility, not the fix: a
+        // credential-free redirect is untouched.
+        assert_eq!(
+            redact_userinfo("https://gw.lan/redir?url=svc&colonpw@inner.lan").as_deref(),
+            Some("https://***:***@inner.lan")
+        );
+        assert_eq!(
+            redact_userinfo("https://gw.lan/redirect?url=http://nominal.lan/x"),
+            None
+        );
+        assert_eq!(redact_userinfo("user@sonarr.lan"), None);
     }
 
     #[test]

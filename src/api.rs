@@ -294,7 +294,12 @@ pub(crate) fn readiness(cfg: &Config, counts: ProviderCounts) -> (bool, Value) {
                 },
                 "providers": {"ok": providers_ok, "llm": counts.llm, "whisper": counts.whisper,
                               "llm_keyed": counts.llm_keyed, "whisper_keyed": counts.whisper_keyed},
-                "state_dir": {"ok": state_ok, "path": state_dir},
+                // Masked for the same reason as `media_root.path`: answered
+                // without authentication, and STATE_FILE is operator input.
+                "state_dir": {
+                    "ok": state_ok,
+                    "path": crate::config::mask_for_log(&state_dir),
+                },
             },
             "integrations": {
                 "sonarr": !cfg.sonarr_url.is_empty(),
@@ -902,6 +907,43 @@ mod tests {
             .filter(|n| n.starts_with(".asrsub-ready-probe"))
             .collect();
         assert!(leftovers.is_empty(), "probe left artifacts: {leftovers:?}");
+    }
+
+    #[test]
+    fn readiness_masks_the_paths_it_reports() {
+        // Both reported paths are operator input on an endpoint answered without
+        // authentication, so a credential-shaped value must not ride out. Executed
+        // rather than grepped: a source grep passes on a masker that returns its
+        // argument unchanged, which is how the CLI chain shipped with only a grep
+        // pinning it. No process env is touched here — a sibling test mutates the
+        // same keys without `ENV_LOCK` and Rust runs tests in parallel.
+        let dir = tempfile::tempdir().unwrap();
+        let media_dir = dir.path().join("media");
+        std::fs::create_dir_all(&media_dir).unwrap();
+        std::fs::write(media_dir.join("ep.mkv"), b"x").unwrap();
+        let state_dir = dir.path().join("svc:pw@sonarr.lan");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let mut cfg = crate::config::Config::load().expect("config loads");
+        cfg.nas_media_prefix = "https://svc:PWZ9K@nas.lan/x".to_string();
+        cfg.state_file = state_dir.join("st.jsonl");
+
+        let counts = ProviderCounts {
+            llm: 1,
+            whisper: 1,
+            llm_keyed: 1,
+            whisper_keyed: 1,
+        };
+        let (_, body) = readiness(&cfg, counts);
+        let text = body.to_string();
+        for token in ["PWZ9K", "pw@sonarr"] {
+            assert!(!text.contains(token), "{token} survived in {text}");
+        }
+        assert!(text.contains("***"), "{text}");
+        // The readable host survives: masking the whole path would hide which
+        // directory was probed, which is the diagnosis this endpoint exists for.
+        assert!(text.contains("nas.lan"), "{text}");
+        assert!(text.contains("sonarr.lan"), "{text}");
     }
 
     #[test]
