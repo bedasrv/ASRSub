@@ -299,7 +299,7 @@ def main(argv=None):
     # 118-row file became a 2-row all-refused one). Refuse BEFORE spending a
     # request; `--force` (or a different `--out`) is the deliberate override.
     out_path = args.out or "wire_langs-%s.csv" % datetime.now(timezone.utc).strftime("%Y%m%d")
-    if not args.force and os.path.exists(out_path):
+    if not args.force and os.path.lexists(out_path):
         print(
             "refusing to overwrite %s: the file already exists, and it may be stored "
             "evidence of an earlier measurement. Pass --force to overwrite it, or "

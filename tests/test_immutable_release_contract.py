@@ -758,6 +758,60 @@ class TestProbeWireLangsKeepsItsEvidence(unittest.TestCase):
         self.assertEqual(r.returncode, 0, msg=r.stdout + r.stderr)
         self.assertFalse(self.out.exists(), msg="--dry-run must not create the CSV")
 
+    def test_dangling_symlink_default_output_is_refused_before_any_request(self):
+        # A dangling symlink reads as missing to os.path.exists, so the
+        # no-force guard must treat it as existing (lexists): the run is
+        # refused before any request, the link stays a link, and following
+        # it must not create its target.
+        import datetime as _datetime
+
+        scratch = tempfile.mkdtemp(prefix="asrsub-probe-dangling-")
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        dummy_key = "dummy-probe-key-no-secret"
+        providers = Path(scratch) / "providers.json"
+        providers.write_text(
+            json.dumps(
+                {
+                    "whisper_stt": {
+                        "endpoint": "http://127.0.0.1:1/audio/transcriptions",
+                        "model": "stub",
+                        "api_key": dummy_key,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        default_name = "wire_langs-%s.csv" % _datetime.datetime.now(
+            _datetime.timezone.utc
+        ).strftime("%Y%m%d")
+        link = Path(scratch) / default_name
+        target = Path(scratch) / "dangling-target.csv"
+        self.assertFalse(os.path.lexists(target), msg="target fixture must start missing")
+        os.symlink("dangling-target.csv", link)
+        self.assertTrue(os.path.islink(link), msg="fixture must be a symlink")
+        self.assertTrue(os.path.lexists(link), msg="fixture must lexists")
+        self.assertFalse(os.path.exists(link), msg="fixture must dangle")
+        r = subprocess.run(
+            [sys.executable, str(self.probe), "--only", "en",
+             "--providers", str(providers)],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        text = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, msg=text)
+        self.assertIn(default_name, text, msg=text)
+        self.assertIn("already exists", text, msg=text)
+        self.assertIn("--force", text, msg=text)
+        self.assertIn("--out", text, msg=text)
+        self.assertNotIn("http=", text, msg="refusal must precede any request")
+        self.assertNotIn(dummy_key, text, msg="no credentials in output")
+        self.assertTrue(os.path.islink(link), msg="the symlink must remain a symlink")
+        self.assertEqual(os.readlink(link), "dangling-target.csv")
+        self.assertFalse(target.exists(), msg="following the link must not create its target")
+        self.assertFalse(os.path.lexists(target), msg="following the link must not create its target")
+
     def test_the_committed_csv_is_still_the_measured_evidence(self):
         # The committed file itself is not touched by this work: 100 accepted
         # candidates + 4 unreachable spellings + 14 refused controls.
