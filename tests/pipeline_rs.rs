@@ -730,7 +730,30 @@ fn a_different_languages_name_still_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
 
-    // (1) one request: pin `en`, provider answers `tibetan` (= `bo`).
+    // (1) one request: pin `en`, provider answers `es`.
+    let (out, stub, srt) = transcribe_run(
+        root,
+        "sf-same-initial",
+        &one_track("eng"),
+        "40.0",
+        "200000",
+        vec![Some("es")],
+        &["--lang", "id"],
+    );
+    assert!(
+        !out.status.success(),
+        "a same-initial contradiction must fail the run"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("pinned en, reported es"), "stderr: {err}");
+    assert!(
+        !srt.exists(),
+        "no artifact may be written: {}",
+        srt.display()
+    );
+    assert_eq!(stub.languages(), vec![Some("en".to_string())]);
+
+    // (2) one request: pin `en`, provider answers `tibetan` (= `bo`).
     let (out, stub, srt) = transcribe_run(
         root,
         "sf-other-name",
@@ -753,7 +776,7 @@ fn a_different_languages_name_still_fails_closed() {
     );
     assert_eq!(stub.languages(), vec![Some("en".to_string())]);
 
-    // (2) the piece path: every piece carries `cy` and every one is answered
+    // (3) the piece path: every piece carries `cy` and every one is answered
     // with `lingala` (= `ln`). The request count is not asserted here: when the
     // first contradiction aborts the join, the remaining in-flight requests may
     // be dropped before the stub records them, so only "everything sent carried
