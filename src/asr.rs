@@ -26,28 +26,40 @@ pub struct AudioStream {
 }
 
 /// Chosen source track. `asr_lang` is that track's *real* normalized tag,
-/// or `None` when the tag is missing/unusable — never a fabricated code.
+/// or `None` when the tag is missing or names no language — never a
+/// fabricated code.
 #[derive(Debug, Clone)]
 pub struct AudioChoice {
     pub stream_index: u32,
-    /// Pinned source language; `None` means the tag is unknown (absent or
-    /// unusable: `und`, `unknown`, `""`) and the request must omit
-    /// `language` (detection).
+    /// Carried source language; `None` means the tag names no language
+    /// (`und`, `unknown`, `""`) and the request must omit `language`
+    /// (detection). A carried code the endpoint rejects is also never sent:
+    /// see [`AudioChoice::wire_pin`].
     pub asr_lang: Option<String>,
     /// Known-tag answer. For a detection run (`asr_lang == None`) this is
-    /// provisional (`true`); the caller recomputes it from the detected code.
+    /// provisional (`true`); the caller recomputes it from the effective code.
     pub needs_translate: bool,
 }
 
 impl AudioChoice {
-    /// True when the tag was missing/unusable (the only way `asr_lang` is
-    /// `None`): the ASR request must omit `language` on its first request
-    /// and take the code from the response.
-    pub fn detects_language(&self) -> bool {
-        self.asr_lang.is_none()
+    /// The `language` field this choice's requests actually carry: the tag's
+    /// code only when the endpoint is measured to accept it (`lang::wire_accepts`).
+    /// `None` means every request detects — the tag is absent, unusable, or a
+    /// code the endpoint rejects — so no pin is ever asserted and the source
+    /// language comes from the response.
+    ///
+    /// This is also the guard's condition (`transcribe_pieces`): only a
+    /// request that carried a pin can be contradicted by its response. It
+    /// replaced `detects_language()`, which asked *how the choice arose*
+    /// (tag present or not) while the request builder silently dropped the
+    /// tag — so the guard enforced a code the wire never saw (round-3 HIGH).
+    pub fn wire_pin(&self) -> Option<&str> {
+        self.asr_lang
+            .as_deref()
+            .filter(|l| crate::lang::wire_accepts(l))
     }
 
-    /// Stable cache key before the effective language is known: the pinned
+    /// Stable cache key before the effective language is known: the carried
     /// tag, or the chosen stream for a detection run (so two targets that
     /// share one untagged track still pay for one transcription).
     pub fn cache_key(&self) -> String {
@@ -154,26 +166,27 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
 /// 2. else a track matching the media's **original language**, when known
 ///    and different from the target;
 /// 3. else a `ja`-tagged track;
-/// 4. else the **earlier** of the first non-commentary track whose tag is
-///    absent or unusable (detection) and the first non-commentary track
-///    tagged with a usable `en`. In a dual-audio release the untagged track
-///    is the original and must beat the dub — but only when it actually
-///    comes first: a mux whose tagged `en` track is stream 0 must keep
+/// 4. else the **earlier** of the first non-commentary track whose tag names
+///    no language (detection) and the first non-commentary track tagged with
+///    a usable `en`. In a dual-audio release the untagged track is the
+///    original and must beat the dub — but only when it actually comes
+///    first: a mux whose tagged `en` track is stream 0 must keep
 ///    transcribing that track, so `[und(0), eng(1)]` and `[eng(0), und(1)]`
 ///    both choose stream 0 (the first for detection, the second pinning
 ///    `en`). Both candidates compete by physical stream index, not by rule
 ///    order;
 /// 5. else the first non-commentary track; else `streams[0]`.
 ///
-/// The tag only chooses the track: the language sent to Whisper is that
-/// tag's real, **pinnable** code (see `lang::is_usable_code`), or nothing
-/// (detection) when the tag is absent or unusable (`und`, `unknown`,
-/// `englishus`, `""`, and any code the provider rejects). The old
-/// implementation forced `ja` for any other tag, so a `fre` track was
-/// transcribed as Japanese and produced a fabricated translation (the
-/// defect this fixes); pinning a present-but-unusable tag (`und`) made the
-/// provider reject the request outright. Commentary/description tracks are
-/// skipped whenever a non-commentary alternative exists.
+/// The tag only chooses the track: the carried language is that tag's real
+/// code whenever it names one (`lang::identity_accepts`), and that code is
+/// sent to Whisper only if the endpoint is measured to accept it
+/// (`lang::wire_accepts`) — otherwise the request detects (`und`, `unknown`,
+/// `englishus`, `""`, `ceb`, and every other code the endpoint rejects). The
+/// old implementation forced `ja` for any other tag, so a `fre` track was
+/// transcribed as Japanese and produced a fabricated translation (the defect
+/// this fixes); pinning a present-but-unusable tag (`und`) made the provider
+/// reject the request outright. Commentary/description tracks are skipped
+/// whenever a non-commentary alternative exists.
 pub fn choose_source(
     streams: &[AudioStream],
     target_lang: &str,
@@ -188,14 +201,17 @@ pub fn choose_source(
     let target = (!target.is_empty()).then_some(target);
     let original = original_lang.map(crate::lang::normalize_lang);
     let norm = |s: &AudioStream| s.language.as_deref().map(crate::lang::normalize_lang);
-    // Only a pinnable code identifies a track. `und`/`unknown`/`""` mean "no
-    // language", so they must never be compared as if they named one, and a
-    // code the provider rejects must not be pinned either.
-    let usable = |s: &AudioStream| norm(s).filter(|c| crate::lang::is_usable_code(c));
+    // Only a tag that NAMES a language identifies a track: `und`/`unknown`/`""`
+    // mean "no language", so they must never be compared as if they named one.
+    // This is the IDENTITY predicate, deliberately not the wire accept set: a
+    // tag naming a language the endpoint rejects (`ceb`, `jv`) still names the
+    // track, and `[eng(0), cy(1)]` targeting `cy` must pick stream 1 (round 3
+    // consulted the wire whitelist here and picked the English dub).
+    let named = |s: &AudioStream| norm(s).filter(|c| crate::lang::identity_accepts(c));
     let find = |want: &str| {
         streams
             .iter()
-            .find(|s| !is_commentary(s) && usable(s).as_deref() == Some(want))
+            .find(|s| !is_commentary(s) && named(s).as_deref() == Some(want))
     };
     let picked = target
         .as_deref()
@@ -208,20 +224,21 @@ pub fn choose_source(
         })
         .or_else(|| find("ja"))
         // Rule 4: one pass for both candidates, so the physically-earlier of
-        // "tag does not name a language" (the dual-audio original → detect)
-        // and "tagged a usable `en`" (the dub → pin) wins. Two separate
+        // "tag names no language" (the dual-audio original → detect) and
+        // "tagged a usable `en`" (the dub → pin) wins. Two separate
         // `or_else`s would let a later untagged track outrank an earlier
         // `en` one.
         .or_else(|| {
             streams.iter().find(|s| {
-                !is_commentary(s) && (usable(s).is_none() || usable(s).as_deref() == Some("en"))
+                !is_commentary(s) && (named(s).is_none() || named(s).as_deref() == Some("en"))
             })
         })
         .or_else(|| streams.iter().find(|s| !is_commentary(s)))
         .or_else(|| streams.first())?;
-    // Only a pinnable language code is pinned: anything else takes the
-    // detection path (no `language` field, code read from the response).
-    let asr_lang = usable(picked);
+    // The carried language is the tag's code when the tag names a language;
+    // whether that code may be SENT is `wire_pin`'s question, asked once at
+    // request time (`transcribe_episode`).
+    let asr_lang = named(picked);
     // Known tag: translate unless the source already is the target.
     // Unknown tag: decided from the detected language after transcription.
     let needs_translate = asr_lang
@@ -273,22 +290,33 @@ pub async fn extract_audio(media: &str, stream_index: u32, dest: &Path) -> Resul
     Ok(())
 }
 
+/// The `language` value a request will ACTUALLY carry: the carried code only
+/// when the endpoint is measured to accept it. One function, so the guard in
+/// `transcribe_pieces` compares a response against the value the form holds
+/// and not against a code the filter dropped (the round-3 HIGH: the guard was
+/// handed `yue` while the wire carried nothing, so a correct detection the
+/// guard itself had established aborted the episode).
+fn wire_lang(lang: Option<&str>) -> Option<String> {
+    lang.map(str::trim)
+        .filter(|l| crate::lang::wire_accepts(l))
+        .map(str::to_string)
+}
+
 /// Text fields for one Whisper request. `language` is omitted entirely when
-/// the tag is unknown/unusable (`None`), and a code the provider is not
-/// measured to accept is dropped here too: detection, never a fabricated or
-/// uncertainty code (`und`/`unknown`/`""`) on the wire — the provider
-/// answers those with HTTP 400, and an unlisted code must not be sent even
-/// if a caller hands one over. This filter is the last line of defence for
-/// every path that can carry a language (`choose_source`'s pinned tag, the
-/// code detected from a probe and reused for follow-up chunks, and a CLI
-/// caller).
+/// the tag names no language (`None`) and when the carried code is not in the
+/// measured accept set: detection, never a fabricated or uncertainty code
+/// (`und`/`unknown`/`""`) or a code the endpoint rejects — it answers those
+/// with HTTP 400, and an unaccepted code must not be sent even if a caller
+/// hands one over. This filter is the last line of defence for every path
+/// that can carry a language (`choose_source`'s carried tag, the code
+/// detected from a probe and reused for follow-up chunks, and a CLI caller).
 fn whisper_text_fields(model: &str, lang: Option<&str>) -> Vec<(&'static str, String)> {
     let mut fields = vec![
         ("model", model.to_string()),
         ("response_format", "verbose_json".to_string()),
     ];
-    if let Some(l) = lang.filter(|l| crate::lang::is_usable_code(l)) {
-        fields.push(("language", l.to_string()));
+    if let Some(l) = wire_lang(lang) {
+        fields.push(("language", l));
     }
     fields
 }
@@ -352,8 +380,9 @@ fn detected_lang(v: &serde_json::Value) -> Result<String> {
     Ok(code)
 }
 
-/// Effective source language for one transcription: a pinned tag is used
-/// as-is; an unforced (detection) response must carry a usable code.
+/// Effective source language for one transcription: the code the request
+/// actually sent ([`wire_lang`]) is used as-is; an unforced (detection)
+/// response must carry a usable code.
 fn effective_lang(pinned: Option<&str>, v: &serde_json::Value) -> Result<String> {
     match pinned {
         Some(l) => Ok(l.to_string()),
@@ -361,10 +390,17 @@ fn effective_lang(pinned: Option<&str>, v: &serde_json::Value) -> Result<String>
     }
 }
 
-/// Fail closed when a chunk reports a language other than the code we
-/// pinned. A forced run cannot self-verify (the provider echoes the field),
-/// so a contradiction means the transcript's source is unknown and the
-/// language must error rather than be committed.
+/// Fail closed when a chunk that CARRIED a pin reports a different language.
+///
+/// The condition is "did this request carry a pin", not "how did the choice
+/// arise" (round 3 turned the check on exactly when the pin had been inferred
+/// and off when it came from a tag — the inverse of what this guard is for,
+/// and the value it compared was the one the wire filter may have dropped).
+/// `pinned` must therefore be the value the request actually sent
+/// ([`wire_lang`]); a request that sent nothing asserted nothing, so a
+/// differing report is information, not a contradiction, and must not abort
+/// the episode. When a pin WAS sent, a contradiction means the transcript's
+/// source is unknown and the language must error rather than be committed.
 fn check_pinned_lang(pinned: &str, v: &serde_json::Value) -> Result<()> {
     if let Some(got) = v.get("language").and_then(|l| l.as_str()) {
         let got = crate::lang::normalize_lang(got);
@@ -439,9 +475,9 @@ async fn whisper_request(
     anyhow::bail!("all whisper endpoints failed; last: {last_err}")
 }
 
-/// Whole-file transcription (one request). A known tag pins the language;
-/// an unknown tag sends no `language` and takes the effective code from the
-/// response. Returns the cues plus that effective language.
+/// Whole-file transcription (one request). `lang` is the wire value the
+/// caller already gated (`wire_lang`): it pins the language when present; an
+/// unforced request takes the effective code from the response.
 async fn transcribe_file(
     pool: &ProviderPool,
     file: &Path,
@@ -547,6 +583,10 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
     }
     let _cleanup = TempDir(&base);
     let full = base.join("full.mp3");
+    // One value, computed once: the `language` field every request may carry.
+    // The tag's code only when the endpoint is measured to accept it;
+    // otherwise nothing is pinned and the code comes from the response.
+    let sent = wire_lang(choice.wire_pin());
     // Skip the full extract when the probe already proves chunking: the
     // extract would be transcoded and deleted without ever being read.
     let mut transcript = if !job.audio_bytes.is_some_and(|b| b > CHUNK_BYTES) {
@@ -556,13 +596,14 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
             .map(|m| m.len())
             .unwrap_or(0);
         if size <= CHUNK_BYTES {
-            transcribe_file(pool, &full, choice.asr_lang.as_deref()).await?
+            transcribe_file(pool, &full, sent.as_deref()).await?
         } else {
             transcribe_pieces(
                 pool,
                 &base,
                 media_path,
-                choice,
+                choice.stream_index,
+                sent.as_deref(),
                 job.duration_s.unwrap_or(3600.0),
                 job.fanout,
             )
@@ -573,7 +614,8 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
             pool,
             &base,
             media_path,
-            choice,
+            choice.stream_index,
+            sent.as_deref(),
             job.duration_s.unwrap_or(3600.0),
             job.fanout,
         )
@@ -585,14 +627,20 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
 }
 
 /// Split-by-duration piece transcription shared by both routing paths.
-/// A known tag pins every piece. An unknown tag transcribes the FIRST piece
-/// unforced, takes the detected code from its response, and pins the rest to
-/// that code — so a foreign-language file is never transcribed as Japanese.
+/// `pinned` is the wire value already gated by the caller: when it is `Some`
+/// every piece carries that `language`; when it is `None` the FIRST piece is
+/// transcribed unforced, the detected code from its response becomes the
+/// episode's source language, and the remaining pieces carry that code only
+/// if the endpoint accepts it — so a foreign-language file is never
+/// transcribed as Japanese, and a detected code the endpoint rejects is never
+/// asserted as a pin (round 3 asserted it, then aborted the episode when the
+/// forced response disagreed with a field that had never been sent).
 async fn transcribe_pieces(
     pool: &ProviderPool,
     base: &Path,
     media_path: &str,
-    choice: &AudioChoice,
+    stream_index: u32,
+    pinned: Option<&str>,
     dur: f64,
     fanout: usize,
 ) -> Result<Transcript> {
@@ -608,7 +656,7 @@ async fn transcribe_pieces(
         let len = dur / n as f64;
         let dest = base.join(format!("part{k:02}.mp3"));
         let media = media_path.to_string();
-        let idx = choice.stream_index;
+        let idx = stream_index;
         let split_sem = split_sem.clone();
         jobs.push(async move {
             let _p = split_sem.acquire_owned().await.expect("semaphore closed");
@@ -644,8 +692,8 @@ async fn transcribe_pieces(
         });
     }
     let parts: Vec<(PathBuf, u32)> = futures::future::try_join_all(jobs).await?;
-    let (lang, mut all, rest) = match choice.asr_lang.clone() {
-        Some(pinned) => (pinned, Vec::new(), parts.as_slice()),
+    let (lang, mut all, rest) = match pinned {
+        Some(p) => (p.to_string(), Vec::new(), parts.as_slice()),
         None => {
             // Detection: the first piece must be alone (its response is the
             // only place the language appears).
@@ -656,6 +704,12 @@ async fn transcribe_pieces(
             (detected, all, rest)
         }
     };
+    // The follow-up requests' `language` field: the same gate, applied to the
+    // code we now carry. A detected code the endpoint rejects (or a tag the
+    // caller's gate dropped) leaves every request unforced, and the guard
+    // below compares against exactly what each request sends — never against
+    // a code that only the artifact knows about.
+    let rest_pin = wire_lang(Some(&lang));
     // Bounded concurrent transcription of the remaining pieces, pinned to
     // the language we established.
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(fanout.max(1)));
@@ -663,14 +717,15 @@ async fn transcribe_pieces(
     for (dest, off) in rest {
         let pool = pool.clone();
         let sem = sem.clone();
-        let lang = lang.clone();
-        let verify = choice.detects_language();
+        let sent = rest_pin.clone();
         let off = *off;
         tjobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
-            let v = post_chunk(&pool, dest, Some(&lang)).await?;
-            if verify {
-                check_pinned_lang(&lang, &v)?;
+            let v = post_chunk(&pool, dest, sent.as_deref()).await?;
+            // Only a request that carried a pin can be contradicted by its
+            // response; one that sent nothing asserted nothing.
+            if let Some(pinned) = sent.as_deref() {
+                check_pinned_lang(pinned, &v)?;
             }
             Ok::<_, anyhow::Error>(cues_from_verbose(&v, off))
         });
@@ -771,7 +826,7 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
         assert!(c.asr_lang.is_none());
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
         // Provisional; the caller recomputes it from the detected code.
         assert!(c.needs_translate);
     }
@@ -827,7 +882,7 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
         assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
         assert!(c.needs_translate);
     }
 
@@ -838,33 +893,49 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
         assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
         let s = vec![track(0, Some(" "), None)];
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
     }
 
     #[test]
-    fn uncertainty_and_overlong_tags_detect_instead_of_pinning() {
+    fn tags_that_name_no_language_detect_instead_of_pinning() {
         // `UNKNOWN` (a real tag writers emit), `jajp`/`zhhant` (what an
-        // alnum collapse of `ja-JP`/`zh-Hant` yields), and every code the
-        // provider rejects are not pinnable.
+        // alnum collapse of a mangled region tag yields), and
+        // `underspecified` name no language at all: nothing is carried and
+        // the request detects.
         for tag in [
             "UNKNOWN",
             "jajp",
             "zhhant",
             "underspecified",
-            "fil",
-            "tgl",
-            "filipino",
-            "tam",
-            "xx",
+            "und",
+            "na",
+            "",
+            "zz-ZZ",
         ] {
             let s = vec![track(0, Some(tag), None)];
             let c = choose_source(&s, "id", None).unwrap();
-            assert_eq!(c.asr_lang, None, "{tag} must not be pinned");
-            assert!(c.detects_language(), "{tag} must take the detection path");
+            assert_eq!(c.asr_lang, None, "{tag} must not be carried");
+            assert!(c.wire_pin().is_none(), "{tag} must take the detection path");
+        }
+        // A tag that NAMES a language the endpoint rejects is carried (it
+        // identifies the track) but is never sent: the request detects even
+        // though a code was named.
+        for tag in ["tam", "xx", "ceb", "jv"] {
+            let s = vec![track(0, Some(tag), None)];
+            let c = choose_source(&s, "id", None).unwrap();
+            assert_eq!(c.asr_lang.as_deref(), Some(tag), "{tag} names a language");
+            assert!(c.wire_pin().is_none(), "{tag} must not be sent");
+        }
+        // The Tagalog/Filipino spellings remap to `tl`, which IS accepted, so
+        // they are pinned rather than dropped (fix 3).
+        for tag in ["fil", "tgl", "filipino", "tagalog"] {
+            let s = vec![track(0, Some(tag), None)];
+            let c = choose_source(&s, "id", None).unwrap();
+            assert_eq!(c.wire_pin(), Some("tl"), "{tag}");
         }
     }
 
@@ -902,7 +973,7 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0, "the untagged original must win");
         assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
         // Same choice for a `ja` target: the dub must not be translated back
         // into Japanese.
         let c = choose_source(&s, "ja", None).unwrap();
@@ -923,14 +994,14 @@ mod tests {
         assert_eq!(c.stream_index, 0, "the earlier tagged en track must win");
         assert_eq!(c.asr_lang.as_deref(), Some("en"));
         assert!(c.needs_translate);
-        assert!(!c.detects_language());
+        assert!(c.wire_pin().is_some());
         // The dual-audio shape keeps its answer: with the untagged original
         // first, the original still beats the dub.
         let s = vec![track(0, Some("und"), None), track(1, Some("eng"), None)];
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
         assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert!(c.wire_pin().is_none());
         // Position decides among the NON-commentary candidates: a tagged `en`
         // dub at stream 0 still wins over an unusable *commentary* track.
         let s = vec![
@@ -940,13 +1011,25 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
         assert_eq!(c.asr_lang.as_deref(), Some("en"));
-        // A rejected-but-present tag is an unusable tag for ranking: a
-        // `fil`-tagged first track is the original and takes detection.
-        let s = vec![track(0, Some("fil"), None), track(1, Some("eng"), None)];
+        // A tag that NAMES a language the endpoint rejects is not the
+        // untagged-original candidate: it identifies its own track, so the
+        // `en` track still wins rule 4 (both older revisions did the same).
+        let s = vec![track(0, Some("xx"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 1);
+        assert_eq!(c.asr_lang.as_deref(), Some("en"));
+        // A `fil`/`tgl` tag names `tl`, the code the endpoint accepts, so a
+        // lone one is identified AND pinned (fix 3); with an `en` alternative
+        // the `en` track still wins rule 4.
+        let s = vec![track(0, Some("fil"), None)];
         let c = choose_source(&s, "id", None).unwrap();
         assert_eq!(c.stream_index, 0);
-        assert_eq!(c.asr_lang, None);
-        assert!(c.detects_language());
+        assert_eq!(c.asr_lang.as_deref(), Some("tl"));
+        assert_eq!(c.wire_pin(), Some("tl"));
+        let s = vec![track(0, Some("tgl"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 1);
+        assert_eq!(c.asr_lang.as_deref(), Some("en"));
     }
 
     #[test]
@@ -1061,9 +1144,16 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         let fields = whisper_text_fields("m", c.asr_lang.as_deref());
         assert!(!fields.iter().any(|(k, _)| *k == "language"), "{fields:?}");
-        // Defense in depth: even a hand-passed unpinnable tag cannot produce
+        // A tag that names a language the endpoint rejects is carried but not
+        // sent (identity ≠ wire).
+        let s = vec![track(0, Some("xx"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.asr_lang.as_deref(), Some("xx"));
+        let fields = whisper_text_fields("m", c.asr_lang.as_deref());
+        assert!(!fields.iter().any(|(k, _)| *k == "language"), "{fields:?}");
+        // Defense in depth: even a hand-passed rejected code cannot produce
         // the field (the provider answers some with HTTP 400 outright, and
-        // the rest are codes this pipeline does not pin).
+        // the rest are codes this pipeline does not send).
         for bad in [
             "und",
             "UNKNOWN",
@@ -1075,9 +1165,16 @@ mod tests {
             "fil",
             "tgl",
             "filipino",
+            "tagalog",
             "tam",
             "xx",
-            "tl",
+            "ceb",
+            "eo",
+            "jv",
+            "zu",
+            "zz",
+            "na",
+            "zzzz",
         ] {
             let fields = whisper_text_fields("m", Some(bad));
             assert!(
@@ -1085,9 +1182,136 @@ mod tests {
                 "{bad}: {fields:?}"
             );
         }
-        // A real code is still sent verbatim.
-        let fields = whisper_text_fields("m", Some("fr"));
-        assert!(fields.iter().any(|(k, v)| *k == "language" && v == "fr"));
+        // The accept set — including the codes round 3 wrongly refused — is
+        // still sent verbatim.
+        for ok in ["fr", "yue", "tl", "cy", "haw", "ta", "sr"] {
+            let fields = whisper_text_fields("m", Some(ok));
+            assert!(
+                fields.iter().any(|(k, v)| *k == "language" && v == ok),
+                "{ok}: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wire_lang_is_the_value_the_request_carries() {
+        // One function decides the field, so the guard's `pinned` value is
+        // the string the form holds: asserted field by field, because the
+        // round-3 HIGH was exactly a mismatch between the two.
+        for code in ["fr", "yue", "tl", "cy", "haw", "ta", "ml", "sr", "hr"] {
+            let sent = wire_lang(Some(code)).expect("accepted code");
+            assert_eq!(sent, code);
+            let fields = whisper_text_fields("m", Some(code));
+            assert!(
+                fields.iter().any(|(k, v)| *k == "language" && v == &sent),
+                "{code}: {fields:?}"
+            );
+            // Idempotent: re-gating what was sent changes nothing.
+            assert_eq!(wire_lang(Some(&sent)), Some(code.to_string()));
+        }
+        for code in [
+            "fil",
+            "tgl",
+            "xx",
+            "tam",
+            "ceb",
+            "und",
+            "na",
+            "englishus",
+            "",
+        ] {
+            assert!(wire_lang(Some(code)).is_none(), "{code}");
+            let fields = whisper_text_fields("m", Some(code));
+            assert!(!fields.iter().any(|(k, _)| *k == "language"), "{code}");
+        }
+        assert!(wire_lang(None).is_none());
+        // Whitespace is trimmed before the gate, like every other lookup.
+        assert_eq!(wire_lang(Some(" zh ")).as_deref(), Some("zh"));
+    }
+
+    #[test]
+    fn only_a_request_that_carried_a_pin_can_be_contradicted() {
+        // The guard's condition is "did this request carry a pin", not "how
+        // did the choice arise". The round-3 HIGH: a detection run carried no
+        // field (the code was outside the old whitelist) while the guard
+        // compared the response against it, so the episode died with
+        // `pinned yue, reported en` and wrote no artifact.
+        let sent = wire_lang(Some("yue")).expect("yue is accepted");
+        assert!(check_pinned_lang(&sent, &serde_json::json!({"language": "yue"})).is_ok());
+        assert!(check_pinned_lang(&sent, &serde_json::json!({})).is_ok());
+        assert!(check_pinned_lang(&sent, &serde_json::json!({"language": "en"})).is_err());
+        // A detected code the endpoint rejects is never asserted, so a
+        // differing report cannot contradict anything: no guard runs.
+        assert!(wire_lang(Some("fil")).is_none());
+        assert!(wire_lang(Some("xx")).is_none());
+        // A tagged pin is guarded too now (round 3 only guarded the inferred
+        // one): `[eng(0)]` target `id` sends `en`, and a response saying
+        // otherwise is a contradiction.
+        let c = choose_source(&[track(0, Some("eng"), None)], "id", None).unwrap();
+        let sent = wire_lang(c.wire_pin()).expect("the en tag is accepted");
+        assert_eq!(sent, "en");
+        assert!(check_pinned_lang(&sent, &serde_json::json!({"language": "ja"})).is_err());
+    }
+
+    #[test]
+    fn identity_restores_targets_outside_the_old_whitelist() {
+        // Round 3 used the wire whitelist as the identity predicate, so
+        // `[eng(0), cy(1)]` targeting `cy` picked the English dub at stream 0
+        // and pinned `en` (transcribing the dub and translating into `cy`)
+        // where the parent picked stream 1 and pinned `cy`. Same for `tl`.
+        for (tag, target) in [("cy", "cy"), ("tl", "tl"), ("haw", "haw"), ("yue", "yue")] {
+            let s = vec![track(0, Some("eng"), None), track(1, Some(tag), None)];
+            let c = choose_source(&s, target, None).unwrap();
+            assert_eq!(c.stream_index, 1, "{tag}: the native track must win");
+            assert_eq!(c.asr_lang.as_deref(), Some(tag), "{tag}");
+            assert_eq!(c.wire_pin(), Some(tag), "{tag} is accepted");
+            assert!(
+                !c.needs_translate,
+                "{tag}: the source already is the target"
+            );
+            // Control: another target still takes the `en` track at stream 0.
+            let c = choose_source(&s, "id", None).unwrap();
+            assert_eq!(c.stream_index, 0, "{tag}: control target id");
+            assert_eq!(c.asr_lang.as_deref(), Some("en"));
+        }
+    }
+
+    #[test]
+    fn region_subtagged_track_is_identified_and_pinned() {
+        // The verifier's gap: a `pt-BR`-tagged single track collapsed to
+        // `ptbr`, so the track was chosen by the fallback rules and the
+        // language took detection. It is identified and pinned as `pt` now.
+        for (tag, want) in [
+            ("pt-BR", "pt"),
+            ("pt_BR", "pt"),
+            ("en-US", "en"),
+            ("ja-JP", "ja"),
+            ("fil-PH", "tl"),
+        ] {
+            let s = vec![track(0, Some(tag), None)];
+            let c = choose_source(&s, "id", None).unwrap();
+            assert_eq!(c.stream_index, 0, "{tag}");
+            assert_eq!(c.asr_lang.as_deref(), Some(want), "{tag}");
+            assert_eq!(c.wire_pin(), Some(want), "{tag}");
+            // And the target rule sees it too: a `pt-BR` tag matches a `pt`
+            // target without translating.
+            let c = choose_source(&s, want, None).unwrap();
+            assert!(!c.needs_translate, "{tag} vs target {want}");
+        }
+    }
+
+    #[test]
+    fn tagalog_tag_needs_no_translation_into_a_tl_target() {
+        // Fix 3's decision half: a `tgl`-tagged track normalizes to `tl`, so
+        // a `tl` target skips translation (round 3 translated an
+        // already-Filipino transcript because `tgl` was carried verbatim).
+        let s = vec![track(0, Some("tgl"), None)];
+        let c = choose_source(&s, "tl", None).unwrap();
+        assert_eq!(c.asr_lang.as_deref(), Some("tl"));
+        assert!(!c.needs_translate);
+        // A different target still translates it.
+        let c = choose_source(&s, "id", None).unwrap();
+        assert!(c.needs_translate);
     }
 
     #[test]
@@ -1226,6 +1450,19 @@ mod tests {
             !bodies[2].contains(header),
             "an unusable code must not be sent: {}",
             bodies[2]
+        );
+        // Wire-level round-4 proof: a code the endpoint IS measured to accept
+        // (`yue` — the round-3 HIGH's code) reaches the form verbatim, which
+        // is why the guard may compare against it.
+        whisper_request(&pool, b"yue".to_vec(), "part.mp3".into(), Some("yue"))
+            .await
+            .unwrap();
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 4);
+        assert!(
+            bodies[3].contains("name=\"language\"") && bodies[3].contains("yue"),
+            "an accepted code must be sent: {}",
+            bodies[3]
         );
     }
 }

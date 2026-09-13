@@ -199,16 +199,18 @@ impl Pipeline {
                             fresh
                         }
                     };
-                    // The effective language is the tag or the detected code
-                    // — never a fabricated one. It decides both the
-                    // translation step and the provenance row: a pinned tag
-                    // decided the comparison up front, an untagged track is
-                    // decided from the detected code.
+                    // The effective language is the code actually sent as a
+                    // pin, or the detected code — never a fabricated one. It
+                    // decides both the translation step and the provenance
+                    // row: the comparison uses the effective source, so a tag
+                    // the wire gate dropped (which took detection) is judged
+                    // by what was really transcribed, not by the tag's
+                    // provisional answer.
                     let src = transcript.lang.clone();
-                    let need = if choice.detects_language() {
-                        normalize_lang(&src) != normalize_lang(lang)
-                    } else {
+                    let need = if choice.wire_pin().is_some() {
                         choice.needs_translate
+                    } else {
+                        normalize_lang(&src) != normalize_lang(lang)
                     };
                     (
                         transcript.cues,

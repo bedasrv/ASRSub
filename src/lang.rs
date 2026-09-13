@@ -7,16 +7,19 @@
 //! codes pass through lowercased alphanumeric form so future languages keep
 //! working.
 //!
-//! Two boundaries live here because both decide whether a code is a
-//! language at all: [`normalize_lang`] turns a tag into its canonical code,
-//! and [`is_usable_code`] decides whether that code may be pinned as the
-//! transcription language. [`is_usable_code`] answers with
-//! [`PINNABLE_LANGS`], the set the live endpoint was measured to accept, so
-//! `und`/`unknown`/`""` and every code the provider rejects (`fil`, `tgl`,
-//! `tam`, …) take the detection path instead of failing the episode with
-//! HTTP 400. [`normalize_reported_lang`] is the looser reading applied to a
-//! code a provider *reports*: a detected code is metadata, never a wire
-//! value, so it must not be gated as one.
+//! Three boundaries live here because each answers a different question, and
+//! collapsing them into one predicate is what made round 3's fix break track
+//! choice and the mismatch guard:
+//! [`normalize_lang`] turns a tag into its canonical code (a `-XX`/`_XX`
+//! subtag is stripped when the head names a language), [`identity_accepts`]
+//! decides whether a code *names a language* at all (track identity — the
+//! round-2 shape rule), and [`wire_accepts`] decides whether the endpoint is
+//! measured to accept that code as Whisper's `language` form field. Only the
+//! last one may gate the wire: a track tagged `cy` or `haw` names a language
+//! and must still be identified even before the accept set is consulted.
+//! [`normalize_reported_lang`] is the looser reading applied to a code a
+//! provider *reports*: a detected code is metadata, never a wire value, so it
+//! must not be gated as one.
 
 /// ISO-639 aliases (2/B, 2/T, full names) → canonical application code.
 /// One table: `normalize_lang` is the single place a tag becomes a code, so
@@ -123,53 +126,121 @@ const LANG_ALIASES: &[(&str, &str)] = &[
     ("msa", "ms"),
     ("may", "ms"),
     ("malay", "ms"),
-    // `fil`/`tgl`/`filipino` are deliberately ABSENT: the provider answers
-    // `language=fil` and `language=tgl` with HTTP 400 (measured; see
-    // [`PINNABLE_LANGS`]), and an alias may only point at a pinnable code
-    // (`every_alias_maps_to_a_pinnable_code`). A Tagalog/Filipino track
-    // therefore takes the detection path, which stores what the provider
-    // reports (`tl`, via [`REPORTED_LANG_SPELLINGS`]) instead of pinning a
-    // code the endpoint rejects.
+    // Tagalog/Filipino tags point at `tl`, the code the endpoint is measured
+    // to accept; `fil`, `tgl` and `filipino` themselves answer HTTP 400
+    // (2026-09-13 probe, see `WIRE_ACCEPTED_LANGS`). They were deleted for
+    // one round so a *scratch, out-of-repo* fuzz oracle's hardcoded `fil`
+    // stayed meaningful, which moved every path that reads the reported code,
+    // not only pinning: `tgl` → `tgl` / display `Unknown` / `.tgl.hi.srt`
+    // where the round-2 tree said `tl` / `Filipino` / `.tl.hi.srt`, and a
+    // `fil` target translated an already-Filipino transcript. The oracle
+    // belongs in the harness, never in product behaviour: remap, don't delete.
+    ("fil", "tl"),
+    ("tgl", "tl"),
+    ("tagalog", "tl"),
+    ("filipino", "tl"),
 ];
 
-/// Canonical codes the pipeline may pin as Whisper's `language` field.
+/// Codes the endpoint is measured to ACCEPT as Whisper's `language` form
+/// field — the wire gate, and nothing else (track identity uses
+/// [`identity_accepts`]).
 ///
 /// Measured 2026-09-13 against the live Whisper endpoint the pipeline uses
 /// (`openai/whisper-large-v3-turbo` at
 /// `https://openrouter.ai/api/v1/audio/transcriptions`, the `whisper_stt`
-/// entry of the provider file), one multipart request per code with a 1 s
-/// silent MP3: every code below answered HTTP 200. `fil` and `tgl` answered
-/// HTTP 400 (hence no alias may normalize into them), and so did `xx`,
-/// `tam`, `tel`, `slo`, `cat` and `und`. 200 for codes the pipeline does not
-/// carry (e.g. `cy`, `yue`, `haw`) is NOT a licence to pin them: this list is
-/// exactly the canonical codes of [`LANG_ALIASES`], the languages the
-/// pipeline can route. Anything else takes the detection path — no
-/// `language` field on the wire — rather than risk a permanent 400.
-const PINNABLE_LANGS: &[&str] = &[
-    "ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fr", "he", "hi", "hu", "id", "it", "ja",
-    "ko", "ms", "nl", "no", "pl", "pt", "ro", "ru", "sv", "th", "tr", "uk", "vi", "zh",
+/// entry of the provider file), one multipart request per candidate with a 1 s
+/// silent MP3: 117 candidates (every alias canonical plus Whisper's other
+/// language codes, the codes round 3 measured as rejected, the N/A token `na`,
+/// and the BCP-47/name spellings `en-US`, `pt-BR`, `zh-Hant`, `tagalog`),
+/// 102 answered HTTP 200. The table below is those 200 responses that are
+/// 2–3 letter codes — every code the pipeline can actually send, because
+/// `normalize_lang` maps a BCP-47/name spelling to its canonical code first.
+/// The endpoint also accepts `en-US`/`pt-BR`/`zh-Hant`/`tagalog` (each
+/// resolving to `en`/`pt`/`zh`/`tl` in that probe's response), so they are
+/// documented here rather than listed as unreachable entries.
+///
+/// Measured HTTP 400, and therefore never sent: `ceb`, `eo`, `jv`, `zu`,
+/// `fil`, `tgl`, `filipino`, `tam`, `tel`, `slo`, `cat`, `und`, `na`, `zz`.
+/// `na` is also an uncertainty marker (`N/A`), so it can be neither pinned
+/// (`identity_accepts` refuses it) nor sent.
+const WIRE_ACCEPTED_LANGS: &[&str] = &[
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "ka", "kk", "km", "kn", "ko", "la", "lb",
+    "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn", "no",
+    "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq", "sr",
+    "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "yi",
+    "yo", "yue", "zh",
 ];
 
 /// Spellings a provider may *report* as its detected language which are not
 /// pinning aliases: full names and the family spellings used by
 /// whisper.cpp / faster-whisper-style servers (Whisper's own table says `tl`
-/// for Tagalog, which is also why the pin table has no Tagalog entry).
+/// for Tagalog, which is why the pin table carries that code too).
 ///
 /// Detection-only by construction: [`normalize_lang`] never consults this
-/// table, so no container tag can select a track or reach the wire through
-/// it. Their targets need not be pinnable — a detected code is metadata
-/// (stored as `source_lang`, compared for `needs_translate`) and an
-/// unpinnable one is dropped from follow-up chunks by `asr`'s filter.
+/// table, so no container tag can select a track or reach the wire through it.
+/// Each entry maps to a code the endpoint is measured to accept (so a reported
+/// name keeps the code pinnable for follow-up chunks), and every entry is a
+/// full name: a 2–3 letter response code is accepted as metadata by
+/// `asr::detected_lang` without this table. The table is CLOSED and curated —
+/// it covers exactly the names below. A responder whose spelling is not listed
+/// collapses to a long token and `detected_lang` rejects it, naming the value;
+/// extend this table when such a spelling shows up in a log, and never claim
+/// broader coverage than the list.
 const REPORTED_LANG_SPELLINGS: &[(&str, &str)] = &[
-    ("tamil", "ta"),
-    ("malayalam", "ml"),
     ("cantonese", "yue"),
-    ("mandarin", "zh"),
     ("castilian", "es"),
     ("farsi", "fa"),
     ("flemish", "nl"),
-    ("tagalog", "tl"),
-    ("filipino", "tl"),
+    ("malayalam", "ml"),
+    ("mandarin", "zh"),
+    ("tamil", "ta"),
+    ("amharic", "am"),
+    ("azerbaijani", "az"),
+    ("bengali", "bn"),
+    ("bosnian", "bs"),
+    ("bulgarian", "bg"),
+    ("burmese", "my"),
+    ("catalan", "ca"),
+    ("croatian", "hr"),
+    ("estonian", "et"),
+    ("galician", "gl"),
+    ("georgian", "ka"),
+    ("gujarati", "gu"),
+    ("hausa", "ha"),
+    ("icelandic", "is"),
+    ("kannada", "kn"),
+    ("kazakh", "kk"),
+    ("khmer", "km"),
+    ("lao", "lo"),
+    ("latvian", "lv"),
+    ("lithuanian", "lt"),
+    ("macedonian", "mk"),
+    ("malagasy", "mg"),
+    ("maori", "mi"),
+    ("marathi", "mr"),
+    ("mongolian", "mn"),
+    ("nepali", "ne"),
+    ("pashto", "ps"),
+    ("punjabi", "pa"),
+    ("serbian", "sr"),
+    ("sindhi", "sd"),
+    ("sinhala", "si"),
+    ("slovak", "sk"),
+    ("slovenian", "sl"),
+    ("somali", "so"),
+    ("sundanese", "su"),
+    ("swahili", "sw"),
+    ("tajik", "tg"),
+    ("tatar", "tt"),
+    ("telugu", "te"),
+    ("turkmen", "tk"),
+    ("urdu", "ur"),
+    ("uzbek", "uz"),
+    ("welsh", "cy"),
+    ("yoruba", "yo"),
+    ("armenian", "hy"),
 ];
 
 /// Drop a trailing bracket qualifier: `"English (US)"` → `"English"`,
@@ -209,22 +280,48 @@ fn collapse(value: &str) -> String {
         .collect()
 }
 
-/// Canonical code for a *pinning* spelling, if either language table knows it.
-fn known_code(token: &str) -> Option<String> {
+/// Canonical code for a *pinning* spelling: the alias table is the only table
+/// that may name a track or reach the wire.
+fn alias_code(token: &str) -> Option<&'static str> {
     LANG_ALIASES
         .iter()
-        .chain(REPORTED_LANG_SPELLINGS.iter())
         .find(|(alias, _)| *alias == token)
-        .map(|(_, code)| (*code).to_string())
+        .map(|(_, code)| *code)
+}
+
+/// Canonical code for a spelling either language table knows: the pin aliases
+/// and the detection-only reported names.
+fn known_code(token: &str) -> Option<&'static str> {
+    alias_code(token).or_else(|| {
+        REPORTED_LANG_SPELLINGS
+            .iter()
+            .find(|(alias, _)| *alias == token)
+            .map(|(_, code)| *code)
+    })
 }
 
 /// Normalize a language tag to the canonical application code.
+///
+/// A trailing bracket qualifier and a `-XX`/`_XX` region or script subtag are
+/// dropped when what precedes them names a language: `"English (US)"` → `en`,
+/// `"pt-BR"`/`"pt_BR"` → `pt`, `"fil-PH"` → `tl`. Without the subtag strip a
+/// region-subtagged container tag (`pt-BR` is the common one) was identified
+/// and pinned as the nonsense code `ptbr`, i.e. it took the detection path
+/// while its own language was sitting in the tag. A subtag on a head that
+/// names nothing is NOT dropped — `"zz-ZZ"` collapses to `zzzz` and
+/// `"und-US"` to `undus` — because accepting the head would invent a language
+/// out of a region (`zz-ZZ` used to become `zz`). Everything else falls back
+/// to the plain lower-case alphanumeric collapse.
 pub fn normalize_lang(value: &str) -> String {
-    let norm = collapse(strip_trailing_qualifier(value));
-    match LANG_ALIASES.iter().find(|(alias, _)| *alias == norm) {
-        Some((_, canonical)) => (*canonical).to_string(),
-        None => norm,
+    let base = strip_trailing_qualifier(value);
+    let norm = collapse(base);
+    if let Some(code) = alias_code(&norm) {
+        return code.to_string();
     }
+    if let Some(head) = subtag_head(base) {
+        return head;
+    }
+    norm
 }
 
 /// Normalize a language a provider *reported* in a `verbose_json` response.
@@ -241,25 +338,37 @@ pub fn normalize_reported_lang(value: &str) -> String {
     let base = strip_trailing_qualifier(value);
     let collapsed = collapse(base);
     if let Some(code) = known_code(&collapsed) {
-        return code;
+        return code.to_string();
     }
     if let Some(head) = subtag_head(base) {
-        return known_code(&head).unwrap_or(head);
+        return head;
     }
     collapsed
 }
 
-/// Head of a `language-REGION` / `language_SCRIPT` value (`"en-US"` →
-/// `"en"`), only when that head itself names a language: a spelling one of
-/// the tables knows, or a plain 2–3 letter token (the same shape the caller
-/// accepts as metadata). `"klingon-KLI"` has no such head, so it keeps the
-/// head-less collapse instead of being read as Klingon.
+/// Head of a `language-REGION` / `language_SCRIPT` value (`"en-US"` → `"en"`),
+/// only when that head itself names a language: a spelling one of the tables
+/// knows, or a code the endpoint is measured to accept (`"ta-IN"` → `"ta"`,
+/// `"yue-Hant"` → `"yue"`). A head that names nothing keeps the head-less
+/// collapse instead of being read as a language: `"zz-ZZ"` is not `zz`, and
+/// `"klingon-KLI"` is not Klingon.
 fn subtag_head(value: &str) -> Option<String> {
     let sep = value.find(['-', '_'])?;
     let head = collapse(&value[..sep]);
-    let names_a_language = known_code(&head).is_some()
-        || ((2..=3).contains(&head.len()) && head.chars().all(|c| c.is_ascii_lowercase()));
-    names_a_language.then_some(head)
+    names_a_known_language(&head).then(|| canonical_head(&head))
+}
+
+/// True when a token names a language at all: a spelling a table knows, or a
+/// code the endpoint is measured to accept. An uncertainty marker names none.
+fn names_a_known_language(token: &str) -> bool {
+    known_code(token).is_some() || wire_accepts(token)
+}
+
+/// Canonical spelling of a token that already names a language.
+fn canonical_head(token: &str) -> String {
+    known_code(token)
+        .map(str::to_string)
+        .unwrap_or_else(|| token.to_string())
 }
 
 /// A token that means "no language" rather than naming one: what muxers write
@@ -273,9 +382,10 @@ fn subtag_head(value: &str) -> Option<String> {
 /// `na` is listed too, and the ambiguity is inherent: it is ISO 639-1 for
 /// Nauru, but normalization makes it indistinguishable from `N/A`, and a
 /// responder that says `N/A` means "unknown". The honest reading is the
-/// uncertainty marker. With the pin whitelist in place the ambiguity is
-/// inert for container tags — a `na` tag is simply not pinnable, so it takes
-/// the detection path like any other code we do not pin.
+/// uncertainty marker. Both gates keep the ambiguity inert for container
+/// tags: `na` is not identity-accepted (a `na` tag can never be carried), and
+/// it is outside the measured wire accept set as well (`language=na` answered
+/// HTTP 400 on 2026-09-13), so it can neither be pinned nor sent.
 pub fn is_uncertainty_marker(code: &str) -> bool {
     let c = code.trim().to_ascii_lowercase();
     matches!(
@@ -284,14 +394,33 @@ pub fn is_uncertainty_marker(code: &str) -> bool {
     )
 }
 
-/// A code the pipeline may pin as the transcription language: a canonical
-/// code from [`PINNABLE_LANGS`], the set the provider was measured to
-/// accept. A failing code means *unknown* or *unpinnable*: the caller must
-/// take the detection path, because sending an unlisted code as Whisper's
-/// `language` form field is what made the provider answer HTTP 400 and left
-/// the episode failing on every pass (`und`, `fil`, `tgl`, `xx`, `tam`, …).
-pub fn is_usable_code(code: &str) -> bool {
-    PINNABLE_LANGS.contains(&code.trim())
+/// A token that NAMES a language the pipeline can carry: the round-2 shape
+/// rule — 2–3 lower-case ASCII letters that are not an uncertainty marker.
+///
+/// This is the TRACK-IDENTITY predicate. It decides whether a container tag
+/// may match a target/original/`en` track and be carried as that track's
+/// language, and it deliberately does not consult the wire accept set: a tag
+/// that names a language the endpoint rejects (`ceb`, `jv`) still identifies
+/// the track, and `[eng(0), cy(1)]` targeting `cy` must pick stream 1 (round 3
+/// asked the wire whitelist here, so it picked the English dub at stream 0 and
+/// pinned `en` while `cy` was measured HTTP 200). Whether the carried code is
+/// actually sent is [`wire_accepts`]'s question, asked once, later.
+pub fn identity_accepts(code: &str) -> bool {
+    let c = code.trim();
+    (2..=3).contains(&c.len())
+        && c.chars().all(|ch| ch.is_ascii_lowercase())
+        && !is_uncertainty_marker(c)
+}
+
+/// A code the endpoint is measured to ACCEPT as Whisper's `language` form
+/// field: the WIRE gate, and nothing else. This answers with
+/// [`WIRE_ACCEPTED_LANGS`]; a failing code must never be sent, because the
+/// provider answers an off-list code with HTTP 400 and the episode fails on
+/// every pass (`und`, `fil`, `tgl`, `xx`, `tam`, `ceb`, `jv`, …) — such a
+/// request takes the detection path instead. Track identity does NOT use this
+/// predicate: see [`identity_accepts`].
+pub fn wire_accepts(code: &str) -> bool {
+    WIRE_ACCEPTED_LANGS.contains(&code.trim())
 }
 
 /// The language name out of a Sonarr/Radarr `originalLanguage` value: the
@@ -469,12 +598,14 @@ mod tests {
         assert_eq!(normalize_lang("dut"), "nl");
         assert_eq!(normalize_lang("chi"), "zh");
         assert_eq!(normalize_lang("msa"), "ms");
-        // Tagalog/Filipino spellings are deliberately NOT aliased: their
-        // canonical would be `fil`, which the provider answers with HTTP 400.
-        // They collapse to themselves and take the detection path.
-        assert_eq!(normalize_lang("tgl"), "tgl");
-        assert_eq!(normalize_lang("fil"), "fil");
-        assert_eq!(normalize_lang("filipino"), "filipino");
+        // Tagalog/Filipino spellings remap to `tl`, the code the endpoint
+        // accepts (their old canonical `fil` answers HTTP 400, measured).
+        // Deleting them instead moved the reported value, the display name
+        // and the sidecar suffix — see `tagalog_spellings_report_tl`.
+        assert_eq!(normalize_lang("tgl"), "tl");
+        assert_eq!(normalize_lang("fil"), "tl");
+        assert_eq!(normalize_lang("filipino"), "tl");
+        assert_eq!(normalize_lang("tagalog"), "tl");
         // Sonarr/Radarr report the language as a full name.
         assert_eq!(normalize_lang("Japanese"), "ja");
         assert_eq!(normalize_lang("French"), "fr");
@@ -512,15 +643,15 @@ mod tests {
     }
 
     #[test]
-    fn every_alias_maps_to_a_pinnable_code() {
+    fn every_alias_maps_to_a_wire_accepted_code() {
         // The fix for the permanent-400 class: an alias may only normalize a
-        // tag INTO a code the provider is measured to accept. `tgl`/`fil`/
+        // tag INTO a code the endpoint is measured to accept. `fil`/`tgl`/
         // `filipino` used to point at `fil` (HTTP 400) and turned a legal tag
-        // into a permanently failing episode.
+        // into a permanently failing episode; they now point at `tl`.
         for (alias, canonical) in LANG_ALIASES {
             assert!(
-                is_usable_code(canonical),
-                "alias {alias:?} maps to unpinnable {canonical:?}"
+                wire_accepts(canonical),
+                "alias {alias:?} maps to unaccepted {canonical:?}"
             );
             assert_eq!(
                 normalize_lang(alias),
@@ -529,35 +660,70 @@ mod tests {
             );
         }
         for bad in ["fil", "tgl", "filipino"] {
-            assert_eq!(normalize_lang(bad), bad, "{bad} must not be aliased");
-            assert!(!is_usable_code(bad), "{bad} must not be pinnable");
+            assert_eq!(normalize_lang(bad), "tl", "{bad} must remap to tl");
+            assert!(!wire_accepts(bad), "{bad} must not be sent itself");
         }
     }
 
     #[test]
-    fn pinnable_langs_are_canonical_measured_codes() {
-        // The whitelist is exactly the alias table's canonical set: no code
-        // can be pinned that the pipeline cannot route (or vice versa).
+    fn every_alias_canonical_is_wire_accepted() {
+        // Fix 1's relationship, half one: nothing the pipeline can route may
+        // be rejected by the wire gate. Round 3 failed this for every code
+        // outside its 30 (`tl`, `cy`, `yue`, `haw`, …): the endpoint answers
+        // them 200 and the parent pinned them fine.
         let canonicals: std::collections::BTreeSet<&str> =
             LANG_ALIASES.iter().map(|(_, c)| *c).collect();
-        let pinned: std::collections::BTreeSet<&str> = PINNABLE_LANGS.iter().copied().collect();
-        assert_eq!(pinned, canonicals, "whitelist must equal the canonical set");
-        // Every entry is a plain 2-letter lower-case code: nothing shaped
-        // like a name or an uncertainty marker can be pinned.
-        for code in PINNABLE_LANGS {
-            assert_eq!(code.len(), 2, "{code} must be a 2-letter code");
-            assert!(code.chars().all(|c| c.is_ascii_lowercase()), "{code}");
-            assert!(!is_uncertainty_marker(code), "{code} is a marker");
+        for code in &canonicals {
+            assert!(
+                wire_accepts(code),
+                "alias canonical {code} must be accepted"
+            );
+        }
+        // The codes whose absence caused the round-3 HIGH are accepted now.
+        for code in ["tl", "cy", "yue", "haw", "ta", "ml", "sr", "hr"] {
+            assert!(wire_accepts(code), "{code} must be accepted");
         }
     }
 
     #[test]
-    fn usable_codes_are_the_measured_whitelist_only() {
-        for ok in ["en", "ja", "id", "fr", " zh "] {
-            assert!(is_usable_code(ok), "{ok} must be usable");
+    fn wire_accepts_implies_identity_accepts() {
+        // Fix 1's relationship, half two: every code the endpoint accepts is
+        // a code that names a language. Asserted, not assumed — a marker or a
+        // name-shaped token in the wire table would let a request assert
+        // something that is not a language. Also pins the shape of the
+        // measured table itself: 2–3 lower-case letters, no duplicates,
+        // sorted, so a careless edit is visible.
+        for code in WIRE_ACCEPTED_LANGS {
+            assert!(wire_accepts(code), "{code}");
+            assert!(identity_accepts(code), "{code} must name a language");
+            assert!(
+                (2..=3).contains(&code.len()) && code.chars().all(|c| c.is_ascii_lowercase()),
+                "{code} is not a 2-3 letter code"
+            );
+            assert!(!is_uncertainty_marker(code), "{code} is a marker");
+        }
+        let unique: std::collections::BTreeSet<&str> =
+            WIRE_ACCEPTED_LANGS.iter().copied().collect();
+        assert_eq!(unique.len(), WIRE_ACCEPTED_LANGS.len(), "duplicate entry");
+        let mut sorted = WIRE_ACCEPTED_LANGS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            WIRE_ACCEPTED_LANGS.to_vec(),
+            "keep the table sorted"
+        );
+    }
+
+    #[test]
+    fn identity_accepts_is_the_shape_rule() {
+        // Track identity is the round-2 shape rule, not the wire set: a tag
+        // naming a language the endpoint rejects still names the track.
+        for ok in [
+            "en", "ja", "id", "fr", "cy", "yue", "tl", "ta", "ceb", "xx", " zh ",
+        ] {
+            assert!(identity_accepts(ok), "{ok} names a language");
         }
         for bad in [
-            // Not a language at all.
             "",
             " ",
             "englishus",
@@ -578,22 +744,108 @@ mod tests {
             "na",
             "undefined",
             "auto",
-            // Measured HTTP 400 on the live endpoint.
+        ] {
+            assert!(!identity_accepts(bad), "{bad} must not name a language");
+        }
+    }
+
+    #[test]
+    fn wire_accepts_is_the_measured_set() {
+        // The measured 200-set: what the endpoint takes as `language`. The
+        // values below were probed one request per code on 2026-09-13.
+        for ok in [
+            "en", "ja", "id", "fr", " zh ", "cy", "yue", "haw", "ta", "ml", "tl", "sr", "hr", "ne",
+            "si", "km", "lo", "my", "bn", "ur", "sw",
+        ] {
+            assert!(wire_accepts(ok), "{ok} was measured accepted");
+        }
+        for bad in [
+            // Not a language at all.
+            "",
+            " ",
+            "englishus",
+            "EN",
+            "e",
+            // Uncertainty markers.
+            "und",
+            "mul",
+            "zxx",
+            "mis",
+            "unknown",
+            "none",
+            "na",
+            "undefined",
+            "auto",
+            // Measured HTTP 400 on the live endpoint (2026-09-13).
             "fil",
             "tgl",
+            "filipino",
+            "tagalog",
             "xx",
             "tam",
             "tel",
             "slo",
             "cat",
-            // Accepted by the provider but not languages this pipeline
-            // carries an alias for, so they are never pinned.
-            "cy",
-            "yue",
-            "haw",
-            "tl",
+            "ceb",
+            "eo",
+            "jv",
+            "zu",
+            "zz",
         ] {
-            assert!(!is_usable_code(bad), "{bad} must not be usable");
+            assert!(!wire_accepts(bad), "{bad} must not be sent");
+        }
+    }
+
+    #[test]
+    fn tagalog_spellings_report_tl() {
+        // Fix 3, measured: a `tgl`/`fil` tag must report `tl` and keep the
+        // display name and sidecar suffix consistent with `tagalog`/
+        // `filipino`. Round 3 produced `tgl` / display `Unknown` /
+        // `.tgl.hi.srt`; the round-2 tree produced `fil` / `Filipino` /
+        // `.fil.hi.srt`; both made a Tagalog transcript look like another
+        // language to the translation decision.
+        for tag in ["tgl", "fil", "tagalog", "filipino"] {
+            assert_eq!(normalize_lang(tag), "tl", "{tag}");
+            assert_eq!(display_name(tag), "Filipino", "{tag}");
+            assert_eq!(
+                canonical_target_sidecar("/m/ep", tag),
+                "/m/ep.tl.hi.srt",
+                "{tag}"
+            );
+        }
+        assert_eq!(
+            sidecar_paths("/m/ep", "tgl"),
+            vec![
+                "/m/ep.tl.srt",
+                "/m/ep.tl.hi.srt",
+                "/m/ep.tl.forced.srt",
+                "/m/ep.tl.hi.forced.srt",
+                "/m/ep.tl.forced.hi.srt",
+            ]
+        );
+    }
+
+    #[test]
+    fn region_subtags_collapse_on_a_known_head_only() {
+        // The PIN path strips a region/script subtag the same way the
+        // response path does: a `pt-BR`-tagged track is identified and pinned
+        // as `pt` (round 3 collapsed it to `ptbr`, so its own language took
+        // the detection path). The verifier's gap was exactly this case.
+        assert_eq!(normalize_lang("pt-BR"), "pt");
+        assert_eq!(normalize_lang("pt_BR"), "pt");
+        assert_eq!(normalize_lang("en-US"), "en");
+        assert_eq!(normalize_lang("ja-JP"), "ja");
+        assert_eq!(normalize_lang("zh-Hant"), "zh");
+        assert_eq!(normalize_lang("fil-PH"), "tl");
+        assert_eq!(normalize_lang("yue-Hant"), "yue");
+        // A subtag needs a KNOWN head: garbage with a region stays garbage
+        // instead of inventing a language out of the region.
+        assert_eq!(normalize_lang("zz-ZZ"), "zzzz");
+        assert_eq!(normalize_lang("und-US"), "undus");
+        assert_eq!(normalize_lang("klingon-KLI"), "klingonkli");
+        for bad in ["zzzz", "undus", "klingonkli", "ptbr"] {
+            assert!(!identity_accepts(bad), "{bad} must not name a language");
+            assert!(!wire_accepts(bad), "{bad} must not be sent");
         }
     }
 
@@ -626,15 +878,20 @@ mod tests {
     #[test]
     fn region_subtag_is_stripped_only_for_a_known_head() {
         // A subtag refines a language the head already names; a head that
-        // names nothing keeps the head-less collapse.
+        // names nothing keeps the head-less collapse. Round 3 accepted any
+        // 2–3 letter head, so a junk region invented a language (`zz-ZZ` →
+        // `zz`); the test now pins the tighter rule.
         assert_eq!(normalize_reported_lang("klingon-KLI"), "klingonkli");
         assert_eq!(normalize_reported_lang("-US"), "us");
-        // A plain 2–3 letter head counts as naming a language (the shape the
-        // caller accepts as metadata), so its subtag is dropped — including
-        // a head this pipeline does not pin.
+        assert_eq!(normalize_reported_lang("zz-ZZ"), "zzzz");
+        // A code the endpoint accepts names a language even when this
+        // pipeline's alias table has no entry for it.
         assert_eq!(normalize_reported_lang("ta-IN"), "ta");
         assert_eq!(normalize_reported_lang("tl-PH"), "tl");
-        assert_eq!(normalize_reported_lang("und-US"), "und");
+        assert_eq!(normalize_reported_lang("yue-Hant"), "yue");
+        // `und` is an uncertainty marker, not a language: its subtag is not
+        // stripped either (round 3 returned `und` here).
+        assert_eq!(normalize_reported_lang("und-US"), "undus");
     }
 
     #[test]
@@ -650,6 +907,9 @@ mod tests {
             assert_eq!(normalize_lang(name), *name, "{name} must stay unpinned");
             assert!((2..=3).contains(&code.len()));
             assert!(!is_uncertainty_marker(code));
+            // Every target is a code the endpoint accepts (measured), so a
+            // reported name keeps the code usable as a follow-up pin.
+            assert!(wire_accepts(code), "{name} -> {code} is not accepted");
             // Idempotent: a reported code re-normalizes to itself.
             assert_eq!(normalize_reported_lang(code), *code);
         }
@@ -720,6 +980,9 @@ mod tests {
         // The two long-standing names stay byte-identical.
         assert_eq!(display_name("en"), "English");
         assert_eq!(display_name("jpn"), "Japanese");
+        // Tagalog/Filipino spellings name themselves through `tl`.
+        assert_eq!(display_name("tgl"), "Filipino");
+        assert_eq!(display_name("fil"), "Filipino");
         assert_eq!(display_name("xx"), "Unknown");
     }
 

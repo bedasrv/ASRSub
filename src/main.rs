@@ -298,10 +298,16 @@ async fn async_main(cli: Cli) -> Result<()> {
 /// registry stayed labelled after the code the caller "pinned". The
 /// auto-pick path never needs this — it decides the language from the
 /// chosen track's own tag.
+///
+/// The value is normalized exactly like a track tag and exactly like a
+/// response code, so a natural BCP-47 input names its canonical code instead
+/// of failing on the collapsed spelling: `--lang en-US` is `en` (round 3
+/// hard-errored with `("enus")` while the same string in a response
+/// normalized to `en`).
 fn pinned_cli_lang(lang: &str) -> Result<String> {
     let code = lang::normalize_lang(lang);
     anyhow::ensure!(
-        lang::is_usable_code(&code),
+        lang::wire_accepts(&code),
         "--lang {lang:?} is not a language the provider accepts ({code:?}); \
          pass a pinnable code or drop --stream and let the track's tag decide"
     );
@@ -795,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_stream_rejects_an_unpinnable_lang() {
+    fn explicit_stream_rejects_an_unaccepted_lang() {
         // `--stream N --lang und` used to build a choice the wire filter then
         // emptied: the run detected a language while the sidecar and the
         // registry were named after the code the caller asked for. It must
@@ -803,7 +809,14 @@ mod tests {
         assert_eq!(pinned_cli_lang("ja").unwrap(), "ja");
         assert_eq!(pinned_cli_lang("JPN").unwrap(), "ja");
         assert_eq!(pinned_cli_lang("English (US)").unwrap(), "en");
-        for bad in ["und", "fil", "tgl", "xx", "unknown", "", "klingon"] {
+        // A natural BCP-47 input names its canonical code (round 3
+        // hard-errored on the collapsed `enus`).
+        assert_eq!(pinned_cli_lang("en-US").unwrap(), "en");
+        assert_eq!(pinned_cli_lang("pt-BR").unwrap(), "pt");
+        // The Tagalog/Filipino spellings pin the accepted `tl`.
+        assert_eq!(pinned_cli_lang("fil").unwrap(), "tl");
+        assert_eq!(pinned_cli_lang("tgl").unwrap(), "tl");
+        for bad in ["und", "xx", "ceb", "unknown", "", "klingon", "zz-ZZ"] {
             let err = pinned_cli_lang(bad).unwrap_err().to_string();
             assert!(err.contains("--lang"), "{bad}: {err}");
             assert!(err.contains("drop --stream"), "{bad}: {err}");
