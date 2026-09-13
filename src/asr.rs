@@ -408,8 +408,12 @@ fn effective_lang(pinned: Option<&str>, v: &serde_json::Value) -> Result<String>
 /// `Cantonese`/`pt-BR` to a request pinned `ta`/`cy`/`yue`/`pt` names the very
 /// language we pinned; judging it with `normalize_lang` made those 52
 /// legitimate spellings abort the episode, which a non-echoing fallback would
-/// turn into a permanent per-episode failure. A genuinely different language
-/// still aborts, with both codes named.
+/// turn into a permanent per-episode failure. The reported vocabulary is not a
+/// second list to maintain either: every code's own name comes out of the
+/// accept set itself (`tibetan` for `bo`, `javanese` for `jw`, `haitian creole`
+/// for `ht`), so a provider that answers the language's own name — the 22 names
+/// that used to fail an episode permanently — cannot abort. A genuinely
+/// different language still aborts, with both codes named.
 fn check_pinned_lang(pinned: &str, v: &serde_json::Value) -> Result<()> {
     if let Some(got) = v.get("language").and_then(|l| l.as_str()) {
         let got = crate::lang::normalize_reported_lang(got);
@@ -1604,6 +1608,46 @@ mod tests {
         // A response with no `language` field asserts nothing and never aborts.
         assert!(check_pinned_lang("ta", &serde_json::json!({})).is_ok());
         assert!(check_pinned_lang("ta", &serde_json::json!({ "language": "" })).is_ok());
+    }
+
+    #[test]
+    fn every_accept_set_member_survives_a_provider_answering_its_own_name() {
+        // Round 6, by construction: a provider that answers the pinned
+        // language's OWN name must not abort the episode. Table-driven over
+        // the whole accept set, so a code that is added without a readable
+        // name — the shape that made 22 codes abort permanently — fails here
+        // rather than in production. The names come from the accept table
+        // itself; `lang::tests::every_accepted_code_is_readable_by_its_own_name`
+        // pins that they resolve back to their own code.
+        for (code, name) in crate::lang::WIRE_ACCEPTED_LANGS {
+            assert!(crate::lang::wire_accepts(code), "{code} must be sendable");
+            assert!(
+                check_pinned_lang(code, &serde_json::json!({ "language": name })).is_ok(),
+                "pinned {code}, reported {name} must not abort"
+            );
+            // The same value in the shapes a server spells: capitalised and
+            // with the space removed, both of which the reported lookup folds.
+            let shouted = name.to_uppercase();
+            assert!(
+                check_pinned_lang(code, &serde_json::json!({ "language": shouted })).is_ok(),
+                "pinned {code}, reported {shouted} must not abort"
+            );
+        }
+        // The fix is not "accept everything": another language's name still
+        // fails closed and the message names both codes.
+        let err = check_pinned_lang("en", &serde_json::json!({ "language": "tibetan" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pinned en, reported bo"), "{err}");
+        let err = check_pinned_lang("jw", &serde_json::json!({ "language": "lingala" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pinned jw, reported ln"), "{err}");
+        // A spelling no table knows still aborts, naming the value.
+        let err = check_pinned_lang("en", &serde_json::json!({ "language": "klingon" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("klingon"), "{err}");
     }
 
     #[test]

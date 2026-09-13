@@ -23,6 +23,17 @@ before any pin decision is taken — so they must never appear in the committed
 set; their status is recorded so the table's documentation keeps matching
 reality. `UNPROBED_CONTROLS` are the other direction: spellings this pipeline
 normalizes away or refuses, probed in round 4 and never sent to the endpoint.
+Their check is **bidirectional**: a control is a deviation both when it IS in
+the committed set and when the endpoint answers it with HTTP 200 — a refused
+spelling is only evidence that the refusal is still needed while it is
+actually refused, and `jv` becoming accepted would silently invalidate the
+`jv` → `jw` remap's rationale.
+
+The accept set is read out of the `(code, name)` pairs of
+`WIRE_ACCEPTED_LANGS` — that table is the one definition of the wire codes and
+of Whisper's name for each (the reported-name path reads the same pairs) — so
+this script compares against the codes the code itself would send, never
+against a copy that can drift.
 
 Usage::
 
@@ -100,16 +111,26 @@ CSV_FIELDS = ("code", "http", "detected", "err", "role")
 
 
 def committed_set(repo_root):
-    """Read WIRE_ACCEPTED_LANGS out of src/lang.rs (the code is the oracle)."""
+    """Read WIRE_ACCEPTED_LANGS out of src/lang.rs (the code is the oracle).
+
+    The table lists `(code, name)` pairs — the code is the wire accept set, the
+    name is Whisper's own name for it — so the codes are the first element of
+    each pair. Parsing the second element too is deliberate: a pair damaged
+    such that a code loses its name is a defect this probe should not paper
+    over, so the match requires both strings.
+    """
     path = os.path.join(repo_root, "src", "lang.rs")
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
-    m = re.search(r"const WIRE_ACCEPTED_LANGS: &\[&str\] = &\[(.*?)\];", text, re.S)
+    m = re.search(
+        r"const WIRE_ACCEPTED_LANGS: &\[\(&str, &str\)\] = &\[(.*?)\n\];", text, re.S
+    )
     if not m:
         sys.exit("cannot find WIRE_ACCEPTED_LANGS in %s" % path)
-    codes = re.findall(r'"([a-z0-9]+)"', m.group(1))
-    if not codes:
+    pairs = re.findall(r'\(\s*"([a-z0-9]+)"\s*,\s*"([^"]+)"\s*\)', m.group(1))
+    if not pairs:
         sys.exit("WIRE_ACCEPTED_LANGS parsed empty from %s" % path)
+    codes = [code for code, _ in pairs]
     return set(codes), len(codes)
 
 
@@ -180,8 +201,28 @@ def recheck(csv_path, committed):
                 % (row["code"], row["http"], "in" if in_set else "outside")
             )
     for row in rows:
-        if row.get("role") != "candidate" and row["code"] in committed:
-            deviations.append("%s: a %s spelling is in the committed set" % (row["code"], row["role"]))
+        role = row.get("role")
+        if role == "candidate":
+            continue
+        if row["code"] in committed:
+            deviations.append(
+                "%s: a %s spelling is in the committed set" % (row["code"], role)
+            )
+        # Bidirectional: a refused control is only evidence while the endpoint
+        # actually refuses it. Recorded as HTTP 200, the refusal it documents
+        # (and any remap that relied on it) needs re-measuring.
+        if role == "control" and row["http"] == "200":
+            deviations.append(
+                "%s: a refused control answered HTTP 200 — the endpoint now accepts it; "
+                "re-measure the set and the remaps that keep it off the wire" % row["code"]
+            )
+        # Informational: an unreachable spelling is rewritten before the wire,
+        # so its raw status says nothing about what the pipeline sends.
+        if role == "unreachable" and row["http"] != "200":
+            print(
+                "note: unreachable spelling %s recorded HTTP %s (rewritten before the wire; "
+                "informational only)" % (row["code"], row["http"])
+            )
     missing = sorted(committed - accepted)
     print("csv=%s\ncandidates=%d\naccepted=%d\ncommitted=%d"
           % (csv_path, len(candidates), len(accepted), len(committed)))
@@ -262,6 +303,17 @@ def main(argv=None):
                 deviations.append("%s: %s spelling must never be in the committed set" % (code, role))
             if status != 200:
                 flag = "  (warning: %s spelling not accepted)" % role
+            # Bidirectional, the other half: a control that the endpoint now
+            # ACCEPTS is a deviation too, not a silent no-op. The refusal it
+            # documents (`jv` → `jw`, the Tagalog spellings → `tl`) is what
+            # keeps it off the wire, so a 200 means those remaps need
+            # re-measuring rather than assuming the answer is still 400.
+            if role == "control" and status == 200:
+                deviations.append(
+                    "%s: a refused control answered HTTP 200 — the endpoint now accepts it; "
+                    "re-measure the set and the remaps that keep it off the wire" % code
+                )
+                flag = "  (warning: refused control now accepted)"
             print("%-8s %s http=%s detected=%s%s" % (code, "--", status, detected, flag))
 
     with open(out_path, "w", newline="", encoding="utf-8") as fh:

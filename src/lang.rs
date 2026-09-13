@@ -149,9 +149,28 @@ const LANG_ALIASES: &[(&str, &str)] = &[
     ("jv", "jw"),
 ];
 
-/// Codes the endpoint is measured to ACCEPT as Whisper's `language` form
-/// field — the wire gate, and nothing else (track identity uses
-/// [`identity_accepts`]).
+/// The `language` values the endpoint is measured to ACCEPT, each paired with
+/// Whisper's own name for that code: `(code, name)`.
+///
+/// The **code** is the wire gate, and nothing else (track identity uses
+/// [`identity_accepts`]): a code outside this table must never be sent, because
+/// the provider answers an off-list code with HTTP 400 and the episode fails on
+/// every pass (`und`, `fil`, `tgl`, `xx`, `tam`, `ceb`, `jv`, …) — such a
+/// request takes the detection path instead.
+///
+/// The **name** is the single place these 100 names are written down, and the
+/// reported-value path reads them from here: a provider answering a language's
+/// OWN name names the language we pinned, so it must not abort the episode.
+/// 22 of these names (`tibetan` for `bo`, `haitian creole` for `ht`, …) were in
+/// neither [`LANG_ALIASES`] nor [`REPORTED_LANG_SPELLINGS`], so a provider that
+/// answered a language's own name failed a pinned episode permanently with
+/// `whisper language mismatch: pinned <code>, reported <name>`; deriving the
+/// accepted names from this one table makes that class impossible rather than
+/// enumerating it. [`REPORTED_LANG_SPELLINGS`] keeps only the curated extras
+/// Whisper's table does not use, and [`display_name`] names ~36 codes, so
+/// neither can be the source for all 100. Names are matched on the collapsed
+/// token like every other lookup, so the table may spell them the way Whisper
+/// does (`haitian creole`).
 ///
 /// Measured 2026-09-13 against the live Whisper endpoint the pipeline uses
 /// (`openai/whisper-large-v3-turbo` at
@@ -183,14 +202,107 @@ const LANG_ALIASES: &[(&str, &str)] = &[
 ///   (`jv` and the Tagalog spellings are remapped by [`LANG_ALIASES`]; `na`
 ///   is also an uncertainty marker — `identity_accepts` refuses it — so it
 ///   can be neither pinned nor sent).
-const WIRE_ACCEPTED_LANGS: &[&str] = &[
-    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
-    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
-    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la",
-    "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl",
-    "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so",
-    "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz",
-    "vi", "yi", "yo", "yue", "zh",
+pub(crate) const WIRE_ACCEPTED_LANGS: &[(&str, &str)] = &[
+    ("af", "afrikaans"),
+    ("am", "amharic"),
+    ("ar", "arabic"),
+    ("as", "assamese"),
+    ("az", "azerbaijani"),
+    ("ba", "bashkir"),
+    ("be", "belarusian"),
+    ("bg", "bulgarian"),
+    ("bn", "bengali"),
+    ("bo", "tibetan"),
+    ("br", "breton"),
+    ("bs", "bosnian"),
+    ("ca", "catalan"),
+    ("cs", "czech"),
+    ("cy", "welsh"),
+    ("da", "danish"),
+    ("de", "german"),
+    ("el", "greek"),
+    ("en", "english"),
+    ("es", "spanish"),
+    ("et", "estonian"),
+    ("eu", "basque"),
+    ("fa", "persian"),
+    ("fi", "finnish"),
+    ("fo", "faroese"),
+    ("fr", "french"),
+    ("gl", "galician"),
+    ("gu", "gujarati"),
+    ("ha", "hausa"),
+    ("haw", "hawaiian"),
+    ("he", "hebrew"),
+    ("hi", "hindi"),
+    ("hr", "croatian"),
+    ("ht", "haitian creole"),
+    ("hu", "hungarian"),
+    ("hy", "armenian"),
+    ("id", "indonesian"),
+    ("is", "icelandic"),
+    ("it", "italian"),
+    ("ja", "japanese"),
+    ("jw", "javanese"),
+    ("ka", "georgian"),
+    ("kk", "kazakh"),
+    ("km", "khmer"),
+    ("kn", "kannada"),
+    ("ko", "korean"),
+    ("la", "latin"),
+    ("lb", "luxembourgish"),
+    ("ln", "lingala"),
+    ("lo", "lao"),
+    ("lt", "lithuanian"),
+    ("lv", "latvian"),
+    ("mg", "malagasy"),
+    ("mi", "maori"),
+    ("mk", "macedonian"),
+    ("ml", "malayalam"),
+    ("mn", "mongolian"),
+    ("mr", "marathi"),
+    ("ms", "malay"),
+    ("mt", "maltese"),
+    ("my", "myanmar"),
+    ("ne", "nepali"),
+    ("nl", "dutch"),
+    ("nn", "nynorsk"),
+    ("no", "norwegian"),
+    ("oc", "occitan"),
+    ("pa", "punjabi"),
+    ("pl", "polish"),
+    ("ps", "pashto"),
+    ("pt", "portuguese"),
+    ("ro", "romanian"),
+    ("ru", "russian"),
+    ("sa", "sanskrit"),
+    ("sd", "sindhi"),
+    ("si", "sinhala"),
+    ("sk", "slovak"),
+    ("sl", "slovenian"),
+    ("sn", "shona"),
+    ("so", "somali"),
+    ("sq", "albanian"),
+    ("sr", "serbian"),
+    ("su", "sundanese"),
+    ("sv", "swedish"),
+    ("sw", "swahili"),
+    ("ta", "tamil"),
+    ("te", "telugu"),
+    ("tg", "tajik"),
+    ("th", "thai"),
+    ("tk", "turkmen"),
+    ("tl", "tagalog"),
+    ("tr", "turkish"),
+    ("tt", "tatar"),
+    ("uk", "ukrainian"),
+    ("ur", "urdu"),
+    ("uz", "uzbek"),
+    ("vi", "vietnamese"),
+    ("yi", "yiddish"),
+    ("yo", "yoruba"),
+    ("yue", "cantonese"),
+    ("zh", "chinese"),
 ];
 
 /// Spellings a provider may *report* as its detected language which are not
@@ -203,11 +315,18 @@ const WIRE_ACCEPTED_LANGS: &[&str] = &[
 /// Each entry maps to a code the endpoint is measured to accept (so a reported
 /// name keeps the code pinnable for follow-up chunks), and every entry is a
 /// full name: a 2–3 letter response code is accepted as metadata by
-/// `asr::detected_lang` without this table. The table is CLOSED and curated —
-/// it covers exactly the names below. A responder whose spelling is not listed
-/// collapses to a long token and `detected_lang` rejects it, naming the value;
-/// extend this table when such a spelling shows up in a log, and never claim
-/// broader coverage than the list.
+/// `asr::detected_lang` without this table.
+///
+/// This is the curated EXTRAS list, not the whole reported vocabulary: since
+/// round 6 every code's own name in [`WIRE_ACCEPTED_LANGS`] is readable too,
+/// from that one definition (`tibetan`, `javanese`, `nynorsk`, … — the 22 names
+/// that used to abort a pinned episode). The entries here stay because Whisper's
+/// table does not spell them this way: family spellings a different server may
+/// answer with (`farsi`, `mandarin`, `castilian`, `flemish`, `burmese`). A
+/// responder whose spelling is in neither list collapses to a long token and
+/// `detected_lang` rejects it, naming the value; extend a list when such a
+/// spelling shows up in a log, and never claim broader coverage than the two
+/// lists.
 const REPORTED_LANG_SPELLINGS: &[(&str, &str)] = &[
     ("cantonese", "yue"),
     ("castilian", "es"),
@@ -309,15 +428,33 @@ fn alias_code(token: &str) -> Option<&'static str> {
         .map(|(_, code)| *code)
 }
 
-/// Canonical code for a spelling either language table knows: the pin aliases
-/// and the detection-only reported names.
+/// Canonical code for a spelling every language table knows: the pin aliases,
+/// the curated reported names, and every Whisper name in
+/// [`WIRE_ACCEPTED_LANGS`] — the same single definition that decides the wire
+/// accept set, so a code can never be pinnable while its own name is
+/// unreadable (the round-6 class).
 fn known_code(token: &str) -> Option<&'static str> {
-    alias_code(token).or_else(|| {
-        REPORTED_LANG_SPELLINGS
-            .iter()
-            .find(|(alias, _)| *alias == token)
-            .map(|(_, code)| *code)
-    })
+    alias_code(token)
+        .or_else(|| {
+            REPORTED_LANG_SPELLINGS
+                .iter()
+                .find(|(alias, _)| *alias == token)
+                .map(|(_, code)| *code)
+        })
+        .or_else(|| wire_name_code(token))
+}
+
+/// Canonical code for one of Whisper's own names: the `(code, name)` half of
+/// [`WIRE_ACCEPTED_LANGS`]. `token` is already collapsed by the caller, so the
+/// comparison collapses the table's name too — the table spells names the way
+/// Whisper does (`haitian creole` → `haitiancreole`). A name that is in no
+/// table answers `None`, so an unknown spelling still fails closed and names
+/// the value.
+fn wire_name_code(token: &str) -> Option<&'static str> {
+    WIRE_ACCEPTED_LANGS
+        .iter()
+        .find(|(_, name)| collapse(name) == token)
+        .map(|(code, _)| *code)
 }
 
 /// Normalize a language tag to the canonical application code.
@@ -349,11 +486,14 @@ pub fn normalize_lang(value: &str) -> String {
 /// Response values are not wire values: a detected code is stored and
 /// compared, never sent as a pin, so this reading is deliberately looser
 /// than [`normalize_lang`]. It accepts, in order: a pin-table spelling
-/// (`"French"`, `"JA"`), a [`REPORTED_LANG_SPELLINGS`] name (`"tamil"` →
-/// `"ta"`), and a `-XX`/`_XX` region or script subtag on a head that names a
-/// language (`"en-US"` → `"en"`, `"zh-Hant"` → `"zh"`, `"pt-BR"` → `"pt"`).
-/// Anything else is returned as the plain alphanumeric collapse, for the
-/// caller to accept (a 2–3 letter token is metadata) or reject.
+/// (`"French"`, `"JA"`), a name either reported table knows — a curated
+/// [`REPORTED_LANG_SPELLINGS`] extra (`"tamil"` → `"ta"`, `"farsi"` → `"fa"`)
+/// or a code's own name out of [`WIRE_ACCEPTED_LANGS`] (`"tibetan"` → `"bo"`,
+/// `"haitian creole"` → `"ht"`, `"javanese"` → `"jw"`) — and a `-XX`/`_XX`
+/// region or script subtag on a head that names a language (`"en-US"` →
+/// `"en"`, `"zh-Hant"` → `"zh"`, `"pt-BR"` → `"pt"`). Anything else is
+/// returned as the plain alphanumeric collapse, for the caller to accept (a
+/// 2–3 letter token is metadata) or reject.
 pub fn normalize_reported_lang(value: &str) -> String {
     let base = strip_trailing_qualifier(value);
     let collapsed = collapse(base);
@@ -440,7 +580,8 @@ pub fn identity_accepts(code: &str) -> bool {
 /// request takes the detection path instead. Track identity does NOT use this
 /// predicate: see [`identity_accepts`].
 pub fn wire_accepts(code: &str) -> bool {
-    WIRE_ACCEPTED_LANGS.contains(&code.trim())
+    let code = code.trim();
+    WIRE_ACCEPTED_LANGS.iter().any(|(c, _)| *c == code)
 }
 
 /// The language name out of a Sonarr/Radarr `originalLanguage` value: the
@@ -761,15 +902,21 @@ mod tests {
         }
     }
 
+    /// The codes of the accept set, in table order.
+    fn wire_codes() -> Vec<&'static str> {
+        WIRE_ACCEPTED_LANGS.iter().map(|(c, _)| *c).collect()
+    }
+
     #[test]
     fn wire_accepts_implies_identity_accepts() {
         // Fix 1's relationship, half two: every code the endpoint accepts is
         // a code that names a language. Asserted, not assumed — a marker or a
         // name-shaped token in the wire table would let a request assert
         // something that is not a language. Also pins the shape of the
-        // measured table itself: 2–3 lower-case letters, no duplicates,
-        // sorted, so a careless edit is visible.
-        for code in WIRE_ACCEPTED_LANGS {
+        // measured table itself — 2–3 lower-case letters, no duplicates,
+        // sorted, and one distinct name per code (round 6 made the name the
+        // other half of the same entry) — so a careless edit is visible.
+        for (code, name) in WIRE_ACCEPTED_LANGS {
             assert!(wire_accepts(code), "{code}");
             assert!(identity_accepts(code), "{code} must name a language");
             assert!(
@@ -777,17 +924,27 @@ mod tests {
                 "{code} is not a 2-3 letter code"
             );
             assert!(!is_uncertainty_marker(code), "{code} is a marker");
+            assert!(!name.is_empty(), "{code} has no Whisper name");
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == ' '),
+                "{code}: {name} is not a lower-case name"
+            );
         }
         let unique: std::collections::BTreeSet<&str> =
-            WIRE_ACCEPTED_LANGS.iter().copied().collect();
-        assert_eq!(unique.len(), WIRE_ACCEPTED_LANGS.len(), "duplicate entry");
-        let mut sorted = WIRE_ACCEPTED_LANGS.to_vec();
-        sorted.sort_unstable();
+            WIRE_ACCEPTED_LANGS.iter().map(|(c, _)| *c).collect();
+        assert_eq!(unique.len(), WIRE_ACCEPTED_LANGS.len(), "duplicate code");
+        let names: std::collections::BTreeSet<String> = WIRE_ACCEPTED_LANGS
+            .iter()
+            .map(|(_, n)| collapse(n))
+            .collect();
         assert_eq!(
-            sorted,
-            WIRE_ACCEPTED_LANGS.to_vec(),
-            "keep the table sorted"
+            names.len(),
+            WIRE_ACCEPTED_LANGS.len(),
+            "two codes share one name"
         );
+        let mut sorted = wire_codes();
+        sorted.sort_unstable();
+        assert_eq!(sorted, wire_codes(), "keep the table sorted");
     }
 
     #[test]
@@ -816,10 +973,128 @@ mod tests {
             "Whisper's own language table has 100 codes"
         );
         assert_eq!(
-            WIRE_ACCEPTED_LANGS.to_vec(),
+            wire_codes(),
             measured,
             "the accept set drifted from the measured 100"
         );
+    }
+
+    #[test]
+    fn every_accepted_code_is_readable_by_its_own_name() {
+        // Round 6: 22 of the 100 codes had a Whisper name that neither table
+        // knew (`tibetan`, `javanese`, `nynorsk`, …), so a provider answering
+        // a language's OWN name failed a pinned episode permanently with
+        // `whisper language mismatch: pinned <code>, reported <name>`. The
+        // names are now the second half of this table, so this test is the
+        // drift alarm for both halves at once: a name that does not resolve
+        // back to its own code fails here, whether it was mis-typed or
+        // shadowed by another code's alias/curated spelling.
+        for (code, name) in WIRE_ACCEPTED_LANGS {
+            assert_eq!(
+                normalize_reported_lang(name),
+                *code,
+                "{code}'s own name {name} must resolve to {code}"
+            );
+            // The lookup is on the collapsed token, so a multi-word name
+            // resolves with its space, without it, and in any case.
+            assert_eq!(normalize_reported_lang(&collapse(name)), *code, "{code}");
+            assert_eq!(
+                normalize_reported_lang(&name.to_uppercase()),
+                *code,
+                "{code}"
+            );
+            // A reported code is metadata and must read as itself.
+            assert_eq!(normalize_reported_lang(code), *code, "{code}");
+        }
+    }
+
+    #[test]
+    fn the_names_that_used_to_abort_a_pinned_episode_are_readable() {
+        // The measured defect list (independent review of b0b91e68: the real
+        // binary, one run per code, a stub answering each code's own Whisper
+        // name — 22 non-zero exits, raw evidence r5rev/head_names.json). Each
+        // pair here answered `whisper language mismatch: pinned <code>,
+        // reported <name>`; the names are now read out of the accept table.
+        for (name, code) in [
+            ("afrikaans", "af"),
+            ("assamese", "as"),
+            ("bashkir", "ba"),
+            ("belarusian", "be"),
+            ("tibetan", "bo"),
+            ("breton", "br"),
+            ("basque", "eu"),
+            ("faroese", "fo"),
+            ("hawaiian", "haw"),
+            ("haitian creole", "ht"),
+            ("javanese", "jw"),
+            ("latin", "la"),
+            ("luxembourgish", "lb"),
+            ("lingala", "ln"),
+            ("maltese", "mt"),
+            ("myanmar", "my"),
+            ("nynorsk", "nn"),
+            ("occitan", "oc"),
+            ("sanskrit", "sa"),
+            ("shona", "sn"),
+            ("albanian", "sq"),
+            ("yiddish", "yi"),
+        ] {
+            assert_eq!(normalize_reported_lang(name), code, "{name}");
+        }
+    }
+
+    #[test]
+    fn display_names_and_reported_names_agree() {
+        // `display_name` names ~36 of the 100 codes, which is why it cannot be
+        // the reported-name source — but where it DOES name a code, that name
+        // must read back as the same code. The round-5 gap this pins: `jw` and
+        // `ln` gained display names while the reported path did not know
+        // `javanese`/`lingala`, so a detected Javanese source was unusable.
+        for (code, _) in WIRE_ACCEPTED_LANGS {
+            let name = display_name(code);
+            if name != "Unknown" {
+                assert_eq!(
+                    normalize_reported_lang(name),
+                    normalize_lang(code),
+                    "{code} is named {name}, which must read back as {code}"
+                );
+            }
+        }
+        assert_eq!(normalize_reported_lang("Javanese"), "jw");
+        assert_eq!(normalize_reported_lang("Lingala"), "ln");
+    }
+
+    #[test]
+    fn the_names_table_does_not_turn_a_marker_into_a_language() {
+        // The 100 names ride the same lookup the pin aliases use, so this pins
+        // the boundary the fold must not move: a marker names no language, is
+        // never a subtag head, and reads back as itself for the caller to
+        // reject (a responder saying `N/A` must not become a pin).
+        for marker in [
+            "und",
+            "unknown",
+            "none",
+            "na",
+            "zz",
+            "mul",
+            "zxx",
+            "mis",
+            "auto",
+            "undefined",
+        ] {
+            assert!(!names_a_known_language(marker), "{marker} names nothing");
+            assert_eq!(normalize_reported_lang(marker), marker, "{marker}");
+            assert!(
+                subtag_head(&format!("{marker}-US")).is_none(),
+                "{marker}-US"
+            );
+        }
+        assert_eq!(normalize_reported_lang("und-US"), "undus");
+        assert_eq!(normalize_lang("und-US"), "undus");
+        // A name-shaped token that is in no table is still rejected with the
+        // value named, rather than being accepted because names exist now.
+        assert_eq!(normalize_reported_lang("klingon"), "klingon");
+        assert_eq!(normalize_reported_lang("klingon-KLI"), "klingonkli");
     }
 
     #[test]
@@ -966,7 +1241,13 @@ mod tests {
         // canonical too, not on its intermediate.
         assert_eq!(canonical_code("jv"), "jw");
         assert!(sidecar_aliases("jw").contains(&"jv"));
-        // ja/id/en keep every spelling they listed before, canonical first.
+        // ja/id/en are STRICT SUPERSETS of what they listed before, canonical
+        // first (ja 6 -> 8, id 4 -> 6, en 6 -> 8 replaceable paths — the
+        // derivation adds `.japanese[.hi].srt`, `.indonesian[.hi].srt` and
+        // `.english[.hi].srt`), and the order inside the list is the alias
+        // table's (`ja`, `jp`, `jpn`, `japanese`; round 4's literal was
+        // `ja`, `jpn`, `jp`). No caller is order-sensitive: each iterates the
+        // list or uses `.any()`.
         for (code, legacy) in [
             ("ja", vec!["ja", "jpn", "jp"]),
             ("id", vec!["id", "ind"]),
@@ -1017,8 +1298,11 @@ mod tests {
             .contains(&"/m/ep.por.hi.srt".to_string()));
         assert!(replaceable_target_sidecar_paths("/m/ep", "zh")
             .contains(&"/m/ep.chi.hi.srt".to_string()));
-        // ja/id/en behaviour is unchanged: every spelling they listed before
-        // is still listed, canonical HI first.
+        // ja/id/en behaviour is unchanged in the only sense that matters: every
+        // spelling they listed before is still listed (strict supersets), and
+        // the canonical HI path still comes first. The list grew by the full
+        // name of each code and is in alias-table order, neither of which any
+        // caller depends on.
         for (lang, legacy) in [
             ("ja", vec!["ja", "jpn", "jp"]),
             ("id", vec!["id", "ind"]),

@@ -368,7 +368,20 @@ fn piece_path_carries_the_gated_language_and_guards_only_a_sent_pin() {
         "no artifact may be written after a contradition"
     );
     let sent = stub.languages();
-    assert!(!sent.is_empty() && sent.len() <= 3, "{sent:?}");
+    // The count is deliberately NOT pinned here. The pieces are dispatched
+    // concurrently (`futures::future::try_join_all` in `transcribe_pieces`,
+    // src/asr.rs:721), so this run aborts as soon as the first response
+    // contradicts the pin and the join drops the requests still in flight:
+    // whether the provider saw 1, 2 or 3 of them is a race. The invariants that
+    // do hold on an aborting run are that at least one attempt reached the
+    // provider and that no attempt dropped the pin. "All pieces were
+    // attempted" is asserted on the runs that COMPLETE — part (1) above
+    // (`vec![Some("en"); 3]` plus one cue per piece) and part (3) below
+    // (`vec![None, None, None]`) — never here.
+    assert!(
+        !sent.is_empty(),
+        "at least one attempt must reach the provider: {sent:?}"
+    );
     assert!(
         sent.iter().all(|l| l.as_deref() == Some("en")),
         "no request may drop the pin: {sent:?}"
@@ -377,6 +390,11 @@ fn piece_path_carries_the_gated_language_and_guards_only_a_sent_pin() {
     // (3) An untagged track detects instead. The probe reports `ceb` — a code
     // the endpoint rejects — so the two remaining pieces are unforced as well,
     // and their reports (`en`) cannot contradict a pin that was never sent.
+    // This run COMPLETES, so the exact request count IS invariant here (one
+    // detection probe + the two remaining pieces, all unforced), and the cue
+    // count proves all three were transcribed and merged — the assertion that
+    // catches a run which silently transcribes only some chunks and still
+    // writes an artifact.
     let (out, stub, srt) = transcribe_run(
         root,
         "detect",
@@ -394,9 +412,17 @@ fn piece_path_carries_the_gated_language_and_guards_only_a_sent_pin() {
     assert_eq!(
         stub.languages(),
         vec![None, None, None],
-        "a code the endpoint rejects must never be sent"
+        "a code the endpoint rejects must never be sent, and every piece must be attempted"
     );
     assert!(srt.is_file());
+    assert_eq!(
+        std::fs::read_to_string(&srt)
+            .unwrap()
+            .matches("stub")
+            .count(),
+        3,
+        "one cue per piece: a run that transcribed fewer must not pass"
+    );
 }
 
 /// Item 2: the whole-file path (one request) guards exactly like the piece
@@ -475,4 +501,286 @@ fn single_file_path_guards_the_pin_it_sent() {
         "a rejected code is never sent"
     );
     assert!(srt.is_file());
+}
+
+// ---------------------------------------------------------------------------
+// Round 6: a provider that answers a pin with that language's own Whisper NAME
+// must commit. The measured defect (independent review of b0b91e68) was 22
+// codes whose own name was in neither table, so a pinned episode failed
+// permanently with `whisper language mismatch: pinned <code>, reported <name>`
+// — and because round 5 promoted `jw`/`ln` into the accept set, that class
+// covered every single-request episode.
+//
+// The names are restated here deliberately: an integration test cannot read the
+// binary's private table (the same reason
+// `lang::wire_accept_set_contents_are_pinned` restates the measured 100), and
+// the in-crate unit tests keep the table itself honest. Candidate universe:
+// `openai/whisper` `whisper/tokenizer.py` `LANGUAGES`, commit 86098128c0b4.
+// ---------------------------------------------------------------------------
+
+const WIRE_NAMES: [(&str, &str); 100] = [
+    ("af", "afrikaans"),
+    ("am", "amharic"),
+    ("ar", "arabic"),
+    ("as", "assamese"),
+    ("az", "azerbaijani"),
+    ("ba", "bashkir"),
+    ("be", "belarusian"),
+    ("bg", "bulgarian"),
+    ("bn", "bengali"),
+    ("bo", "tibetan"),
+    ("br", "breton"),
+    ("bs", "bosnian"),
+    ("ca", "catalan"),
+    ("cs", "czech"),
+    ("cy", "welsh"),
+    ("da", "danish"),
+    ("de", "german"),
+    ("el", "greek"),
+    ("en", "english"),
+    ("es", "spanish"),
+    ("et", "estonian"),
+    ("eu", "basque"),
+    ("fa", "persian"),
+    ("fi", "finnish"),
+    ("fo", "faroese"),
+    ("fr", "french"),
+    ("gl", "galician"),
+    ("gu", "gujarati"),
+    ("ha", "hausa"),
+    ("haw", "hawaiian"),
+    ("he", "hebrew"),
+    ("hi", "hindi"),
+    ("hr", "croatian"),
+    ("ht", "haitian creole"),
+    ("hu", "hungarian"),
+    ("hy", "armenian"),
+    ("id", "indonesian"),
+    ("is", "icelandic"),
+    ("it", "italian"),
+    ("ja", "japanese"),
+    ("jw", "javanese"),
+    ("ka", "georgian"),
+    ("kk", "kazakh"),
+    ("km", "khmer"),
+    ("kn", "kannada"),
+    ("ko", "korean"),
+    ("la", "latin"),
+    ("lb", "luxembourgish"),
+    ("ln", "lingala"),
+    ("lo", "lao"),
+    ("lt", "lithuanian"),
+    ("lv", "latvian"),
+    ("mg", "malagasy"),
+    ("mi", "maori"),
+    ("mk", "macedonian"),
+    ("ml", "malayalam"),
+    ("mn", "mongolian"),
+    ("mr", "marathi"),
+    ("ms", "malay"),
+    ("mt", "maltese"),
+    ("my", "myanmar"),
+    ("ne", "nepali"),
+    ("nl", "dutch"),
+    ("nn", "nynorsk"),
+    ("no", "norwegian"),
+    ("oc", "occitan"),
+    ("pa", "punjabi"),
+    ("pl", "polish"),
+    ("ps", "pashto"),
+    ("pt", "portuguese"),
+    ("ro", "romanian"),
+    ("ru", "russian"),
+    ("sa", "sanskrit"),
+    ("sd", "sindhi"),
+    ("si", "sinhala"),
+    ("sk", "slovak"),
+    ("sl", "slovenian"),
+    ("sn", "shona"),
+    ("so", "somali"),
+    ("sq", "albanian"),
+    ("sr", "serbian"),
+    ("su", "sundanese"),
+    ("sv", "swedish"),
+    ("sw", "swahili"),
+    ("ta", "tamil"),
+    ("te", "telugu"),
+    ("tg", "tajik"),
+    ("th", "thai"),
+    ("tk", "turkmen"),
+    ("tl", "tagalog"),
+    ("tr", "turkish"),
+    ("tt", "tatar"),
+    ("uk", "ukrainian"),
+    ("ur", "urdu"),
+    ("uz", "uzbek"),
+    ("vi", "vietnamese"),
+    ("yi", "yiddish"),
+    ("yo", "yoruba"),
+    ("yue", "cantonese"),
+    ("zh", "chinese"),
+];
+
+/// The 22 codes the round-5 measurement showed failing (raw evidence
+/// `r5rev/head_names.json`: 100 runs, 22 non-zero exits).
+const USED_TO_ABORT: [(&str, &str); 22] = [
+    ("af", "afrikaans"),
+    ("as", "assamese"),
+    ("ba", "bashkir"),
+    ("be", "belarusian"),
+    ("bo", "tibetan"),
+    ("br", "breton"),
+    ("eu", "basque"),
+    ("fo", "faroese"),
+    ("haw", "hawaiian"),
+    ("ht", "haitian creole"),
+    ("jw", "javanese"),
+    ("la", "latin"),
+    ("lb", "luxembourgish"),
+    ("ln", "lingala"),
+    ("mt", "maltese"),
+    ("my", "myanmar"),
+    ("nn", "nynorsk"),
+    ("oc", "occitan"),
+    ("sa", "sanskrit"),
+    ("sn", "shona"),
+    ("sq", "albanian"),
+    ("yi", "yiddish"),
+];
+
+/// Round 6, path 1: the single-request path, every code in the accept set. The
+/// request carries the tag's pin and the provider answers that language's own
+/// name; the run must commit and write the artifact.
+#[test]
+fn a_provider_answering_a_languages_own_name_commits_a_pinned_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (code, name) in WIRE_NAMES {
+        // `id` is the target every other case uses, so a track tagged `id`
+        // would be the target itself; that one runs against another target so
+        // the pin still comes from the tag.
+        let target = if code == "id" { "en" } else { "id" };
+        let (out, stub, srt) = transcribe_run(
+            root,
+            &format!("name-{code}"),
+            &one_track(code),
+            "40.0",
+            "200000",
+            vec![Some(name)],
+            &["--lang", target],
+        );
+        assert!(
+            out.status.success(),
+            "{code}: a provider answering {name} must not abort, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            stub.languages(),
+            vec![Some(code.to_string())],
+            "{code}: the request must carry the pinned code"
+        );
+        assert!(srt.is_file(), "{code}: no artifact written");
+    }
+}
+
+/// Round 6, path 2: the same for the multi-chunk path, on the 22 codes the
+/// round-5 measurement showed failing. All three pieces carry the pin and the
+/// provider answers the language's own name to every one of them.
+#[test]
+fn the_piece_path_commits_when_every_piece_is_answered_with_the_own_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (code, name) in USED_TO_ABORT {
+        let (out, stub, srt) = transcribe_run(
+            root,
+            &format!("pieces-{code}"),
+            &one_track(code),
+            "1800.0",
+            "200000",
+            vec![Some(name)],
+            &["--lang", "id"],
+        );
+        assert!(
+            out.status.success(),
+            "{code}: {name} on every piece must commit, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            stub.languages(),
+            vec![Some(code.to_string()); 3],
+            "{code}: every piece must carry the pin"
+        );
+        assert!(srt.is_file(), "{code}: no artifact written");
+        assert_eq!(
+            std::fs::read_to_string(&srt)
+                .unwrap()
+                .matches("stub")
+                .count(),
+            3,
+            "{code}: one cue per piece"
+        );
+    }
+}
+
+/// Round 6, the fail-closed direction the fix must not loosen: a report naming
+/// a DIFFERENT language still aborts — including the names this fix added
+/// (`tibetan` is `bo`, not `en`) — and nothing is written.
+#[test]
+fn a_different_languages_name_still_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // (1) one request: pin `en`, provider answers `tibetan` (= `bo`).
+    let (out, stub, srt) = transcribe_run(
+        root,
+        "sf-other-name",
+        &one_track("eng"),
+        "40.0",
+        "200000",
+        vec![Some("tibetan")],
+        &["--lang", "id"],
+    );
+    assert!(
+        !out.status.success(),
+        "a contradicted pin must fail the run"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("pinned en, reported bo"), "stderr: {err}");
+    assert!(
+        !srt.exists(),
+        "no artifact may be written: {}",
+        srt.display()
+    );
+    assert_eq!(stub.languages(), vec![Some("en".to_string())]);
+
+    // (2) the piece path: every piece carries `cy` and every one is answered
+    // with `lingala` (= `ln`). The request count is not asserted here: when the
+    // first contradiction aborts the join, the remaining in-flight requests may
+    // be dropped before the stub records them, so only "everything sent carried
+    // the pin" is deterministic.
+    let (out, stub, srt) = transcribe_run(
+        root,
+        "pieces-other-name",
+        &one_track("cy"),
+        "1800.0",
+        "200000",
+        vec![Some("lingala")],
+        &["--lang", "id"],
+    );
+    assert!(
+        !out.status.success(),
+        "a contradicted pin must fail the run"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("pinned cy, reported ln"), "stderr: {err}");
+    assert!(
+        !srt.exists(),
+        "no artifact may be written after a contradiction"
+    );
+    let sent = stub.languages();
+    assert!(!sent.is_empty(), "{sent:?}");
+    assert!(
+        sent.iter().all(|l| l.as_deref() == Some("cy")),
+        "no request may drop the pin: {sent:?}"
+    );
 }
