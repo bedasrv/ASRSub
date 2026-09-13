@@ -31,7 +31,9 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 docs/DEPLOY.md; reference code survives in git history)
 tools/          operator scripts; `probe_wire_langs.py` re-measures the codes
                 the configured Whisper endpoint accepts as `language` and
-                exits non-zero when they disagree with `src/lang.rs`
+                exits non-zero when they disagree with `src/lang.rs`; it
+                refuses to overwrite an existing output CSV unless `--force`
+                (re-measuring on the same date needs `--force` or `--out`)
 ```
 
 ## Quickstart

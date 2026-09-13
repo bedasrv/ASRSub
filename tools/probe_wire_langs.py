@@ -35,12 +35,19 @@ of Whisper's name for each (the reported-name path reads the same pairs) — so
 this script compares against the codes the code itself would send, never
 against a copy that can drift.
 
+The CSV this writes is the *evidence* that set is read against (the committed
+`wire_langs-20260913.csv` is compared by `--recheck`), so an existing target is
+never overwritten by accident: the run exits non-zero and names the path;
+`--force` overwrites it deliberately and `--out <path>` writes somewhere else.
+`--recheck` and `--dry-run` never write at all.
+
 Usage::
 
     python3 tools/probe_wire_langs.py               # live: 104 requests
     python3 tools/probe_wire_langs.py --dry-run     # print the plan, no requests
     python3 tools/probe_wire_langs.py --only jw --only ln
     python3 tools/probe_wire_langs.py --out /tmp/wire_langs.csv
+    python3 tools/probe_wire_langs.py --force       # overwrite today's CSV
 
 The endpoint, model and key come from the providers file (`--providers`, else
 `$PROVIDERS_FILE`, else `./asrsub_providers.json`), node `whisper_stt`. The key
@@ -243,6 +250,11 @@ def main(argv=None):
     ap.add_argument("--repo", default=os.path.dirname(here), help="checkout root (holds src/lang.rs)")
     ap.add_argument("--providers", default=os.environ.get("PROVIDERS_FILE") or "asrsub_providers.json")
     ap.add_argument("--out", default=None, help="CSV path (default: wire_langs-<date>.csv in $PWD)")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing CSV at the target path (refused without it)",
+    )
     ap.add_argument("--only", action="append", default=[], help="probe only these codes (repeatable)")
     ap.add_argument("--controls", action="store_true", help="also probe the round-4 refused spellings (14 more)")
     ap.add_argument(
@@ -280,9 +292,24 @@ def main(argv=None):
         print("requests: %d" % len(probes))
         return 0
 
+    # The CSV is the committed evidence the set is read against, and the
+    # default target is CWD-relative and date-stamped: running this from
+    # `tools/` on a date whose file already exists used to replace the stored
+    # measurement with whatever the new run saw (observed on 2026-09-13: the
+    # 118-row file became a 2-row all-refused one). Refuse BEFORE spending a
+    # request; `--force` (or a different `--out`) is the deliberate override.
+    out_path = args.out or "wire_langs-%s.csv" % datetime.now(timezone.utc).strftime("%Y%m%d")
+    if not args.force and os.path.exists(out_path):
+        print(
+            "refusing to overwrite %s: the file already exists, and it may be stored "
+            "evidence of an earlier measurement. Pass --force to overwrite it, or "
+            "--out <path> to write the measurement somewhere else." % out_path,
+            file=sys.stderr,
+        )
+        return 2
+
     endpoint, model, key = load_provider(args.providers)
     blob = base64.b64decode(SILENT_MP3_B64)
-    out_path = args.out or "wire_langs-%s.csv" % datetime.now(timezone.utc).strftime("%Y%m%d")
     rows, deviations, accepted = [], [], []
     for code, role in probes:
         status, detected, err = probe(endpoint, model, key, code, blob)
