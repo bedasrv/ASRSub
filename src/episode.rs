@@ -27,6 +27,11 @@ struct RegistryCommit<'a> {
     episode_id: Option<i64>,
     kind: &'a str,
     media_path: &'a str,
+    /// Effective source language (ASR tag/detected, or ladder source) and
+    /// the chosen audio stream for ASR rows — the provenance that makes an
+    /// `fr`-sourced row distinguishable from a `ja`-sourced one.
+    source_lang: &'a str,
+    source_stream: Option<u32>,
 }
 
 /// Per-language source bundle from phase 1 (ladder hit or shared ASR
@@ -39,6 +44,8 @@ struct LangWork {
     needs_translate: bool,
     reg_source: String,
     reg_kind: Option<String>,
+    /// Chosen audio stream index (ASR rows only; ladder rows are None).
+    src_stream: Option<u32>,
 }
 
 /// Episode-scoped context shared (by reference) across one episode's
@@ -59,24 +66,32 @@ impl Pipeline {
     /// Returns the number of languages completed.
     ///
     /// Source choice is per target language (mirroring `choose_source` call
-    /// sites in `run_pass`): an `en` target with an English audio track
-    /// transcribes it directly with no translation step. ASR cues are shared
-    /// across the episode's languages via a per-`asr_lang` cache, so `id`+`en`
-    /// targets pay for one Japanese transcription.
+    /// sites in `run_pass`): a track already in the target language is
+    /// transcribed directly with no translation step. ASR cues are shared
+    /// across the episode's languages via a per-choice cache (the tag, or
+    /// the chosen stream for an untagged track), so `id`+`en` targets pay
+    /// for one transcription.
     pub(crate) async fn process_one(
         &self,
         cand: &Candidate,
-        titles: &std::collections::HashMap<i64, String>,
+        series_titles: &std::collections::HashMap<i64, crate::sonarr::SeriesInfo>,
     ) -> Result<usize> {
         if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(0);
         }
         let kind = if cand.is_movie { "movie" } else { "series" };
         // Resolve media path (+ series identity for the ladder/Jimaku).
-        // `titles` is fetched once per pass by the caller, not per episode.
-        let (media_path, series_title, season, ep_num) = if cand.is_movie {
+        // `series_titles` is fetched once per pass by the caller, not per
+        // episode, and carries the original language used for source choice.
+        let (media_path, series_title, original_lang, season, ep_num) = if cand.is_movie {
             let path = cand.path.clone().context("movie without path")?;
-            (self.cfg.map_path(&path), cand.series_title.clone(), None, 0)
+            (
+                self.cfg.map_path(&path),
+                cand.series_title.clone(),
+                cand.original_lang.clone(),
+                None,
+                0,
+            )
         } else {
             let ep: Episode = self.sonarr.episode(cand.episode_id).await?;
             let cpath = ep
@@ -84,13 +99,16 @@ impl Pipeline {
                 .as_ref()
                 .and_then(|f| f.path.clone())
                 .context("episode has no file")?;
-            let title = ep
-                .series_id
-                .and_then(|sid| titles.get(&sid).cloned())
+            let info = ep.series_id.and_then(|sid| series_titles.get(&sid));
+            let title = info
+                .map(|i| i.title.clone())
+                .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| cand.series_title.clone());
+            let original = info.and_then(|i| i.original_language.clone());
             (
                 self.cfg.map_path(&cpath),
                 title,
+                original,
                 ep.season_number,
                 ep.episode_number.unwrap_or(0),
             )
@@ -105,9 +123,10 @@ impl Pipeline {
         let mapped: Vec<asr::AudioStream> = probe.streams;
 
         // Phase 1 (sequential): source per language — ladder fast-path or
-        // remote ASR with a per-asr_lang cache, so id+en share one
-        // transcription. Sequential keeps cache races out by construction.
-        let mut asr_cache: std::collections::HashMap<String, Vec<Cue>> =
+        // remote ASR with a per-choice cache (the track's tag, or the chosen
+        // stream when its tag is unknown), so id+en share one transcription.
+        // Sequential keeps cache races out by construction.
+        let mut asr_cache: std::collections::HashMap<String, asr::Transcript> =
             std::collections::HashMap::new();
         let mut works = Vec::with_capacity(cand.missing.len());
         for lang in &cand.missing {
@@ -128,13 +147,14 @@ impl Pipeline {
                     duration_s,
                 })
                 .await;
-            // (source cues, source lang, needs-translate, registry source, registry kind)
-            let (src_cues, src_lang, needs_translate, reg_source, reg_kind): (
+            // (source cues, source lang, needs-translate, registry source, registry kind, stream)
+            let (src_cues, src_lang, needs_translate, reg_source, reg_kind, src_stream): (
                 Vec<Cue>,
                 String,
                 bool,
                 String,
                 Option<String>,
+                Option<u32>,
             ) = match ladder {
                 Some(hit) => {
                     let need = normalize_lang(&hit.src_lang) != normalize_lang(lang);
@@ -144,14 +164,20 @@ impl Pipeline {
                         need,
                         hit.source,
                         hit.source_kind,
+                        None,
                     )
                 }
                 None => {
-                    let choice = asr::choose_source(&mapped, lang).context("no audio streams")?;
-                    let cues = match asr_cache.get(&choice.asr_lang) {
+                    let choice = asr::choose_source(&mapped, lang, original_lang.as_deref())
+                        .context("no audio streams")?;
+                    // Cache key is stable before the language is known (the
+                    // tag, or the chosen stream when it must be detected),
+                    // so two targets sharing one track share one transcription.
+                    let cache_key = choice.cache_key();
+                    let transcript = match asr_cache.get(&cache_key) {
                         Some(cached) => cached.clone(),
                         None => {
-                            let key = format!("ep{}_{}", cand.episode_id, choice.asr_lang);
+                            let key = format!("ep{}_{}", cand.episode_id, cache_key);
                             let fresh = asr::transcribe_episode(
                                 &self.pool,
                                 asr::TranscribeJob {
@@ -169,15 +195,41 @@ impl Pipeline {
                                 },
                             )
                             .await?;
-                            asr_cache.insert(choice.asr_lang.clone(), fresh.clone());
+                            asr_cache.insert(cache_key, fresh.clone());
                             fresh
                         }
                     };
-                    let src = choice.asr_lang.clone();
-                    let need = choice.needs_translate;
-                    (cues, src, need, "asr".to_string(), None)
+                    // The effective language is the code actually sent as a
+                    // pin, or the detected code — never a fabricated one. It
+                    // decides both the translation step and the provenance
+                    // row: the comparison uses the effective source, so a tag
+                    // the wire gate dropped (which took detection) is judged
+                    // by what was really transcribed, not by the tag's
+                    // provisional answer.
+                    let src = transcript.lang.clone();
+                    let need = if choice.wire_pin().is_some() {
+                        choice.needs_translate
+                    } else {
+                        normalize_lang(&src) != normalize_lang(lang)
+                    };
+                    (
+                        transcript.cues,
+                        src,
+                        need,
+                        "asr".to_string(),
+                        None,
+                        Some(choice.stream_index),
+                    )
                 }
             };
+            tracing::info!(
+                episode = cand.episode_id,
+                lang = %lang,
+                source_lang = %src_lang,
+                stream = ?src_stream,
+                needs_translate,
+                "source chosen"
+            );
             works.push(LangWork {
                 lang: lang.clone(),
                 src_cues,
@@ -185,6 +237,7 @@ impl Pipeline {
                 needs_translate,
                 reg_source,
                 reg_kind,
+                src_stream,
             });
         }
         // Phase 2 (concurrent): translate + merge + upload + commit per
@@ -244,7 +297,11 @@ impl Pipeline {
                 knowledge: &knowledge,
                 chunk_size: self.cfg.translate_chunk,
                 fanout: self.cfg.translate_concurrency,
-                skip_guard: normalize_lang(&w.src_lang) == "en",
+                // The foreign-script guard exists for Japanese sources only
+                // (ASR echoing OP/ED lyrics in English/Chinese). Any other
+                // source — French, German, English, even Chinese — would be
+                // rewritten to SDH placeholders, emptying the episode.
+                skip_guard: !crate::lang::needs_foreign_guard(&w.src_lang),
                 placeholders: &self.cfg.sdh_placeholders,
             },
         )
@@ -287,6 +344,8 @@ impl Pipeline {
             episode_id: Some(cand.episode_id),
             kind: ctx.kind,
             media_path: ctx.media_path,
+            source_lang: &w.src_lang,
+            source_stream: w.src_stream,
         })
         .await;
         self.append_state(cand.episode_id, Some(lang.as_str()), "done", "", ctx.kind)
@@ -376,6 +435,10 @@ impl Pipeline {
 
     /// Provenance commit. ASR rows carry `source = "asr"` with NO
     /// `source_kind`; ladder rows carry `jpn`/`eng` + `external`.
+    /// `extra` also records the effective source language and, for ASR, the
+    /// chosen audio stream: an `fr`-sourced row is distinguishable from a
+    /// `ja`-sourced one (the shape of `/api2/provenance` is unchanged — it
+    /// reports counts, not fields).
     /// Paths are recorded for human debugging; nothing verifies hashes, so
     /// none are stored (and no file re-read happens here).
     async fn commit_registry(&self, c: RegistryCommit<'_>) {
@@ -386,12 +449,21 @@ impl Pipeline {
         let episode_id = c.episode_id;
         let kind = c.kind;
         let media_path = c.media_path;
+        let source_lang = c.source_lang;
+        let source_stream = c.source_stream;
         let target = crate::lang::canonical_target_sidecar(stem, lang);
         let mut extra = std::collections::HashMap::new();
         extra.insert(
             "media_path".to_string(),
             serde_json::Value::String(media_path.to_string()),
         );
+        extra.insert(
+            "source_lang".to_string(),
+            serde_json::Value::String(normalize_lang(source_lang)),
+        );
+        if let Some(stream) = source_stream {
+            extra.insert("source_stream".to_string(), serde_json::Value::from(stream));
+        }
         if kind == "movie" {
             extra.insert(
                 "kind".to_string(),

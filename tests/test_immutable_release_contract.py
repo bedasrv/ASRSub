@@ -6,9 +6,18 @@ Covers:
 - build.sh must build a full 40-char git-SHA tag and emit a non-secret release descriptor/env.
 - Release images come from CI into GHCR (full-SHA tags, no latest);
   deploy is pull-based and deploy.sh is deleted.
+- The committed wire-language measurement (`tools/wire_langs-20260913.csv`) is
+  evidence: `tools/probe_wire_langs.py` refuses to overwrite an existing output
+  CSV unless `--force`, and --recheck/--dry-run never write.
 """
+import hashlib
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -659,6 +668,165 @@ class TestMaskingHasNoSecondSink(unittest.TestCase):
         self.assertIn("parse::<std::net::Ipv6Addr>()", config)
         for value in ("a@b&#58Zk1P@host.lan", "a@b%3AZk3P/ss@host.lan", "user@[root:s3cr3t]/x@y"):
             self.assertIn(value, config, msg=f"{value} must stay pinned by a test")
+
+
+class TestProbeWireLangsKeepsItsEvidence(unittest.TestCase):
+    """`tools/probe_wire_langs.py` must not silently replace its evidence CSV.
+
+    Measured 2026-09-13: run from `tools/` on the day the committed CSV was
+    written, the probe defaulted its output to `wire_langs-<today>.csv` and
+    overwrote the committed 118-row file with a 2-row all-refused one (sha256
+    `2e721a9b…` -> `8b77b28b…`). Nothing in the suite read or protected it, so
+    the guard and these cases exist: an existing target is refused (non-zero
+    exit, path named) unless `--force`, and --recheck/--dry-run never write.
+    Everything here is offline: the providers node points at a port nothing
+    listens on, and the refusal is decided before any request is spent.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="asrsub-probe-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.probe = REPO / "tools" / "probe_wire_langs.py"
+        self.out = Path(self.tmp) / "wire_langs-evidence.csv"
+        self.existing = b"code,http,detected,err,role\nen,200,en,,candidate\n"
+        self.out.write_bytes(self.existing)
+        self.providers = Path(self.tmp) / "providers.json"
+        self.providers.write_text(
+            json.dumps(
+                {
+                    "whisper_stt": {
+                        "endpoint": "http://127.0.0.1:1/audio/transcriptions",
+                        "model": "stub",
+                        "api_key": "x",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def probe_run(self, *args):
+        """One probe run against the hermetic providers file and target CSV."""
+        argv = [
+            sys.executable,
+            str(self.probe),
+            "--only",
+            "en",
+            "--providers",
+            str(self.providers),
+            "--out",
+            str(self.out),
+        ] + list(args)
+        return subprocess.run(
+            argv, cwd=str(REPO), capture_output=True, text=True, timeout=60
+        )
+
+    def sha(self, path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_an_existing_csv_is_refused_and_left_byte_identical(self):
+        before = self.sha(self.out)
+        r = self.probe_run()
+        self.assertNotEqual(r.returncode, 0, msg="an existing target must be refused")
+        text = r.stdout + r.stderr
+        self.assertIn(str(self.out), text, msg=text)
+        self.assertIn("already exists", text, msg=text)
+        self.assertIn("--force", text, msg=text)
+        self.assertIn("--out", text, msg=text)
+        self.assertEqual(before, self.sha(self.out), msg="the target must be untouched")
+        self.assertEqual(self.out.read_bytes(), self.existing)
+
+    def test_force_overwrites_the_target(self):
+        before = self.sha(self.out)
+        self.probe_run("--force")
+        self.assertNotEqual(
+            self.sha(self.out), before, msg="--force must write the new measurement"
+        )
+        written = self.out.read_text(encoding="utf-8")
+        self.assertTrue(written.startswith("code,http,detected,err,role\n"), msg=written)
+        self.assertIn("\nen,", written, msg=written)
+
+    def test_recheck_never_writes(self):
+        before = self.sha(self.out)
+        r = self.probe_run("--recheck", str(self.out))
+        self.assertEqual(r.returncode, 0, msg=r.stdout + r.stderr)
+        self.assertEqual(before, self.sha(self.out), msg="--recheck is read-only")
+        self.assertEqual(self.out.read_bytes(), self.existing)
+
+    def test_dry_run_never_writes(self):
+        self.out.unlink()
+        r = self.probe_run("--dry-run")
+        self.assertEqual(r.returncode, 0, msg=r.stdout + r.stderr)
+        self.assertFalse(self.out.exists(), msg="--dry-run must not create the CSV")
+
+    def test_dangling_symlink_default_output_is_refused_before_any_request(self):
+        # A dangling symlink reads as missing to os.path.exists, so the
+        # no-force guard must treat it as existing (lexists): the run is
+        # refused before any request, the link stays a link, and following
+        # it must not create its target.
+        import datetime as _datetime
+
+        scratch = tempfile.mkdtemp(prefix="asrsub-probe-dangling-")
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        dummy_key = "dummy-probe-key-no-secret"
+        providers = Path(scratch) / "providers.json"
+        providers.write_text(
+            json.dumps(
+                {
+                    "whisper_stt": {
+                        "endpoint": "http://127.0.0.1:1/audio/transcriptions",
+                        "model": "stub",
+                        "api_key": dummy_key,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        default_name = "wire_langs-%s.csv" % _datetime.datetime.now(
+            _datetime.timezone.utc
+        ).strftime("%Y%m%d")
+        link = Path(scratch) / default_name
+        target = Path(scratch) / "dangling-target.csv"
+        self.assertFalse(os.path.lexists(target), msg="target fixture must start missing")
+        os.symlink("dangling-target.csv", link)
+        self.assertTrue(os.path.islink(link), msg="fixture must be a symlink")
+        self.assertTrue(os.path.lexists(link), msg="fixture must lexists")
+        self.assertFalse(os.path.exists(link), msg="fixture must dangle")
+        r = subprocess.run(
+            [sys.executable, str(self.probe), "--only", "en",
+             "--providers", str(providers)],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        text = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, msg=text)
+        self.assertIn(default_name, text, msg=text)
+        self.assertIn("already exists", text, msg=text)
+        self.assertIn("--force", text, msg=text)
+        self.assertIn("--out", text, msg=text)
+        self.assertNotIn("http=", text, msg="refusal must precede any request")
+        self.assertNotIn(dummy_key, text, msg="no credentials in output")
+        self.assertTrue(os.path.islink(link), msg="the symlink must remain a symlink")
+        self.assertEqual(os.readlink(link), "dangling-target.csv")
+        self.assertFalse(target.exists(), msg="following the link must not create its target")
+        self.assertFalse(os.path.lexists(target), msg="following the link must not create its target")
+
+    def test_the_committed_csv_is_still_the_measured_evidence(self):
+        # The committed file itself is not touched by this work: 100 accepted
+        # candidates + 4 unreachable spellings + 14 refused controls.
+        committed = REPO / "tools" / "wire_langs-20260913.csv"
+        self.assertTrue(committed.is_file(), msg=str(committed))
+        rows = committed.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(rows[0], "code,http,detected,err,role")
+        self.assertEqual(
+            len(rows) - 1, 118, msg="118 requests: 100 candidates + 4 + 14 controls"
+        )
+        self.assertEqual(
+            hashlib.sha256(committed.read_bytes()).hexdigest(),
+            "2e721a9bcd7f50be297e0bbe6282800890bd49c85e1a5c64f1585f37c7ec850d",
+            msg="the committed measurement must not change",
+        )
 
 
 if __name__ == "__main__":

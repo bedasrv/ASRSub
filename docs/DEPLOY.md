@@ -283,5 +283,6 @@ curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/contro
 ## Notes
 
 - No secret values in code, docs, tests, or logs. Release descriptor (`.release.env` / `release.json`) is non-secret by construction.
+- Source language fails closed: the audio track is picked by its real tag and that code is sent to Whisper; a tag that is absent **or unusable** (`und`, `unknown`, an empty/whitespace tag) is not sent at all — such a track is probed unforced and the detected code pins the rest. If the language cannot be established the episode errors (state row `error`) and nothing is uploaded or registered `done` — a deployment never commits a subtitle whose source language is unknown. Expect no `source_stream`/`source_lang` in the registry `extra` for old rows; new rows carry `source_lang` on **every** row and `source_stream` on **ASR rows only** (ladder rows have no chosen audio stream).
 - Build and deploy logs must redact `CONTROL_API_KEY`.
 - Verify after deploy: `HEALTH.md` probes, `docker compose ps`, and `pipeline.env` contains no control key.

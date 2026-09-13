@@ -49,16 +49,13 @@ struct ChatMsgIn {
     content: Option<String>,
 }
 
-/// Display name for a normalized source code, for prompts and payloads.
-/// The ladder/ASR only ever produce `ja`/`en` sources, so this mapping is
-/// exact for the reachable domain (anything non-English is Japanese);
-/// `attempt_chunk` additionally accepts a raw `"ja"`.
+/// Display name for a source code, for prompts and payloads. Every
+/// reachable source names itself (`fr` → `French`) rather than every
+/// non-English source reading `Japanese`; unknown codes say `Unknown`
+/// instead of mislabelling the source. `attempt_chunk` additionally
+/// accepts a raw `"ja"`.
 pub(crate) fn display_source_lang(src_lang: &str) -> &'static str {
-    if crate::lang::normalize_lang(src_lang) == "en" {
-        "English"
-    } else {
-        "Japanese"
-    }
+    crate::lang::display_name(src_lang)
 }
 
 fn system_prompt(target: &str, source: &str, knowledge: &str) -> String {
@@ -527,13 +524,34 @@ mod tests {
     fn prompt_carries_actual_source_and_target() {
         // Legacy parity (test_translation_source_language.py): the prompt
         // must name the real source language, not a hardcoded one — the
-        // ladder passes English through for `en` sources.
+        // ladder passes English through for `en` sources, the ASR passes the
+        // track's real tag for everything else.
         let p = system_prompt("Indonesian", display_source_lang("en"), "");
         assert!(p.contains("English"), "{p}");
         assert!(p.contains("Indonesian"), "{p}");
         assert_eq!(display_source_lang("ja"), "Japanese");
         assert_eq!(display_source_lang("jpn"), "Japanese");
         assert_eq!(display_source_lang("en"), "English");
+        // A French source must not be called Japanese (the defect).
+        assert_eq!(display_source_lang("fr"), "French");
+        assert_eq!(display_source_lang("fre"), "French");
+    }
+
+    #[test]
+    fn french_source_lines_must_skip_the_foreign_guard() {
+        // The foreign-script guard turns "mostly-latin" lines into SDH
+        // placeholders (it exists for Japanese ASR echoing OP/ED lyrics in
+        // English/Chinese). A faithful French transcript is mostly latin, so
+        // running it there would empty the episode — the guard must only run
+        // for CJK sources, and `fr` is not one.
+        let fr = vec![
+            "Bonjour, comment allez-vous ?".to_string(),
+            "Le president est arrive.".to_string(),
+        ];
+        let wiped = guard_foreign_lines(fr.clone(), &placeholders());
+        assert_eq!(wiped, vec!["（歌詞）".to_string(), "（歌詞）".to_string()]);
+        assert!(!crate::lang::needs_foreign_guard("fr"));
+        assert!(crate::lang::needs_foreign_guard("ja"));
     }
 
     #[tokio::test]

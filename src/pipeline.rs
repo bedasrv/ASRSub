@@ -49,6 +49,10 @@ pub struct Candidate {
     pub path: Option<String>,
     pub missing: Vec<String>,
     pub is_movie: bool,
+    /// Media original language, best effort (source-track choice). Movies
+    /// carry it straight from the Radarr payload; series resolve it from the
+    /// pass's Sonarr listing in `process_one`. `None` never fails a pass.
+    pub original_lang: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -127,7 +131,7 @@ impl Pipeline {
         let (skip_ids, retries) = self.consume_actions().await;
         // Discover (Bazarr) and series titles (Sonarr) are independent:
         // fire together, latency is the max, not the sum.
-        let (mut candidates, titles) =
+        let (mut candidates, series_titles) =
             tokio::join!(self.discover(&skip_ids), self.sonarr.series_titles());
         // Inline retries: reprocess THIS pass instead of waiting for Bazarr
         // to rescan (minutes) and a later pass to notice. Resolution mirrors
@@ -159,10 +163,13 @@ impl Pipeline {
         let mut jobs = Vec::with_capacity(caps.len());
         for cand in caps {
             let sem = sem.clone();
-            let titles = &titles;
+            let series_titles = &series_titles;
             jobs.push(async move {
                 let _p = sem.acquire_owned().await.expect("semaphore closed");
-                (cand.episode_id, self.process_one(&cand, titles).await)
+                (
+                    cand.episode_id,
+                    self.process_one(&cand, series_titles).await,
+                )
             });
         }
         for (eid, r) in futures::future::join_all(jobs).await {
@@ -240,6 +247,7 @@ impl Pipeline {
                     path: Some(path.to_string()),
                     missing: r.langs.clone(),
                     is_movie: true,
+                    original_lang: movie_original_lang(m),
                 });
             } else {
                 match self.sonarr.episode(r.episode_id).await {
@@ -251,6 +259,8 @@ impl Pipeline {
                         path: None,
                         missing: r.langs.clone(),
                         is_movie: false,
+                        // Resolved from the Sonarr series listing in process_one.
+                        original_lang: None,
                     }),
                     Err(e) => {
                         tracing::warn!(
@@ -333,6 +343,8 @@ impl Pipeline {
                             .map(str::to_string),
                         missing,
                         is_movie: false,
+                        // Resolved from the Sonarr series listing in process_one.
+                        original_lang: None,
                     });
                 }
             }
@@ -386,6 +398,7 @@ impl Pipeline {
                         path: Some(path.to_string()),
                         missing,
                         is_movie: true,
+                        original_lang: movie_original_lang(&m),
                     });
                 }
             }
@@ -393,6 +406,14 @@ impl Pipeline {
         out.sort_by_key(|c| c.episode_id);
         out
     }
+}
+
+/// Radarr's `originalLanguage` for a movie (Bazarr passes the Radarr payload
+/// through when it is present). Accepts the usual `{id, name}` object or a
+/// bare string; absent/blank degrades to `None` — never a pass failure. Same
+/// parser the Sonarr series listing uses (`crate::lang::original_language`).
+fn movie_original_lang(m: &serde_json::Value) -> Option<String> {
+    crate::lang::original_language(m.get("originalLanguage")?)
 }
 
 /// Registry rows whose recorded target sidecar is still on disk, keyed
@@ -424,6 +445,27 @@ fn verified_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn movie_original_language_degrades_gracefully() {
+        assert_eq!(
+            movie_original_lang(
+                &serde_json::json!({"originalLanguage": {"id": 2, "name": "French"}})
+            )
+            .as_deref(),
+            Some("French")
+        );
+        assert_eq!(
+            movie_original_lang(&serde_json::json!({"originalLanguage": "German"})).as_deref(),
+            Some("German")
+        );
+        // Missing / blank / wrong shape: None, never an error.
+        assert_eq!(movie_original_lang(&serde_json::json!({})), None);
+        assert_eq!(
+            movie_original_lang(&serde_json::json!({"originalLanguage": {"name": "  "}})),
+            None
+        );
+    }
 
     #[test]
     fn verified_targets_needs_row_and_file() {

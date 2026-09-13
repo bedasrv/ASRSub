@@ -29,13 +29,18 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 deleted 2026-09-08 and removed from `main` 2026-09-09 —
                 rollback is redeploying the previous SHA image per
                 docs/DEPLOY.md; reference code survives in git history)
+tools/          operator scripts; `probe_wire_langs.py` re-measures the codes
+                the configured Whisper endpoint accepts as `language` and
+                exits non-zero when they disagree with `src/lang.rs`; it
+                refuses to overwrite an existing output CSV unless `--force`
+                (re-measuring on the same date needs `--force` or `--out`)
 ```
 
 ## Quickstart
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 129 unit + 4 integration (offline simulation incl.)
+cargo test                     # 195 unit + 11 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -113,7 +118,42 @@ guarantees every field is a pipeline-owned key, so the UI cannot drift.
   the same pass (resolved straight from Sonarr/Radarr — no waiting for
   Bazarr's rescan); `delete` additionally refreshes Jellyfin.
 - Only 204/transport-error/429/5xx Bazarr outcomes retry; 400/401/404 fail fast.
-- Untagged audio tracks transcribe as Japanese (anime-library default).
+- The audio track is chosen by its **real language tag**, once per target
+  language: target-language track (no translation) → the media's original
+  language (Sonarr/Radarr, best effort) → `ja` → the earlier of the first
+  track whose tag names no language (the original in a dual-audio release)
+  and the track tagged `en` — so an English dub wins over an untagged
+  original only when it comes first physically (`[und(0), eng(1)]` and
+  `[eng(0), und(1)]` both take stream 0; the first detects, the second pins
+  `en`) → first non-commentary track.
+  Commentary/audio-description tracks are skipped when a normal alternative
+  exists.
+- Whisper is sent that tag's code (container `fre` → `fr`), never a
+  fabricated or uncertainty code: a tag that names no language
+  (`und`, `unknown`, `""`, `englishus`) is not pinned — it takes the
+  detection path. That track is transcribed unforced once and the
+  `verbose_json` `language` pins the remaining chunks **only when the
+  endpoint is measured to accept that code**; a detected code outside that
+  set leaves the later chunks unforced and the source is the detected code.
+  If no code can be established, or a request that **carried a pin** (the
+  whole file, or one chunk of it) contradicts the code it asserted, the
+  language **fails closed** — nothing is installed, uploaded, or registered
+  `done`, and a retry can redo it. The accept set is a live measurement of
+  the configured endpoint (`tools/probe_wire_langs.py`), not a published
+  list: a code the endpoint answers with HTTP 400 must never be sent. The same
+  table carries Whisper's own name for each code, so a provider that answers a
+  language by name (`tibetan` to a `bo` pin, `haitian creole` to `ht`) is read
+  as that language instead of aborting the episode, and every other standard
+  spelling of an accepted code is read the same way (`yid` for a `yi` pin,
+  `tib`/`bod` for `bo`) — only a report that is genuinely another language
+  still fails closed. Ladder rows and
+  the translation prompt name the real source (`French`, not `Japanese`),
+  and the registry `extra` records `source_lang` on every row plus
+  `source_stream` on **ASR rows only** (a ladder row has no chosen audio
+  stream).
+- The foreign-script (SDH placeholder) guard runs for **Japanese** sources
+  only: a latin source such as French would otherwise be rewritten to
+  placeholders too.
 - `/ready` gates on local prerequisites (media root, providers, writable
   state dir) and reports integrations as diagnostics; `/health` stays cheap.
   No paused-boot yet — see `docs/HEALTH.md`.

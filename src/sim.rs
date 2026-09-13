@@ -24,6 +24,12 @@
 //! * F — stale done self-heals: deleted sidecar resurfaces as missing.
 //! * G — upload retries (2×500 then 204 → 3 attempts, done) and
 //!   Bazarr-down grace (all-500 → still done, sidecar authoritative).
+//! * H — an untagged track with no detectable language fails the language
+//!   (no sidecar, no upload, no `done` row).
+//! * I — the successful detection path: the same untagged track, but the
+//!   provider reports `language`, so the probe (which must carry no
+//!   `language` field) establishes the source and the run completes with the
+//!   detected code in the registry.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -50,6 +56,13 @@ struct Stubs {
     refill_hits: Mutex<u32>,
     movie_on: AtomicBool,
     wanted_id_missing: AtomicBool,
+    /// Detected `language` the Whisper stub reports (`None` omits it, like a
+    /// provider that cannot detect). Phase I sets it to "ja" so the
+    /// successful-detection path is covered end to end.
+    detected_language: Mutex<Option<String>>,
+    /// Raw multipart bodies the Whisper stub received, in order: proves the
+    /// unforced probe carried no `language` form field.
+    whisper_bodies: Mutex<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -166,12 +179,23 @@ async fn llm_chat(
     )
 }
 
-/// Whisper stub: one fixed Japanese segment per call.
-async fn whisper_stt(State(cx): State<StubCx>, _body: Bytes) -> impl IntoResponse {
+/// Whisper stub: one fixed Japanese segment per call, plus the configured
+/// detected `language` (absent unless a phase asks for detection). Records
+/// every received multipart body so a phase can assert what was NOT sent.
+async fn whisper_stt(State(cx): State<StubCx>, body: Bytes) -> impl IntoResponse {
     *cx.stubs.whisper_hits.lock().await += 1;
-    Json(serde_json::json!({
+    cx.stubs
+        .whisper_bodies
+        .lock()
+        .await
+        .push(String::from_utf8_lossy(&body).to_string());
+    let mut v = serde_json::json!({
         "segments": [{"start": 0.0, "end": 2.5, "text": "こんにちは世界これはテストです"}],
-    }))
+    });
+    if let Some(lang) = cx.stubs.detected_language.lock().await.clone() {
+        v["language"] = serde_json::json!(lang);
+    }
+    Json(v)
 }
 
 /// Broken Whisper stub: always 500 (failover drill target).
@@ -451,6 +475,19 @@ exit 0
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("asr")));
     assert!(reg.iter().all(|r| r.source_kind.is_none()));
+    // Provenance records the real source: the `jpn` track on stream 1.
+    for r in &reg {
+        assert_eq!(
+            r.extra.get("source_lang").and_then(|v| v.as_str()),
+            Some("ja"),
+            "row missing source_lang: {r:?}"
+        );
+        assert_eq!(
+            r.extra.get("source_stream").and_then(|v| v.as_u64()),
+            Some(1),
+            "row missing source_stream: {r:?}"
+        );
+    }
 
     // ---- Phase B: ladder path (adequate ja sidecar, zero new ASR) ----
     std::fs::remove_file(&pipe.cfg.state_file).ok();
@@ -470,6 +507,21 @@ exit 0
     assert!(reg
         .iter()
         .all(|r| r.source_kind.as_deref() == Some("external")));
+    // The doc claim is "`source_stream` on ASR rows only, `source_lang` on
+    // every row": the ladder path had no assertion for either key, so a
+    // ladder row could start carrying `source_stream` (or lose
+    // `source_lang`) unseen.
+    for r in &reg {
+        assert!(
+            !r.extra.contains_key("source_stream"),
+            "ladder row must not carry source_stream: {r:?}"
+        );
+        assert_eq!(
+            r.extra.get("source_lang").and_then(|v| v.as_str()),
+            Some("ja"),
+            "ladder row missing source_lang: {r:?}"
+        );
+    }
 
     // ---- Phase C: actions round-trip ----
     // Retry(id) regenerates IN THE SAME PASS even though Bazarr does not
@@ -634,4 +686,104 @@ exit 0
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     assert!(std::path::Path::new(&format!("{mstem_s}.en.hi.srt")).is_file());
+
+    // ---- Phase H: an untagged track with no detectable language fails ----
+    // No language tag -> detection mode; the stub Whisper reports no
+    // `language`, so the source cannot be established. The language must
+    // fail: no sidecar written, no upload, nothing committed done.
+    stubs.movie_on.store(false, Ordering::Relaxed);
+    for lang in ["id", "en"] {
+        std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
+    }
+    std::fs::write(&pipe.cfg.state_file, "").unwrap();
+    std::fs::remove_file(&pipe.cfg.registry_file).ok();
+    stubs.uploads.lock().await.clear();
+    write_exe(
+        &bin_dir.join("ffprobe"),
+        r#"#!/bin/sh
+if printf '%s' "$*" | grep -q "stream=index"; then
+  printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"300.0"}}'
+else
+  printf '{"format":{"duration":"300.0"}}'
+fi
+"#,
+    );
+    let stats = pipe.run_pass().await;
+    assert_eq!(
+        (stats.scanned, stats.done, stats.failed),
+        (1, 0, 1),
+        "undetectable source language must fail the language"
+    );
+    for lang in ["id", "en"] {
+        assert!(
+            !std::path::Path::new(&format!("{stem_s}.{lang}.hi.srt")).exists(),
+            "no sidecar may be written for an unestablished source language"
+        );
+    }
+    assert!(registry_rows(&pipe.cfg.registry_file).is_empty());
+    assert!(stubs.uploads.lock().await.is_empty());
+    assert!(state_rows(&pipe.cfg.state_file)
+        .iter()
+        .any(|r| r.status.as_deref() == Some("error")));
+
+    // ---- Phase I: successful detection (round-2 coverage) ----
+    // The same untagged track, but the provider now reports a language. The
+    // probe must still be unforced (no `language` field), and the detected
+    // code must complete the run: sidecar written, uploaded, and recorded as
+    // the episode's `source_lang`.
+    *stubs.detected_language.lock().await = Some("ja".to_string());
+    std::fs::write(&pipe.cfg.state_file, "").unwrap();
+    std::fs::remove_file(&pipe.cfg.registry_file).ok();
+    stubs.uploads.lock().await.clear();
+    stubs.upload_failures.store(0, Ordering::SeqCst);
+    let bodies_before = stubs.whisper_bodies.lock().await.len();
+    let hits_before = *stubs.whisper_hits.lock().await;
+    let stats = pipe.run_pass().await;
+    assert_eq!(
+        (stats.scanned, stats.done, stats.failed),
+        (1, 1, 0),
+        "a detected source language must complete the episode"
+    );
+    assert_eq!(*stubs.whisper_hits.lock().await, hits_before + 1);
+    let probes: Vec<String> = stubs.whisper_bodies.lock().await[bodies_before..].to_vec();
+    assert_eq!(probes.len(), 1, "one transcription serves both targets");
+    assert!(
+        !probes[0].contains("name=\"language\""),
+        "the detection probe must send no `language` field: {}",
+        probes[0]
+    );
+    for lang in ["id", "en"] {
+        let p = format!("{stem_s}.{lang}.hi.srt");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("[AI-generated by ASRSub]"),
+            "{p} missing marker"
+        );
+        assert!(text.contains("Hasil 0"), "{p} missing translation");
+    }
+    let mut ups = stubs.uploads.lock().await.clone();
+    ups.sort();
+    assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
+    let reg = registry_rows(&pipe.cfg.registry_file);
+    assert_eq!(reg.len(), 2);
+    for r in &reg {
+        assert_eq!(r.source.as_deref(), Some("asr"), "row is not ASR: {r:?}");
+        assert_eq!(
+            r.extra.get("source_lang").and_then(|v| v.as_str()),
+            Some("ja"),
+            "the detected code must be the recorded source: {r:?}"
+        );
+        assert_eq!(
+            r.extra.get("source_stream").and_then(|v| v.as_u64()),
+            Some(1),
+            "ASR rows record the chosen stream: {r:?}"
+        );
+    }
+    assert_eq!(
+        state_rows(&pipe.cfg.state_file)
+            .iter()
+            .filter(|r| r.status.as_deref() == Some("done"))
+            .count(),
+        2
+    );
 }
