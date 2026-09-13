@@ -75,6 +75,10 @@ enum Cmd {
         input: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// With `--stream N`: the language pinned for that track (must be one
+        /// the provider accepts — an unpinnable code is rejected, never
+        /// silently dropped). Without it: the target language the source
+        /// track is chosen for.
         #[arg(long, default_value = "ja")]
         lang: String,
         /// Audio stream index (default: auto-pick by the track's language tag,
@@ -286,6 +290,24 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 }
 
+/// The language an explicit `--stream N` run pins.
+///
+/// The caller names it, so a code the provider is not measured to accept is
+/// an error rather than a silent downgrade: the wire filter would drop the
+/// field (the request would detect instead), while the artifact and the
+/// registry stayed labelled after the code the caller "pinned". The
+/// auto-pick path never needs this — it decides the language from the
+/// chosen track's own tag.
+fn pinned_cli_lang(lang: &str) -> Result<String> {
+    let code = lang::normalize_lang(lang);
+    anyhow::ensure!(
+        lang::is_usable_code(&code),
+        "--lang {lang:?} is not a language the provider accepts ({code:?}); \
+         pass a pinnable code or drop --stream and let the track's tag decide"
+    );
+    Ok(code)
+}
+
 async fn transcribe_cmd(
     providers_file: Option<PathBuf>,
     input: &Path,
@@ -297,13 +319,19 @@ async fn transcribe_cmd(
     let input_s = input.to_string_lossy().to_string();
     let probe = asr::probe_media(&input_s).await?;
     let mapped: Vec<asr::AudioStream> = probe.streams;
-    let choice = match stream {
-        Some(i) => asr::AudioChoice {
+    // Explicit stream: the caller's `--lang` is the pin, and it must be a
+    // language the provider accepts (never silently dropped).
+    let pinned = match stream {
+        Some(_) => Some(pinned_cli_lang(lang)?),
+        None => None,
+    };
+    let choice = match (&pinned, stream) {
+        (Some(pinned), Some(i)) => asr::AudioChoice {
             stream_index: i,
-            asr_lang: Some(lang::normalize_lang(lang)),
+            asr_lang: Some(pinned.clone()),
             needs_translate: true,
         },
-        None => asr::choose_source(&mapped, lang, None).context("no audio streams")?,
+        _ => asr::choose_source(&mapped, lang, None).context("no audio streams")?,
     };
     let key = format!("cli-{}", std::process::id());
     let transcript = asr::transcribe_episode(
@@ -322,12 +350,12 @@ async fn transcribe_cmd(
     .await?;
     tracing::info!(source_lang = %transcript.lang, stream = choice.stream_index, "transcribed");
     // CLI explicit stream: honour the requested language for the
-    // default output name. Otherwise the effective (tag or detected)
-    // language names the file — never the assumed one.
-    let named = if stream.is_some() {
-        lang::normalize_lang(lang)
-    } else {
-        transcript.lang.clone()
+    // default output name (it is the language that was actually pinned).
+    // Otherwise the effective (tag or detected) language names the file —
+    // never the assumed one.
+    let named = match &pinned {
+        Some(code) => code.clone(),
+        None => transcript.lang.clone(),
     };
     let out_path = output
         .map(|p| p.to_path_buf())
@@ -764,6 +792,22 @@ mod tests {
             translate_output_path(Path::new("/m/plain.srt"), "id"),
             PathBuf::from("/m/plain.id.srt")
         );
+    }
+
+    #[test]
+    fn explicit_stream_rejects_an_unpinnable_lang() {
+        // `--stream N --lang und` used to build a choice the wire filter then
+        // emptied: the run detected a language while the sidecar and the
+        // registry were named after the code the caller asked for. It must
+        // fail loudly instead of silently downgrading.
+        assert_eq!(pinned_cli_lang("ja").unwrap(), "ja");
+        assert_eq!(pinned_cli_lang("JPN").unwrap(), "ja");
+        assert_eq!(pinned_cli_lang("English (US)").unwrap(), "en");
+        for bad in ["und", "fil", "tgl", "xx", "unknown", "", "klingon"] {
+            let err = pinned_cli_lang(bad).unwrap_err().to_string();
+            assert!(err.contains("--lang"), "{bad}: {err}");
+            assert!(err.contains("drop --stream"), "{bad}: {err}");
+        }
     }
 
     #[test]

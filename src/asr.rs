@@ -154,16 +154,21 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
 /// 2. else a track matching the media's **original language**, when known
 ///    and different from the target;
 /// 3. else a `ja`-tagged track;
-/// 4. else the physically-first non-commentary track whose tag is
-///    **absent or unusable** (detection): in a dual-audio release the first
-///    stream is the original, and preferring a dub over it would translate
-///    the dub back into the media's own language;
-/// 5. else an `en`-tagged track;
-/// 6. else the first non-commentary track; else `streams[0]`.
+/// 4. else the **earlier** of the first non-commentary track whose tag is
+///    absent or unusable (detection) and the first non-commentary track
+///    tagged with a usable `en`. In a dual-audio release the untagged track
+///    is the original and must beat the dub — but only when it actually
+///    comes first: a mux whose tagged `en` track is stream 0 must keep
+///    transcribing that track, so `[und(0), eng(1)]` and `[eng(0), und(1)]`
+///    both choose stream 0 (the first for detection, the second pinning
+///    `en`). Both candidates compete by physical stream index, not by rule
+///    order;
+/// 5. else the first non-commentary track; else `streams[0]`.
 ///
 /// The tag only chooses the track: the language sent to Whisper is that
-/// tag's real, **usable** code, or nothing (detection) when the tag is
-/// absent or unusable (`und`, `unknown`, `englishus`, `""`). The old
+/// tag's real, **pinnable** code (see `lang::is_usable_code`), or nothing
+/// (detection) when the tag is absent or unusable (`und`, `unknown`,
+/// `englishus`, `""`, and any code the provider rejects). The old
 /// implementation forced `ja` for any other tag, so a `fre` track was
 /// transcribed as Japanese and produced a fabricated translation (the
 /// defect this fixes); pinning a present-but-unusable tag (`und`) made the
@@ -183,8 +188,9 @@ pub fn choose_source(
     let target = (!target.is_empty()).then_some(target);
     let original = original_lang.map(crate::lang::normalize_lang);
     let norm = |s: &AudioStream| s.language.as_deref().map(crate::lang::normalize_lang);
-    // Only a usable code identifies a track. `und`/`unknown`/`""` mean "no
-    // language", so they must never be compared as if they named one.
+    // Only a pinnable code identifies a track. `und`/`unknown`/`""` mean "no
+    // language", so they must never be compared as if they named one, and a
+    // code the provider rejects must not be pinned either.
     let usable = |s: &AudioStream| norm(s).filter(|c| crate::lang::is_usable_code(c));
     let find = |want: &str| {
         streams
@@ -201,17 +207,19 @@ pub fn choose_source(
                 .and_then(find)
         })
         .or_else(|| find("ja"))
-        // The original in a dual-audio release: the physically-first track
-        // whose tag does not name a language (see rule 4 above).
+        // Rule 4: one pass for both candidates, so the physically-earlier of
+        // "tag does not name a language" (the dual-audio original → detect)
+        // and "tagged a usable `en`" (the dub → pin) wins. Two separate
+        // `or_else`s would let a later untagged track outrank an earlier
+        // `en` one.
         .or_else(|| {
-            streams
-                .iter()
-                .find(|s| !is_commentary(s) && usable(s).is_none())
+            streams.iter().find(|s| {
+                !is_commentary(s) && (usable(s).is_none() || usable(s).as_deref() == Some("en"))
+            })
         })
-        .or_else(|| find("en"))
         .or_else(|| streams.iter().find(|s| !is_commentary(s)))
         .or_else(|| streams.first())?;
-    // Only a real language code is pinned: anything else takes the
+    // Only a pinnable language code is pinned: anything else takes the
     // detection path (no `language` field, code read from the response).
     let asr_lang = usable(picked);
     // Known tag: translate unless the source already is the target.
@@ -266,11 +274,14 @@ pub async fn extract_audio(media: &str, stream_index: u32, dest: &Path) -> Resul
 }
 
 /// Text fields for one Whisper request. `language` is omitted entirely when
-/// the tag is unknown/unusable (`None`), and an unusable code is dropped
-/// here too: detection, never a fabricated or uncertainty code
-/// (`und`/`unknown`/`""`) on the wire — the provider answers those with
-/// HTTP 400, and an unusable code must not be sent even if a caller hands
-/// one over.
+/// the tag is unknown/unusable (`None`), and a code the provider is not
+/// measured to accept is dropped here too: detection, never a fabricated or
+/// uncertainty code (`und`/`unknown`/`""`) on the wire — the provider
+/// answers those with HTTP 400, and an unlisted code must not be sent even
+/// if a caller hands one over. This filter is the last line of defence for
+/// every path that can carry a language (`choose_source`'s pinned tag, the
+/// code detected from a probe and reused for follow-up chunks, and a CLI
+/// caller).
 fn whisper_text_fields(model: &str, lang: Option<&str>) -> Vec<(&'static str, String)> {
     let mut fields = vec![
         ("model", model.to_string()),
@@ -302,21 +313,40 @@ fn whisper_form(
 }
 
 /// Detected language from a `verbose_json` response's top-level `language`
-/// field (previously discarded — only `segments` was read). No **usable**
-/// code is an error, never a guess: a provider that answers `unknown`,
-/// `none`, `N/A`, `und`, or nothing at all cannot establish the source, so
-/// the language fails instead of committing a subtitle whose source we do
-/// not know.
+/// field (previously discarded — only `segments` was read).
+///
+/// A response value is metadata, not a wire value: it is stored as the
+/// episode's source language and compared against the target to decide
+/// whether to translate. It is therefore *normalized*, not gated as if it
+/// were about to be pinned — a provider that answers with a full name
+/// (`tamil`, `cantonese`) or a BCP-47 value (`zh-Hant`, `pt-BR`) names a
+/// real language and must not fail the episode (the old gate rejected all
+/// five and reported it as "no detected language", which was false and a
+/// permanent per-episode failure).
+///
+/// Only a genuinely unusable answer errors, and the two cases are
+/// distinguished: an *absent or empty* field, and a *present but unusable*
+/// one, which names the value that was rejected. A plain 2–3 letter token is
+/// accepted as-is even when it is not a code this pipeline pins — it is
+/// metadata only, and `asr`'s wire filter keeps an unpinnable one off
+/// follow-up requests.
 fn detected_lang(v: &serde_json::Value) -> Result<String> {
     let raw = v
         .get("language")
         .and_then(|l| l.as_str())
         .unwrap_or("")
         .trim();
-    let code = crate::lang::normalize_lang(raw);
-    if !crate::lang::is_usable_code(&code) {
+    if raw.is_empty() {
+        anyhow::bail!("whisper returned no detected language (no `language` in verbose_json)");
+    }
+    let code = crate::lang::normalize_reported_lang(raw);
+    let serviceable = code.len() >= 2
+        && code.len() <= 3
+        && code.chars().all(|c| c.is_ascii_lowercase())
+        && !crate::lang::is_uncertainty_marker(&code);
+    if !serviceable {
         anyhow::bail!(
-            "whisper returned no detected language (no usable `language` in verbose_json)"
+            "whisper returned an unusable detected language `{raw}` (no serviceable `language` in verbose_json)"
         );
     }
     Ok(code)
@@ -817,9 +847,20 @@ mod tests {
 
     #[test]
     fn uncertainty_and_overlong_tags_detect_instead_of_pinning() {
-        // `UNKNOWN` (a real tag writers emit) and `jajp`/`zhhant` (what an
-        // alnum collapse of `ja-JP`/`zh-Hant` yields) are not codes.
-        for tag in ["UNKNOWN", "jajp", "zhhant", "underspecified"] {
+        // `UNKNOWN` (a real tag writers emit), `jajp`/`zhhant` (what an
+        // alnum collapse of `ja-JP`/`zh-Hant` yields), and every code the
+        // provider rejects are not pinnable.
+        for tag in [
+            "UNKNOWN",
+            "jajp",
+            "zhhant",
+            "underspecified",
+            "fil",
+            "tgl",
+            "filipino",
+            "tam",
+            "xx",
+        ] {
             let s = vec![track(0, Some(tag), None)];
             let c = choose_source(&s, "id", None).unwrap();
             assert_eq!(c.asr_lang, None, "{tag} must not be pinned");
@@ -870,6 +911,45 @@ mod tests {
     }
 
     #[test]
+    fn english_track_first_still_beats_a_later_untagged_track() {
+        // [eng(0), und(1)], target id: the tagged `en` track is the
+        // physically-first candidate, so it wins and pins `en`. cc26d9b
+        // picked stream 1 (the later untagged track) because the untagged
+        // rule outranked the `en` lookup regardless of position, while
+        // 7115bb8 picked stream 0 — a regression this fixes. The two
+        // candidates now compete by stream index.
+        let s = vec![track(0, Some("eng"), None), track(1, Some("und"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0, "the earlier tagged en track must win");
+        assert_eq!(c.asr_lang.as_deref(), Some("en"));
+        assert!(c.needs_translate);
+        assert!(!c.detects_language());
+        // The dual-audio shape keeps its answer: with the untagged original
+        // first, the original still beats the dub.
+        let s = vec![track(0, Some("und"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+        // Position decides among the NON-commentary candidates: a tagged `en`
+        // dub at stream 0 still wins over an unusable *commentary* track.
+        let s = vec![
+            track(0, Some("eng"), None),
+            track(1, Some("und"), Some("Commentary")),
+        ];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang.as_deref(), Some("en"));
+        // A rejected-but-present tag is an unusable tag for ranking: a
+        // `fil`-tagged first track is the original and takes detection.
+        let s = vec![track(0, Some("fil"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+    }
+
+    #[test]
     fn tagged_japanese_original_still_beats_the_english_dub() {
         // The common anime case must be byte-identical to before: the `ja`
         // rule fires before the untagged rule and pins the tag.
@@ -900,9 +980,9 @@ mod tests {
 
     #[test]
     fn detected_lang_rejects_uncertainty_markers() {
-        // A response code that is not a usable language cannot become the
-        // episode's source: it errors exactly like a missing one.
-        for bad in ["unknown", "none", "und", "englishus", "N/A", "  "] {
+        // A response that names no language cannot become the episode's
+        // source: it errors exactly like a missing one.
+        for bad in ["unknown", "none", "und", "englishus", "N/A", "  ", "mul"] {
             assert!(
                 detected_lang(&serde_json::json!({ "language": bad })).is_err(),
                 "{bad} must not be accepted as a detected language"
@@ -919,6 +999,61 @@ mod tests {
     }
 
     #[test]
+    fn detected_lang_accepts_real_languages_it_used_to_reject() {
+        // Measured with the real binary: every one of these errored as
+        // "no detected language" — false, and a permanent per-episode
+        // failure for any provider that answers with full names or BCP-47
+        // values. The detected code is metadata (stored + compared), never a
+        // wire value, so it is normalized rather than gated.
+        for (reported, want) in [
+            ("tamil", "ta"),
+            ("malayalam", "ml"),
+            ("cantonese", "yue"),
+            ("zh-Hant", "zh"),
+            ("pt-BR", "pt"),
+        ] {
+            assert_eq!(
+                detected_lang(&serde_json::json!({ "language": reported })).unwrap(),
+                want,
+                "{reported}"
+            );
+        }
+        // A plain 2–3 letter token is accepted as-is even when this pipeline
+        // does not pin it: it is metadata only, and the wire filter keeps an
+        // unpinnable code off the follow-up requests.
+        for code in ["ta", "ml", "yue", "tl", "xx"] {
+            assert_eq!(
+                detected_lang(&serde_json::json!({ "language": code })).unwrap(),
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn detected_lang_error_text_distinguishes_absent_from_unusable() {
+        // Absent/empty: the provider reported nothing.
+        for v in [serde_json::json!({}), serde_json::json!({"language": ""})] {
+            let err = detected_lang(&v).unwrap_err().to_string();
+            assert!(err.contains("no detected language"), "{v}: {err}");
+            assert!(err.contains("no `language`"), "{v}: {err}");
+        }
+        // Present but unusable: the message names the rejected value and
+        // does not claim there was no detected language.
+        let err = detected_lang(&serde_json::json!({"language": "englishus"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("englishus"), "{err}");
+        assert!(err.contains("unusable detected language"), "{err}");
+        assert!(!err.contains("no detected language"), "{err}");
+        // A name is never rejected for being a name: only a value that is
+        // not 2–3 letters after normalization is.
+        let err = detected_lang(&serde_json::json!({"language": "Klingon (KLI)"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Klingon (KLI)"), "{err}");
+    }
+
+    #[test]
     fn unusable_code_never_reaches_the_wire() {
         // The `und` case: the chosen track takes the detection path, so the
         // same choice cannot produce a `language` form field.
@@ -926,9 +1061,24 @@ mod tests {
         let c = choose_source(&s, "id", None).unwrap();
         let fields = whisper_text_fields("m", c.asr_lang.as_deref());
         assert!(!fields.iter().any(|(k, _)| *k == "language"), "{fields:?}");
-        // Defense in depth: even a hand-passed unusable tag cannot produce
-        // the field (the provider answers it with HTTP 400).
-        for bad in ["und", "UNKNOWN", "", " ", "jajp", "zhhant", "englishus"] {
+        // Defense in depth: even a hand-passed unpinnable tag cannot produce
+        // the field (the provider answers some with HTTP 400 outright, and
+        // the rest are codes this pipeline does not pin).
+        for bad in [
+            "und",
+            "UNKNOWN",
+            "",
+            " ",
+            "jajp",
+            "zhhant",
+            "englishus",
+            "fil",
+            "tgl",
+            "filipino",
+            "tam",
+            "xx",
+            "tl",
+        ] {
             let fields = whisper_text_fields("m", Some(bad));
             assert!(
                 !fields.iter().any(|(k, _)| *k == "language"),

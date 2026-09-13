@@ -507,6 +507,21 @@ exit 0
     assert!(reg
         .iter()
         .all(|r| r.source_kind.as_deref() == Some("external")));
+    // The doc claim is "`source_stream` on ASR rows only, `source_lang` on
+    // every row": the ladder path had no assertion for either key, so a
+    // ladder row could start carrying `source_stream` (or lose
+    // `source_lang`) unseen.
+    for r in &reg {
+        assert!(
+            !r.extra.contains_key("source_stream"),
+            "ladder row must not carry source_stream: {r:?}"
+        );
+        assert_eq!(
+            r.extra.get("source_lang").and_then(|v| v.as_str()),
+            Some("ja"),
+            "ladder row missing source_lang: {r:?}"
+        );
+    }
 
     // ---- Phase C: actions round-trip ----
     // Retry(id) regenerates IN THE SAME PASS even though Bazarr does not
