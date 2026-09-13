@@ -77,7 +77,8 @@ enum Cmd {
         output: Option<PathBuf>,
         #[arg(long, default_value = "ja")]
         lang: String,
-        /// Audio stream index (default: auto-pick Japanese).
+        /// Audio stream index (default: auto-pick by the track's language tag,
+        /// detecting it when the tag is unknown).
         #[arg(long)]
         stream: Option<u32>,
     },
@@ -299,13 +300,13 @@ async fn transcribe_cmd(
     let choice = match stream {
         Some(i) => asr::AudioChoice {
             stream_index: i,
-            asr_lang: lang.to_string(),
+            asr_lang: Some(lang::normalize_lang(lang)),
             needs_translate: true,
         },
-        None => asr::choose_source(&mapped, lang).context("no audio streams")?,
+        None => asr::choose_source(&mapped, lang, None).context("no audio streams")?,
     };
     let key = format!("cli-{}", std::process::id());
-    let cues = asr::transcribe_episode(
+    let transcript = asr::transcribe_episode(
         &pool,
         asr::TranscribeJob {
             tmp_dir: &cfg.tmp_dir,
@@ -319,16 +320,29 @@ async fn transcribe_cmd(
         },
     )
     .await?;
+    tracing::info!(source_lang = %transcript.lang, stream = choice.stream_index, "transcribed");
+    // CLI explicit stream: honour the requested language for the
+    // default output name. Otherwise the effective (tag or detected)
+    // language names the file — never the assumed one.
+    let named = if stream.is_some() {
+        lang::normalize_lang(lang)
+    } else {
+        transcript.lang.clone()
+    };
     let out_path = output
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| input.with_extension(format!("{lang}.srt")));
+        .unwrap_or_else(|| input.with_extension(format!("{named}.srt")));
     srt::write_srt_to(
         &out_path.to_string_lossy(),
-        &cues,
+        &transcript.cues,
         cfg.ai_marker_cue,
         cfg.ai_marker_cue_ms,
     )?;
-    println!("wrote {} cues -> {}", cues.len(), out_path.display());
+    println!(
+        "wrote {} cues -> {}",
+        transcript.cues.len(),
+        out_path.display()
+    );
     Ok(())
 }
 
@@ -350,12 +364,11 @@ async fn translate_file_cmd(
         "" => String::new(),
         name => glossary.knowledge_block_for_cues(name, &texts, glossary::MAX_REFS),
     };
-    // Like the pipeline: no foreign-script guard when the SOURCE is already
-    // English/latin (skip_guard), or `en→id` via CLI becomes all placeholders.
-    let skip_guard = !matches!(
-        source.trim().to_lowercase().as_str(),
-        "japanese" | "ja" | "jpn" | "jp"
-    );
+    // Like the pipeline: the foreign-script guard is for Japanese sources
+    // only. A latin source (French, German, English) is mostly-latin by
+    // nature, and a Chinese source is hanzi without kana — the guard would
+    // rewrite either to SDH placeholders and empty the episode.
+    let skip_guard = !crate::lang::needs_foreign_guard(source);
     let lines = crate::translate::translate_lines(
         &pool,
         crate::translate::TranslateJob {

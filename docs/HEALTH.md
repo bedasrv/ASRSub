@@ -114,6 +114,17 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
   curl -sf http://127.0.0.1:8085/ready | jq .checks.media_root
   ```
 
+> LANGUAGE fails closed the same way. The audio track is chosen by its real
+> language tag (`fre` → `fr`) and that code is what Whisper is sent — never a
+> fabricated one. An **untagged** track is transcribed unforced once and the
+> `verbose_json` `language` pins the remaining chunks. If no code can be
+> established, or a chunk contradicts the code we pinned, the language errors
+> like a missing file (`failed`, state row `error`): nothing is installed,
+> uploaded, or registered `done`, and the next pass or a `retry` action redoes
+> it. The foreign-script (SDH placeholder) guard runs for Japanese sources
+> only — a latin source such as French would otherwise be rewritten to
+> placeholders. See `README.md` "Pipeline notes" for the pick order.
+
 ### 3. Webhooks (no inbox ledger)
 
 The retired Python daemon used a SQLite webhook inbox

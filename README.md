@@ -35,7 +35,7 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 129 unit + 4 integration (offline simulation incl.)
+cargo test                     # 145 unit + 4 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -113,7 +113,22 @@ guarantees every field is a pipeline-owned key, so the UI cannot drift.
   the same pass (resolved straight from Sonarr/Radarr — no waiting for
   Bazarr's rescan); `delete` additionally refreshes Jellyfin.
 - Only 204/transport-error/429/5xx Bazarr outcomes retry; 400/401/404 fail fast.
-- Untagged audio tracks transcribe as Japanese (anime-library default).
+- The audio track is chosen by its **real language tag**, once per target
+  language: target-language track (no translation) → the media's original
+  language (Sonarr/Radarr, best effort) → `ja` → `en` → first non-commentary
+  track. Commentary/audio-description tracks are skipped when a normal
+  alternative exists.
+- Whisper is sent that tag's code (container `fre` → `fr`), never a
+  fabricated one. An **untagged** track is transcribed unforced once and the
+  `verbose_json` `language` pins the remaining chunks; if it cannot be
+  established (or a chunk contradicts the pinned code) the language
+  **fails closed** — nothing is installed, uploaded, or registered `done`,
+  and a retry can redo it. Ladder rows and the translation prompt name the
+  real source (`French`, not `Japanese`), and the registry `extra` records
+  `source_lang`/`source_stream`.
+- The foreign-script (SDH placeholder) guard runs for **Japanese** sources
+  only: a latin source such as French would otherwise be rewritten to
+  placeholders too.
 - `/ready` gates on local prerequisites (media root, providers, writable
   state dir) and reports integrations as diagnostics; `/health` stays cheap.
   No paused-boot yet — see `docs/HEALTH.md`.

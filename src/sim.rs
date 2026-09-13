@@ -451,6 +451,19 @@ exit 0
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("asr")));
     assert!(reg.iter().all(|r| r.source_kind.is_none()));
+    // Provenance records the real source: the `jpn` track on stream 1.
+    for r in &reg {
+        assert_eq!(
+            r.extra.get("source_lang").and_then(|v| v.as_str()),
+            Some("ja"),
+            "row missing source_lang: {r:?}"
+        );
+        assert_eq!(
+            r.extra.get("source_stream").and_then(|v| v.as_u64()),
+            Some(1),
+            "row missing source_stream: {r:?}"
+        );
+    }
 
     // ---- Phase B: ladder path (adequate ja sidecar, zero new ASR) ----
     std::fs::remove_file(&pipe.cfg.state_file).ok();
@@ -634,4 +647,43 @@ exit 0
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     assert!(std::path::Path::new(&format!("{mstem_s}.en.hi.srt")).is_file());
+
+    // ---- Phase H: an untagged track with no detectable language fails ----
+    // No language tag -> detection mode; the stub Whisper reports no
+    // `language`, so the source cannot be established. The language must
+    // fail: no sidecar written, no upload, nothing committed done.
+    stubs.movie_on.store(false, Ordering::Relaxed);
+    for lang in ["id", "en"] {
+        std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
+    }
+    std::fs::write(&pipe.cfg.state_file, "").unwrap();
+    std::fs::remove_file(&pipe.cfg.registry_file).ok();
+    stubs.uploads.lock().await.clear();
+    write_exe(
+        &bin_dir.join("ffprobe"),
+        r#"#!/bin/sh
+if printf '%s' "$*" | grep -q "stream=index"; then
+  printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"300.0"}}'
+else
+  printf '{"format":{"duration":"300.0"}}'
+fi
+"#,
+    );
+    let stats = pipe.run_pass().await;
+    assert_eq!(
+        (stats.scanned, stats.done, stats.failed),
+        (1, 0, 1),
+        "undetectable source language must fail the language"
+    );
+    for lang in ["id", "en"] {
+        assert!(
+            !std::path::Path::new(&format!("{stem_s}.{lang}.hi.srt")).exists(),
+            "no sidecar may be written for an unestablished source language"
+        );
+    }
+    assert!(registry_rows(&pipe.cfg.registry_file).is_empty());
+    assert!(stubs.uploads.lock().await.is_empty());
+    assert!(state_rows(&pipe.cfg.state_file)
+        .iter()
+        .any(|r| r.status.as_deref() == Some("error")));
 }
