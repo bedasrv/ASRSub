@@ -784,3 +784,88 @@ fn a_different_languages_name_still_fails_closed() {
         "no request may drop the pin: {sent:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round 7: a provider that answers a pin with one of the language's OTHER
+// standard spellings (ISO 639-2/B, 639-2/T, 639-1) must commit. The measured
+// defect: a `yiddish-x` tag pins `yi` (round 6 made the tag's head readable)
+// and a provider answering the 639-2/B spelling `yid` aborted the episode
+// permanently with `whisper language mismatch: pinned yi, reported yid`, where
+// round 5 had written the SRT. The same reading widens detection, so the
+// resolved code — not the raw spelling — is what pins the later pieces.
+// ---------------------------------------------------------------------------
+
+/// Round 7, path 1: the single-request path. The tag `yiddish-x` establishes
+/// the pin `yi`; the provider answers `yid`; the run must commit and write the
+/// artifact. (Before this: non-zero exit, no artifact, `pinned yi, reported
+/// yid`.)
+#[test]
+fn a_provider_answering_an_iso_spelling_commits_a_pinned_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (out, stub, srt) = transcribe_run(
+        root,
+        "iso-pinned",
+        &one_track("yiddish-x"),
+        "40.0",
+        "200000",
+        vec![Some("yid")],
+        &["--lang", "id"],
+    );
+    assert!(
+        out.status.success(),
+        "a provider answering yid to a yi pin must commit, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stub.languages(),
+        vec![Some("yi".to_string())],
+        "the request must carry the code the tag pinned"
+    );
+    assert_eq!(
+        stub.requests()[0].filename.as_deref(),
+        Some("full.mp3"),
+        "40 s is the single-request path"
+    );
+    assert!(srt.is_file(), "no artifact written: {}", srt.display());
+}
+
+/// Round 7, path 2: detection. An untagged track's probe answers `yid`, which
+/// now resolves to the accepted `yi` — so the two remaining pieces carry `yi`.
+/// The exact request count IS invariant here (the run completes): one unforced
+/// probe + two pinned pieces, one cue each. Before this, `yid` was a token that
+/// survived only as metadata (not a wire code), so the later pieces were left
+/// unforced.
+#[test]
+fn detection_reads_an_iso_spelling_as_its_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (out, stub, srt) = transcribe_run(
+        root,
+        "iso-detect",
+        &one_track(""),
+        "1800.0",
+        "200000",
+        vec![Some("yid")],
+        &["--lang", "id"],
+    );
+    assert!(
+        out.status.success(),
+        "an unforced report must not abort: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stub.languages(),
+        vec![None, Some("yi".to_string()), Some("yi".to_string())],
+        "the probe detects `yid` (= yi) and the remaining pieces carry the resolved code"
+    );
+    assert!(srt.is_file());
+    assert_eq!(
+        std::fs::read_to_string(&srt)
+            .unwrap()
+            .matches("stub")
+            .count(),
+        3,
+        "one cue per piece"
+    );
+}

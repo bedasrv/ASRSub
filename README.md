@@ -38,7 +38,7 @@ tools/          operator scripts; `probe_wire_langs.py` re-measures the codes
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 190 unit + 9 integration (offline simulation incl.)
+cargo test                     # 195 unit + 11 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -141,8 +141,10 @@ guarantees every field is a pipeline-owned key, so the UI cannot drift.
   list: a code the endpoint answers with HTTP 400 must never be sent. The same
   table carries Whisper's own name for each code, so a provider that answers a
   language by name (`tibetan` to a `bo` pin, `haitian creole` to `ht`) is read
-  as that language instead of aborting the episode — only a name that is
-  genuinely another language still fails closed. Ladder rows and
+  as that language instead of aborting the episode, and every other standard
+  spelling of an accepted code is read the same way (`yid` for a `yi` pin,
+  `tib`/`bod` for `bo`) — only a report that is genuinely another language
+  still fails closed. Ladder rows and
   the translation prompt name the real source (`French`, not `Japanese`),
   and the registry `extra` records `source_lang` on every row plus
   `source_stream` on **ASR rows only** (a ladder row has no chosen audio

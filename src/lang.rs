@@ -382,6 +382,146 @@ const REPORTED_LANG_SPELLINGS: &[(&str, &str)] = &[
     ("armenian", "hy"),
 ];
 
+/// The other standard spellings of the accept set's own codes, read only on
+/// the reported path: ISO 639-2/B, ISO 639-2/T and ISO 639-1 for every code in
+/// [`WIRE_ACCEPTED_LANGS`] that has one outside the two tables above.
+///
+/// The defect this closes (round 7): a media tag like `yiddish-x` pins `yi`,
+/// and a provider answering the ISO 639-2/B spelling `yid` then failed the
+/// episode **permanently** with `whisper language mismatch: pinned yi,
+/// reported yid` — measured with the real binary on the round-6 tree, where
+/// round 5 had written the SRT. A provider's spelling of the language we
+/// pinned is metadata, not a contradiction: it must read as that language
+/// whichever of its standard spellings the server emits, exactly as the code's
+/// own Whisper name does since round 6.
+///
+/// Derived from the ISO 639-1/639-2 registry (the `(639-1, 639-2/B, 639-2/T)`
+/// triples as carried by `pycountry` 26.2.16, its `LANGUAGES` table), then
+/// filtered by three hard rules, so the table stays a *reading* of the accept
+/// set and never a second list to maintain:
+/// * a spelling that IS the code (`af`), is a pinning alias ([`LANG_ALIASES`])
+///   or is a curated spelling ([`REPORTED_LANG_SPELLINGS`]) is dropped —
+///   including every 639-2 spelling the alias table already carries (`eng`,
+///   `fre`/`fra`, `ger`/`deu`, `spa`, `por`, `chi`/`zho`, `cze`/`ces`,
+///   `gre`/`ell`, `per`/`fas`, `may`/`msa`, `dut`/`nld`, `rum`/`ron`,
+///   `jpn`, `ind`, `tgl`, `jv`, `nor`, …), which is why those languages
+///   appear nowhere below;
+/// * a spelling that is another accept-set code or another code's wire name is
+///   dropped (no entry here needed dropping for that reason — asserted by a
+///   test rather than assumed);
+/// * a spelling is kept only when its ISO owner is the same language as the
+///   target and the mapping is unambiguous. A macrolanguage spelling is
+///   therefore kept only where the accept set holds exactly ONE code for it
+///   (`ara` → `ar` and `nor` → `no` are already pinning aliases; `aze` → `az`,
+///   `est` → `et`, `lav` → `lv`, `mlg` → `mg`, `mon` → `mn`, `nep` → `ne`,
+///   `pus` → `ps`, `san` → `sa`, `sq`/`alb`/`sqi` → `sq`, `swa` → `sw`,
+///   `uzb` → `uz`, `yid` → `yi`). `nor` is deliberately NOT added here: it is
+///   already a pinning alias for `no` and its macrolanguage spans `no`/`nb`/
+///   `nn`, so it is ambiguous — and `nb`/`nob` are not accepted codes, so a
+///   provider answering `nob` stays unknown (fails closed) rather than being
+///   read as `no`.
+///
+/// The codes this table adds NOTHING for, and why: those whose 639-2/B,
+/// 639-2/T and 639-1 spellings are all either the code itself or an existing
+/// alias/curated entry (`ar`, `cs`, `da`, `de`, `el`, `en`, `es`, `fa`, `fi`,
+/// `fr`, `he`, `hi`, `hu`, `id`, `it`, `ja`, `ko`, `lo`, `ms`, `nl`, `no`,
+/// `pl`, `pt`, `ro`, `ru`, `sv`, `th`, `tl`, `tr`, `uk`, `vi`, `zh`), plus
+/// `haw` (its only ISO spelling is the code itself) and `yue` (639-3 only — it
+/// has no 639-2 or 639-1 spelling at all). Inventing one for those would be a
+/// lie, so nothing is listed.
+///
+/// Read only by [`known_code`], i.e. by [`normalize_reported_lang`]: never by
+/// [`alias_code`], so no bare ISO spelling can name a track from a tag or
+/// reach the wire — a tag `yid` still collapses to `yid` and takes the
+/// detection path. Detection is deliberately widened too (a provider reporting
+/// `yid` now yields `yi` instead of an unusable detected code), which is why
+/// every target comes out of the accept set: a detected code stays pinnable for
+/// the follow-up chunks. A `-XX`-subtagged tag whose head is an ISO spelling
+/// (`yid-US`) reaches the head's code through the known-head rule, exactly as a
+/// name-subtagged tag (`tibetan-US`) already did before this round.
+///
+/// `pub(crate)` so `asr::tests` can assert the guard reads every entry, like
+/// [`WIRE_ACCEPTED_LANGS`].
+pub(crate) const REPORTED_LANG_ISO_SPELLINGS: &[(&str, &str)] = &[
+    ("afr", "af"),
+    ("alb", "sq"),
+    ("amh", "am"),
+    ("arm", "hy"),
+    ("asm", "as"),
+    ("aze", "az"),
+    ("bak", "ba"),
+    ("baq", "eu"),
+    ("bel", "be"),
+    ("ben", "bn"),
+    ("bod", "bo"),
+    ("bos", "bs"),
+    ("bre", "br"),
+    ("bul", "bg"),
+    ("bur", "my"),
+    ("cat", "ca"),
+    ("cym", "cy"),
+    ("est", "et"),
+    ("eus", "eu"),
+    ("fao", "fo"),
+    ("geo", "ka"),
+    ("glg", "gl"),
+    ("guj", "gu"),
+    ("hat", "ht"),
+    ("hau", "ha"),
+    ("hrv", "hr"),
+    ("hye", "hy"),
+    ("ice", "is"),
+    ("isl", "is"),
+    ("jav", "jw"),
+    ("kan", "kn"),
+    ("kat", "ka"),
+    ("kaz", "kk"),
+    ("khm", "km"),
+    ("lat", "la"),
+    ("lav", "lv"),
+    ("lin", "ln"),
+    ("lit", "lt"),
+    ("ltz", "lb"),
+    ("mac", "mk"),
+    ("mal", "ml"),
+    ("mao", "mi"),
+    ("mar", "mr"),
+    ("mkd", "mk"),
+    ("mlg", "mg"),
+    ("mlt", "mt"),
+    ("mon", "mn"),
+    ("mri", "mi"),
+    ("mya", "my"),
+    ("nep", "ne"),
+    ("nno", "nn"),
+    ("oci", "oc"),
+    ("pan", "pa"),
+    ("pus", "ps"),
+    ("san", "sa"),
+    ("sin", "si"),
+    ("slk", "sk"),
+    ("slo", "sk"),
+    ("slv", "sl"),
+    ("sna", "sn"),
+    ("snd", "sd"),
+    ("som", "so"),
+    ("sqi", "sq"),
+    ("srp", "sr"),
+    ("sun", "su"),
+    ("swa", "sw"),
+    ("tam", "ta"),
+    ("tat", "tt"),
+    ("tel", "te"),
+    ("tgk", "tg"),
+    ("tib", "bo"),
+    ("tuk", "tk"),
+    ("urd", "ur"),
+    ("uzb", "uz"),
+    ("wel", "cy"),
+    ("yid", "yi"),
+    ("yor", "yo"),
+];
+
 /// Drop a trailing bracket qualifier: `"English (US)"` → `"English"`,
 /// `"Chinese (Traditional)"` → `"Chinese"`, `"French [FR]"` → `"French"`.
 /// The qualifier refines a language the tag before it already names, so
@@ -429,14 +569,22 @@ fn alias_code(token: &str) -> Option<&'static str> {
 }
 
 /// Canonical code for a spelling every language table knows: the pin aliases,
-/// the curated reported names, and every Whisper name in
+/// the curated reported names, the ISO 639-2/B, 639-2/T and 639-1 spellings of
+/// the accept set's codes, and every Whisper name in
 /// [`WIRE_ACCEPTED_LANGS`] — the same single definition that decides the wire
 /// accept set, so a code can never be pinnable while its own name is
-/// unreadable (the round-6 class).
+/// unreadable (the round-6 class) or while one of its standard spellings is
+/// (the round-7 class: a `yi` pin contradicted by a provider answering `yid`).
 fn known_code(token: &str) -> Option<&'static str> {
     alias_code(token)
         .or_else(|| {
             REPORTED_LANG_SPELLINGS
+                .iter()
+                .find(|(alias, _)| *alias == token)
+                .map(|(_, code)| *code)
+        })
+        .or_else(|| {
+            REPORTED_LANG_ISO_SPELLINGS
                 .iter()
                 .find(|(alias, _)| *alias == token)
                 .map(|(_, code)| *code)
@@ -1411,6 +1559,267 @@ mod tests {
             assert!(wire_accepts(code), "{name} -> {code} is not accepted");
             // Idempotent: a reported code re-normalizes to itself.
             assert_eq!(normalize_reported_lang(code), *code);
+        }
+    }
+
+    /// The reported ISO-spelling table restated here as a literal map (the
+    /// same deliberate duplication the accept set and the curated list get):
+    /// an edit to the source table that changes what a provider's spelling
+    /// reads as has to be made in two places on purpose.
+    const EXPECTED_ISO_SPELLINGS: &[(&str, &str)] = &[
+        ("afr", "af"),
+        ("alb", "sq"),
+        ("amh", "am"),
+        ("arm", "hy"),
+        ("asm", "as"),
+        ("aze", "az"),
+        ("bak", "ba"),
+        ("baq", "eu"),
+        ("bel", "be"),
+        ("ben", "bn"),
+        ("bod", "bo"),
+        ("bos", "bs"),
+        ("bre", "br"),
+        ("bul", "bg"),
+        ("bur", "my"),
+        ("cat", "ca"),
+        ("cym", "cy"),
+        ("est", "et"),
+        ("eus", "eu"),
+        ("fao", "fo"),
+        ("geo", "ka"),
+        ("glg", "gl"),
+        ("guj", "gu"),
+        ("hat", "ht"),
+        ("hau", "ha"),
+        ("hrv", "hr"),
+        ("hye", "hy"),
+        ("ice", "is"),
+        ("isl", "is"),
+        ("jav", "jw"),
+        ("kan", "kn"),
+        ("kat", "ka"),
+        ("kaz", "kk"),
+        ("khm", "km"),
+        ("lat", "la"),
+        ("lav", "lv"),
+        ("lin", "ln"),
+        ("lit", "lt"),
+        ("ltz", "lb"),
+        ("mac", "mk"),
+        ("mal", "ml"),
+        ("mao", "mi"),
+        ("mar", "mr"),
+        ("mkd", "mk"),
+        ("mlg", "mg"),
+        ("mlt", "mt"),
+        ("mon", "mn"),
+        ("mri", "mi"),
+        ("mya", "my"),
+        ("nep", "ne"),
+        ("nno", "nn"),
+        ("oci", "oc"),
+        ("pan", "pa"),
+        ("pus", "ps"),
+        ("san", "sa"),
+        ("sin", "si"),
+        ("slk", "sk"),
+        ("slo", "sk"),
+        ("slv", "sl"),
+        ("sna", "sn"),
+        ("snd", "sd"),
+        ("som", "so"),
+        ("sqi", "sq"),
+        ("srp", "sr"),
+        ("sun", "su"),
+        ("swa", "sw"),
+        ("tam", "ta"),
+        ("tat", "tt"),
+        ("tel", "te"),
+        ("tgk", "tg"),
+        ("tib", "bo"),
+        ("tuk", "tk"),
+        ("urd", "ur"),
+        ("uzb", "uz"),
+        ("wel", "cy"),
+        ("yid", "yi"),
+        ("yor", "yo"),
+    ];
+
+    #[test]
+    fn every_iso_spelling_resolves_to_its_code() {
+        // (a) The round-7 reading rule: whichever standard spelling a provider
+        // answers a pinned language with, the reported path resolves it to the
+        // code we pinned. `yid` (639-2/B for `yi`) is the measured case that
+        // used to abort a `yiddish-x`-tagged episode permanently.
+        for (spelling, code) in REPORTED_LANG_ISO_SPELLINGS {
+            assert_eq!(normalize_reported_lang(spelling), *code, "{spelling}");
+            // The lookup folds the token, so case cannot change the answer.
+            assert_eq!(
+                normalize_reported_lang(&spelling.to_uppercase()),
+                *code,
+                "{spelling}"
+            );
+            assert_eq!(normalize_reported_lang(code), *code, "{code}");
+        }
+        assert_eq!(normalize_reported_lang("yid"), "yi");
+        assert_eq!(normalize_reported_lang("tib"), "bo");
+        assert_eq!(normalize_reported_lang("bod"), "bo");
+        assert_eq!(normalize_reported_lang("jav"), "jw");
+    }
+
+    #[test]
+    fn no_iso_spelling_resolves_to_two_codes() {
+        // (b) A spelling must answer with EXACTLY one code. The table is the
+        // literal map above, no spelling appears twice, and — the part that
+        // makes "one code" true rather than incidental — no spelling lives in
+        // another table, so no earlier lookup step can answer for it with a
+        // different code. A spelling that is an accept-set code or another
+        // code's wire name is equally forbidden: it would shadow that code.
+        assert_eq!(REPORTED_LANG_ISO_SPELLINGS, EXPECTED_ISO_SPELLINGS);
+        let pin_aliases: std::collections::BTreeSet<&str> =
+            LANG_ALIASES.iter().map(|(a, _)| *a).collect();
+        let curated: std::collections::BTreeSet<&str> =
+            REPORTED_LANG_SPELLINGS.iter().map(|(a, _)| *a).collect();
+        let codes: std::collections::BTreeSet<&str> = wire_codes().into_iter().collect();
+        let names: std::collections::BTreeSet<String> = WIRE_ACCEPTED_LANGS
+            .iter()
+            .map(|(_, n)| collapse(n))
+            .collect();
+        let mut literal: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+        for (spelling, code) in REPORTED_LANG_ISO_SPELLINGS {
+            assert!(
+                literal.insert(spelling, code).is_none(),
+                "duplicate spelling {spelling}"
+            );
+            assert!(!pin_aliases.contains(spelling), "{spelling} is a pin alias");
+            assert!(!curated.contains(spelling), "{spelling} is curated");
+            assert!(
+                !codes.contains(spelling),
+                "{spelling} is an accept-set code"
+            );
+            assert!(
+                !names.contains(*spelling),
+                "{spelling} is another code's wire name"
+            );
+            assert!(!is_uncertainty_marker(spelling), "{spelling} is a marker");
+            assert_eq!(normalize_reported_lang(spelling), *code, "{spelling}");
+        }
+        assert_eq!(
+            literal,
+            EXPECTED_ISO_SPELLINGS
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeMap<&str, &str>>()
+        );
+    }
+
+    #[test]
+    fn every_iso_spelling_targets_an_accepted_code() {
+        // (c) The table is a READING of the accept set, so every target has to
+        // be in it: the spelling is metadata, and metadata is only useful when
+        // it lands on a code the endpoint accepts (the detected code pins the
+        // follow-up chunks). This is also the round-6 relationship restated
+        // from the other side.
+        for (spelling, code) in REPORTED_LANG_ISO_SPELLINGS {
+            assert!(
+                wire_accepts(code),
+                "{spelling} -> {code} is not in the accept set"
+            );
+            assert!(identity_accepts(code), "{code} must name a language");
+        }
+        // Both spellings of a language land on the same code (the 639-2/B and
+        // 639-2/T pairs the ISO registry splits).
+        for (b, t) in [
+            ("tib", "bod"),
+            ("wel", "cym"),
+            ("baq", "eus"),
+            ("arm", "hye"),
+            ("ice", "isl"),
+            ("geo", "kat"),
+            ("mao", "mri"),
+            ("mac", "mkd"),
+            ("bur", "mya"),
+            ("alb", "sqi"),
+            ("slo", "slk"),
+        ] {
+            assert_eq!(
+                normalize_reported_lang(b),
+                normalize_reported_lang(t),
+                "{b}/{t}"
+            );
+        }
+        // A language with no other standard spelling contributes nothing:
+        // `haw`'s only ISO spelling IS the code, and `yue` is 639-3 only.
+        for (spelling, _) in EXPECTED_ISO_SPELLINGS {
+            assert_ne!(*spelling, "haw", "haw must not appear: it is the code");
+            assert_ne!(*spelling, "yue", "yue must not appear: 639-3 only");
+        }
+    }
+
+    #[test]
+    fn the_curated_spellings_still_resolve_as_before() {
+        // (e) The 52 curated spellings are untouched by round 7: each still
+        // resolves to exactly the code it declared, and the table is still the
+        // literal 52 (an entry quietly moved into the new ISO table would show
+        // up as a missing key here, since the two tables share no spelling).
+        const CURATED: &[(&str, &str)] = &[
+            ("cantonese", "yue"),
+            ("castilian", "es"),
+            ("farsi", "fa"),
+            ("flemish", "nl"),
+            ("malayalam", "ml"),
+            ("mandarin", "zh"),
+            ("tamil", "ta"),
+            ("amharic", "am"),
+            ("azerbaijani", "az"),
+            ("bengali", "bn"),
+            ("bosnian", "bs"),
+            ("bulgarian", "bg"),
+            ("burmese", "my"),
+            ("catalan", "ca"),
+            ("croatian", "hr"),
+            ("estonian", "et"),
+            ("galician", "gl"),
+            ("georgian", "ka"),
+            ("gujarati", "gu"),
+            ("hausa", "ha"),
+            ("icelandic", "is"),
+            ("kannada", "kn"),
+            ("kazakh", "kk"),
+            ("khmer", "km"),
+            ("lao", "lo"),
+            ("latvian", "lv"),
+            ("lithuanian", "lt"),
+            ("macedonian", "mk"),
+            ("malagasy", "mg"),
+            ("maori", "mi"),
+            ("marathi", "mr"),
+            ("mongolian", "mn"),
+            ("nepali", "ne"),
+            ("pashto", "ps"),
+            ("punjabi", "pa"),
+            ("serbian", "sr"),
+            ("sindhi", "sd"),
+            ("sinhala", "si"),
+            ("slovak", "sk"),
+            ("slovenian", "sl"),
+            ("somali", "so"),
+            ("sundanese", "su"),
+            ("swahili", "sw"),
+            ("tajik", "tg"),
+            ("tatar", "tt"),
+            ("telugu", "te"),
+            ("turkmen", "tk"),
+            ("urdu", "ur"),
+            ("uzbek", "uz"),
+            ("welsh", "cy"),
+            ("yoruba", "yo"),
+            ("armenian", "hy"),
+        ];
+        assert_eq!(REPORTED_LANG_SPELLINGS, CURATED);
+        for (spelling, code) in CURATED {
+            assert_eq!(normalize_reported_lang(spelling), *code, "{spelling}");
         }
     }
 

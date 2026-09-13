@@ -1651,6 +1651,55 @@ mod tests {
     }
 
     #[test]
+    fn the_iso_spellings_read_as_their_language_and_never_loosen_the_guard() {
+        // Round 7, guard side. A provider that answers a pin with one of the
+        // language's OTHER standard spellings (ISO 639-2/B, 639-2/T, 639-1)
+        // names the language we pinned, so the episode must continue — every
+        // entry, from the single table, so an added code cannot leave a
+        // spelling unreadable (`lang::REPORTED_LANG_ISO_SPELLINGS`).
+        for (spelling, code) in crate::lang::REPORTED_LANG_ISO_SPELLINGS {
+            assert!(
+                check_pinned_lang(code, &serde_json::json!({ "language": spelling })).is_ok(),
+                "pinned {code}, reported {spelling} must not abort"
+            );
+        }
+        // The measured defect: a media tag like `yiddish-x` pins `yi` (round 6)
+        // and the provider answers the 639-2/B spelling `yid` → the episode
+        // failed permanently with the pin named and the spelling unknown.
+        assert!(
+            check_pinned_lang("yi", &serde_json::json!({ "language": "yid" })).is_ok(),
+            "the reported defect: pinned yi, reported yid must commit"
+        );
+        // Detection is widened by the same reading: `yid` is now the accepted
+        // `yi` rather than a token that only survives as metadata.
+        assert_eq!(
+            detected_lang(&serde_json::json!({ "language": "yid" })).unwrap(),
+            "yi"
+        );
+        assert_eq!(
+            detected_lang(&serde_json::json!({ "language": "bod" })).unwrap(),
+            "bo"
+        );
+        // The fail-closed half is untouched: a DIFFERENT language's spelling
+        // still aborts, with both codes named — the round-6 example a name
+        // (`tibetan` for an `en` pin) and the round-7 one an ISO spelling
+        // (`yid` for an `en` pin).
+        let err = check_pinned_lang("en", &serde_json::json!({ "language": "tibetan" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pinned en, reported bo"), "{err}");
+        let err = check_pinned_lang("en", &serde_json::json!({ "language": "yid" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pinned en, reported yi"), "{err}");
+        // A spelling in no table still aborts, naming the value.
+        let err = check_pinned_lang("en", &serde_json::json!({ "language": "klingon" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("klingon"), "{err}");
+    }
+
+    #[test]
     fn identity_restores_targets_outside_the_old_whitelist() {
         // Round 3 used the wire whitelist as the identity predicate, so
         // `[eng(0), cy(1)]` targeting `cy` picked the English dub at stream 0
