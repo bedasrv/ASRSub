@@ -35,7 +35,7 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 145 unit + 4 integration (offline simulation incl.)
+cargo test                     # 160 unit + 4 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -115,17 +115,22 @@ guarantees every field is a pipeline-owned key, so the UI cannot drift.
 - Only 204/transport-error/429/5xx Bazarr outcomes retry; 400/401/404 fail fast.
 - The audio track is chosen by its **real language tag**, once per target
   language: target-language track (no translation) → the media's original
-  language (Sonarr/Radarr, best effort) → `ja` → `en` → first non-commentary
-  track. Commentary/audio-description tracks are skipped when a normal
-  alternative exists.
+  language (Sonarr/Radarr, best effort) → `ja` → the first track whose tag is
+  absent/unusable (the original in a dual-audio release — an English dub
+  never wins over it) → `en` → first non-commentary track.
+  Commentary/audio-description tracks are skipped when a normal alternative
+  exists.
 - Whisper is sent that tag's code (container `fre` → `fr`), never a
-  fabricated one. An **untagged** track is transcribed unforced once and the
+  fabricated or uncertainty code: a tag that is absent **or unusable**
+  (`und`, `unknown`, `""`, `englishus`) is not pinned — it takes the
+  detection path. That track is transcribed unforced once and the
   `verbose_json` `language` pins the remaining chunks; if it cannot be
   established (or a chunk contradicts the pinned code) the language
   **fails closed** — nothing is installed, uploaded, or registered `done`,
   and a retry can redo it. Ladder rows and the translation prompt name the
   real source (`French`, not `Japanese`), and the registry `extra` records
-  `source_lang`/`source_stream`.
+  `source_lang` on every row plus `source_stream` on **ASR rows only**
+  (a ladder row has no chosen audio stream).
 - The foreign-script (SDH placeholder) guard runs for **Japanese** sources
   only: a latin source such as French would otherwise be rewritten to
   placeholders too.

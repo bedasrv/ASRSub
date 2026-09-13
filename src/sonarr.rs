@@ -94,8 +94,11 @@ impl Sonarr {
 
 /// Parse a `/series` listing into `id -> SeriesInfo`. Sonarr returns
 /// `originalLanguage: {id, name}`; only the name is a language identity (the
-/// numeric id is Sonarr-internal), and it normalizes to a code later. A
-/// series without the field still lands with `None`.
+/// numeric id is Sonarr-internal), and it normalizes to a code later. A bare
+/// string is accepted too (the shapes differ between Sonarr and the Radarr
+/// payload Bazarr forwards) — both go through [`crate::lang::original_language`]
+/// so the two callers cannot drift. A series without the field still lands
+/// with `None`.
 fn parse_series(list: Vec<serde_json::Value>) -> HashMap<i64, SeriesInfo> {
     list.into_iter()
         .filter_map(|s| {
@@ -107,10 +110,7 @@ fn parse_series(list: Vec<serde_json::Value>) -> HashMap<i64, SeriesInfo> {
                 .to_string();
             let original_language = s
                 .get("originalLanguage")
-                .and_then(|l| l.get("name"))
-                .and_then(|n| n.as_str())
-                .map(|n| n.trim().to_string())
-                .filter(|n| !n.is_empty());
+                .and_then(crate::lang::original_language);
             Some((
                 id,
                 SeriesInfo {
@@ -144,5 +144,29 @@ mod tests {
         assert_eq!(m[&11].original_language.as_deref(), Some("Japanese"));
         assert_eq!(m[&12].original_language, None);
         assert_eq!(m[&13].original_language, None);
+    }
+
+    #[test]
+    fn parse_series_accepts_a_bare_string_original_language() {
+        // The shapes differ between Sonarr (`{id, name}`) and the Radarr
+        // payload Bazarr forwards (a bare string): both must land the same
+        // way, and null/blank must still degrade to None.
+        let list = vec![
+            serde_json::json!({"id": 14, "title": "Bare", "originalLanguage": "German"}),
+            serde_json::json!({"id": 15, "title": "Null", "originalLanguage": null}),
+            serde_json::json!({"id": 16, "title": "Blank", "originalLanguage": "  "}),
+            serde_json::json!({"id": 17, "title": "Wrong", "originalLanguage": 7}),
+        ];
+        let m = parse_series(list);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m[&14].original_language.as_deref(), Some("German"));
+        assert_eq!(m[&15].original_language, None);
+        assert_eq!(m[&16].original_language, None);
+        assert_eq!(m[&17].original_language, None);
+        // A bare string normalizes to the same code as the object form.
+        assert_eq!(
+            crate::lang::normalize_lang(m[&14].original_language.as_deref().unwrap()),
+            "de"
+        );
     }
 }

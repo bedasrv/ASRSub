@@ -30,8 +30,9 @@ pub struct AudioStream {
 #[derive(Debug, Clone)]
 pub struct AudioChoice {
     pub stream_index: u32,
-    /// Pinned source language; `None` means the tag is unknown and the
-    /// request must omit `language` (detection).
+    /// Pinned source language; `None` means the tag is unknown (absent or
+    /// unusable: `und`, `unknown`, `""`) and the request must omit
+    /// `language` (detection).
     pub asr_lang: Option<String>,
     /// Known-tag answer. For a detection run (`asr_lang == None`) this is
     /// provisional (`true`); the caller recomputes it from the detected code.
@@ -39,8 +40,9 @@ pub struct AudioChoice {
 }
 
 impl AudioChoice {
-    /// True when the tag was missing/unusable: the ASR request must omit
-    /// `language` on its first request and take the code from the response.
+    /// True when the tag was missing/unusable (the only way `asr_lang` is
+    /// `None`): the ASR request must omit `language` on its first request
+    /// and take the code from the response.
     pub fn detects_language(&self) -> bool {
         self.asr_lang.is_none()
     }
@@ -152,15 +154,21 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
 /// 2. else a track matching the media's **original language**, when known
 ///    and different from the target;
 /// 3. else a `ja`-tagged track;
-/// 4. else an `en`-tagged track;
-/// 5. else the first non-commentary track; else `streams[0]`.
+/// 4. else the physically-first non-commentary track whose tag is
+///    **absent or unusable** (detection): in a dual-audio release the first
+///    stream is the original, and preferring a dub over it would translate
+///    the dub back into the media's own language;
+/// 5. else an `en`-tagged track;
+/// 6. else the first non-commentary track; else `streams[0]`.
 ///
 /// The tag only chooses the track: the language sent to Whisper is that
-/// tag's real code, or nothing (detection) when the tag is missing. The old
+/// tag's real, **usable** code, or nothing (detection) when the tag is
+/// absent or unusable (`und`, `unknown`, `englishus`, `""`). The old
 /// implementation forced `ja` for any other tag, so a `fre` track was
 /// transcribed as Japanese and produced a fabricated translation (the
-/// defect this fixes). Commentary/description tracks are skipped whenever a
-/// non-commentary alternative exists.
+/// defect this fixes); pinning a present-but-unusable tag (`und`) made the
+/// provider reject the request outright. Commentary/description tracks are
+/// skipped whenever a non-commentary alternative exists.
 pub fn choose_source(
     streams: &[AudioStream],
     target_lang: &str,
@@ -170,28 +178,48 @@ pub fn choose_source(
         return None;
     }
     let target = crate::lang::normalize_lang(target_lang);
+    // An empty/blank target is no target at all: matching `""` against a
+    // present-but-empty tag would otherwise beat the original-language rule.
+    let target = (!target.is_empty()).then_some(target);
     let original = original_lang.map(crate::lang::normalize_lang);
     let norm = |s: &AudioStream| s.language.as_deref().map(crate::lang::normalize_lang);
+    // Only a usable code identifies a track. `und`/`unknown`/`""` mean "no
+    // language", so they must never be compared as if they named one.
+    let usable = |s: &AudioStream| norm(s).filter(|c| crate::lang::is_usable_code(c));
     let find = |want: &str| {
         streams
             .iter()
-            .find(|s| !is_commentary(s) && norm(s).as_deref() == Some(want))
+            .find(|s| !is_commentary(s) && usable(s).as_deref() == Some(want))
     };
-    let picked = find(&target)
+    let picked = target
+        .as_deref()
+        .and_then(find)
         .or_else(|| {
             original
                 .as_deref()
-                .filter(|o| !o.is_empty() && *o != target)
+                .filter(|o| !o.is_empty() && Some(*o) != target.as_deref())
                 .and_then(find)
         })
         .or_else(|| find("ja"))
+        // The original in a dual-audio release: the physically-first track
+        // whose tag does not name a language (see rule 4 above).
+        .or_else(|| {
+            streams
+                .iter()
+                .find(|s| !is_commentary(s) && usable(s).is_none())
+        })
         .or_else(|| find("en"))
         .or_else(|| streams.iter().find(|s| !is_commentary(s)))
         .or_else(|| streams.first())?;
-    let asr_lang = norm(picked);
+    // Only a real language code is pinned: anything else takes the
+    // detection path (no `language` field, code read from the response).
+    let asr_lang = usable(picked);
     // Known tag: translate unless the source already is the target.
     // Unknown tag: decided from the detected language after transcription.
-    let needs_translate = asr_lang.as_deref().map(|l| l != target).unwrap_or(true);
+    let needs_translate = asr_lang
+        .as_deref()
+        .map(|l| Some(l) != target.as_deref())
+        .unwrap_or(true);
     Some(AudioChoice {
         stream_index: picked.index,
         asr_lang,
@@ -238,13 +266,17 @@ pub async fn extract_audio(media: &str, stream_index: u32, dest: &Path) -> Resul
 }
 
 /// Text fields for one Whisper request. `language` is omitted entirely when
-/// the tag is unknown (`None`): detection, never a fabricated code.
+/// the tag is unknown/unusable (`None`), and an unusable code is dropped
+/// here too: detection, never a fabricated or uncertainty code
+/// (`und`/`unknown`/`""`) on the wire — the provider answers those with
+/// HTTP 400, and an unusable code must not be sent even if a caller hands
+/// one over.
 fn whisper_text_fields(model: &str, lang: Option<&str>) -> Vec<(&'static str, String)> {
     let mut fields = vec![
         ("model", model.to_string()),
         ("response_format", "verbose_json".to_string()),
     ];
-    if let Some(l) = lang {
+    if let Some(l) = lang.filter(|l| crate::lang::is_usable_code(l)) {
         fields.push(("language", l.to_string()));
     }
     fields
@@ -270,9 +302,11 @@ fn whisper_form(
 }
 
 /// Detected language from a `verbose_json` response's top-level `language`
-/// field (previously discarded — only `segments` was read). No usable code
-/// is an error, never a guess: the language fails instead of committing a
-/// subtitle whose source we cannot establish.
+/// field (previously discarded — only `segments` was read). No **usable**
+/// code is an error, never a guess: a provider that answers `unknown`,
+/// `none`, `N/A`, `und`, or nothing at all cannot establish the source, so
+/// the language fails instead of committing a subtitle whose source we do
+/// not know.
 fn detected_lang(v: &serde_json::Value) -> Result<String> {
     let raw = v
         .get("language")
@@ -280,7 +314,7 @@ fn detected_lang(v: &serde_json::Value) -> Result<String> {
         .unwrap_or("")
         .trim();
     let code = crate::lang::normalize_lang(raw);
-    if code.is_empty() {
+    if !crate::lang::is_usable_code(&code) {
         anyhow::bail!(
             "whisper returned no detected language (no usable `language` in verbose_json)"
         );
@@ -755,6 +789,158 @@ mod tests {
     }
 
     #[test]
+    fn und_tagged_track_detects_instead_of_pinning_und() {
+        // `und` is what ffmpeg/mp4 muxers write for an unset language. It is
+        // not a language: pinning it made the provider answer HTTP 400 and
+        // the episode fail forever (the round-2 defect).
+        let s = vec![track(0, Some("und"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+        assert!(c.needs_translate);
+    }
+
+    #[test]
+    fn blank_tag_detects_instead_of_pinning_an_empty_code() {
+        // A present-but-empty tag used to pin `language=""`.
+        let s = vec![track(0, Some(""), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+        let s = vec![track(0, Some(" "), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+    }
+
+    #[test]
+    fn uncertainty_and_overlong_tags_detect_instead_of_pinning() {
+        // `UNKNOWN` (a real tag writers emit) and `jajp`/`zhhant` (what an
+        // alnum collapse of `ja-JP`/`zh-Hant` yields) are not codes.
+        for tag in ["UNKNOWN", "jajp", "zhhant", "underspecified"] {
+            let s = vec![track(0, Some(tag), None)];
+            let c = choose_source(&s, "id", None).unwrap();
+            assert_eq!(c.asr_lang, None, "{tag} must not be pinned");
+            assert!(c.detects_language(), "{tag} must take the detection path");
+        }
+    }
+
+    #[test]
+    fn regional_english_tag_loses_to_the_japanese_track() {
+        // "English (US)" normalizes to `en` (not `englishus`), so the `jpn`
+        // track is still the one to transcribe for an id target.
+        let s = vec![
+            track(0, Some("English (US)"), None),
+            track(1, Some("jpn"), None),
+        ];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 1);
+        assert_eq!(c.asr_lang.as_deref(), Some("ja"));
+        assert!(c.needs_translate);
+    }
+
+    #[test]
+    fn regional_english_tag_still_matches_an_en_target() {
+        // The target rule must see through the qualifier too: an `en` target
+        // takes the "English (US)" track without translating.
+        let s = vec![track(0, Some("English (US)"), None)];
+        let c = choose_source(&s, "en", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang.as_deref(), Some("en"));
+        assert!(!c.needs_translate);
+    }
+
+    #[test]
+    fn untagged_original_beats_the_english_dub() {
+        // Dual-audio [und(0), eng(1)]: stream 0 is the physically-first
+        // original. Preferring the `en` dub transcribed the dub and (for a
+        // `ja` target) translated it back into Japanese.
+        let s = vec![track(0, Some("und"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0, "the untagged original must win");
+        assert_eq!(c.asr_lang, None);
+        assert!(c.detects_language());
+        // Same choice for a `ja` target: the dub must not be translated back
+        // into Japanese.
+        let c = choose_source(&s, "ja", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang, None);
+    }
+
+    #[test]
+    fn tagged_japanese_original_still_beats_the_english_dub() {
+        // The common anime case must be byte-identical to before: the `ja`
+        // rule fires before the untagged rule and pins the tag.
+        let s = vec![track(0, Some("jpn"), None), track(1, Some("eng"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang.as_deref(), Some("ja"));
+        assert!(c.needs_translate);
+    }
+
+    #[test]
+    fn empty_target_is_treated_as_no_target() {
+        // An empty `--lang` must not match a present-but-empty tag (which
+        // would override the original-language track).
+        let s = vec![track(0, Some(""), None), track(1, Some("jpn"), None)];
+        let c = choose_source(&s, "", None).unwrap();
+        assert_eq!(
+            c.stream_index, 1,
+            "empty target must not pick the empty tag"
+        );
+        assert_eq!(c.asr_lang.as_deref(), Some("ja"));
+        // A single jpn track with an empty target still picks it.
+        let s = vec![track(0, Some("jpn"), None)];
+        let c = choose_source(&s, "", None).unwrap();
+        assert_eq!(c.stream_index, 0);
+        assert_eq!(c.asr_lang.as_deref(), Some("ja"));
+    }
+
+    #[test]
+    fn detected_lang_rejects_uncertainty_markers() {
+        // A response code that is not a usable language cannot become the
+        // episode's source: it errors exactly like a missing one.
+        for bad in ["unknown", "none", "und", "englishus", "N/A", "  "] {
+            assert!(
+                detected_lang(&serde_json::json!({ "language": bad })).is_err(),
+                "{bad} must not be accepted as a detected language"
+            );
+        }
+        assert_eq!(
+            detected_lang(&serde_json::json!({"language": "ja"})).unwrap(),
+            "ja"
+        );
+        assert_eq!(
+            detected_lang(&serde_json::json!({"language": "Japanese (JP)"})).unwrap(),
+            "ja"
+        );
+    }
+
+    #[test]
+    fn unusable_code_never_reaches_the_wire() {
+        // The `und` case: the chosen track takes the detection path, so the
+        // same choice cannot produce a `language` form field.
+        let s = vec![track(0, Some("und"), None)];
+        let c = choose_source(&s, "id", None).unwrap();
+        let fields = whisper_text_fields("m", c.asr_lang.as_deref());
+        assert!(!fields.iter().any(|(k, _)| *k == "language"), "{fields:?}");
+        // Defense in depth: even a hand-passed unusable tag cannot produce
+        // the field (the provider answers it with HTTP 400).
+        for bad in ["und", "UNKNOWN", "", " ", "jajp", "zhhant", "englishus"] {
+            let fields = whisper_text_fields("m", Some(bad));
+            assert!(
+                !fields.iter().any(|(k, _)| *k == "language"),
+                "{bad}: {fields:?}"
+            );
+        }
+        // A real code is still sent verbatim.
+        let fields = whisper_text_fields("m", Some("fr"));
+        assert!(fields.iter().any(|(k, v)| *k == "language" && v == "fr"));
+    }
+
+    #[test]
     fn cache_key_is_stable_before_the_language_is_known() {
         let pinned = AudioChoice {
             stream_index: 1,
@@ -877,6 +1063,19 @@ mod tests {
             bodies[1].contains(header),
             "pinned chunk must carry the code: {}",
             bodies[1]
+        );
+        // Wire-level round-2 proof, through the real multipart body: an
+        // unusable code handed to the request must not reach the form (the
+        // provider answers `language=und` with HTTP 400).
+        whisper_request(&pool, b"und".to_vec(), "part.mp3".into(), Some("und"))
+            .await
+            .unwrap();
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 3);
+        assert!(
+            !bodies[2].contains(header),
+            "an unusable code must not be sent: {}",
+            bodies[2]
         );
     }
 }

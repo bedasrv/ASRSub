@@ -6,6 +6,13 @@
 //! All three spellings normalize to one canonical application code. Unknown
 //! codes pass through lowercased alphanumeric form so future languages keep
 //! working.
+//!
+//! Two boundaries live here because both decide whether a code is a
+//! language at all: [`normalize_lang`] turns a tag into its canonical code,
+//! and [`is_usable_code`] decides whether that code names a language the
+//! pipeline may act on — `und`/`unknown`/`""` are uncertainty markers, not
+//! languages, and must never reach Whisper's `language` field or a
+//! provenance row.
 
 /// ISO-639 aliases (2/B, 2/T, full names) → canonical application code.
 /// One table: `normalize_lang` is the single place a tag becomes a code, so
@@ -117,10 +124,34 @@ const LANG_ALIASES: &[(&str, &str)] = &[
     ("filipino", "fil"),
 ];
 
+/// Drop a trailing region/script qualifier: `"English (US)"` → `"English"`,
+/// `"Chinese (Traditional)"` → `"Chinese"`, `"French [FR]"` → `"French"`.
+/// The qualifier refines a language the tag before it already names, so
+/// without this `"English (US)"` collapsed to the nonsense code
+/// `englishus`. Applied repeatedly (stacked qualifiers) and only when the
+/// group closes the string; a group that does not close it, or garbage with
+/// no bracket at all, is left to the alnum collapse exactly as before.
+fn strip_trailing_qualifier(value: &str) -> &str {
+    let mut s = value.trim();
+    loop {
+        let t = s.trim_end();
+        let open = if let Some(inner) = t.strip_suffix(')') {
+            inner.rfind('(')
+        } else if let Some(inner) = t.strip_suffix(']') {
+            inner.rfind('[')
+        } else {
+            None
+        };
+        match open {
+            Some(i) => s = &t[..i],
+            None => return t,
+        }
+    }
+}
+
 /// Normalize a language tag to the canonical application code.
 pub fn normalize_lang(value: &str) -> String {
-    let norm: String = value
-        .trim()
+    let norm: String = strip_trailing_qualifier(value)
         .to_lowercase()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -129,6 +160,39 @@ pub fn normalize_lang(value: &str) -> String {
         Some((_, canonical)) => (*canonical).to_string(),
         None => norm,
     }
+}
+
+/// A code the pipeline may pin as a transcription language: a plausible
+/// ISO-639-style token, never an uncertainty marker. `und` (what
+/// ffmpeg/mp4 muxers write for an unset language), `unknown`, `""` and a
+/// whitespace-only tag, `englishus` (from the full name `"English (US)"`),
+/// and `jajp` (from a `ja-JP`-style tag) all fail it. A failing code means
+/// *unknown*: the caller must fall back to detection, because sending one of
+/// these verbatim as Whisper's `language` form field is what made the
+/// provider answer HTTP 400 (and a response code of `unknown`/`none` must
+/// not become an episode's source language either).
+pub fn is_usable_code(code: &str) -> bool {
+    let c = code.trim();
+    let ascii_alpha = c.len() >= 2 && c.len() <= 3 && c.chars().all(|ch| ch.is_ascii_lowercase());
+    ascii_alpha
+        && !matches!(
+            c,
+            "und" | "mul" | "zxx" | "mis" | "unknown" | "none" | "na" | "undefined" | "auto"
+        )
+}
+
+/// The language name out of a Sonarr/Radarr `originalLanguage` value: the
+/// usual `{id, name}` object or a bare string (Bazarr passes the Radarr
+/// payload through, and the two services do not spell it the same way).
+/// Absent, null, or a blank name degrades to `None` — it never fails a
+/// pass. One parser for both callers so the shapes cannot drift apart.
+pub fn original_language(value: &serde_json::Value) -> Option<String> {
+    let s = match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => value.get("name").and_then(|n| n.as_str())?.to_string(),
+    };
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// English display name for a language code, for translation prompts and
@@ -296,6 +360,87 @@ mod tests {
         assert_eq!(normalize_lang("xx"), "xx");
         assert_eq!(normalize_lang(" Klingon "), "klingon");
         assert_eq!(normalize_lang(""), "");
+    }
+
+    #[test]
+    fn regional_qualifiers_collapse_to_the_language() {
+        // A trailing qualifier refines the language the tag already names:
+        // without stripping it, "English (US)" collapsed to `englishus` and
+        // was pinned as Whisper's `language`.
+        assert_eq!(normalize_lang("English (US)"), "en");
+        assert_eq!(normalize_lang("Japanese (JP)"), "ja");
+        assert_eq!(normalize_lang("Chinese (Traditional)"), "zh");
+        assert_eq!(normalize_lang("French [FR]"), "fr");
+        // Stacked qualifiers and loose whitespace still collapse.
+        assert_eq!(normalize_lang("German (DE) [Stereo]"), "de");
+        assert_eq!(normalize_lang(" Korean "), "ko");
+        // Unmapped garbage keeps collapsing exactly as before: a bracket
+        // that does not close the string is not a qualifier.
+        assert_eq!(normalize_lang(" Klingon "), "klingon");
+        assert_eq!(normalize_lang("English (US) extra"), "englishusextra");
+        assert_eq!(normalize_lang(""), "");
+    }
+
+    #[test]
+    fn usable_codes_exclude_uncertainty_markers() {
+        for ok in ["en", "ja", "id", "fr", "fil", " zh "] {
+            assert!(is_usable_code(ok), "{ok} must be usable");
+        }
+        for bad in [
+            "",
+            " ",
+            "und",
+            "mul",
+            "zxx",
+            "mis",
+            "unknown",
+            "none",
+            "na",
+            "undefined",
+            "auto",
+            "englishus",
+            "jajp",
+            "zhhant",
+            "e",
+            "EN",
+        ] {
+            assert!(!is_usable_code(bad), "{bad} must not be usable");
+        }
+    }
+
+    #[test]
+    fn alias_table_is_unique_and_round_trips() {
+        // Every alias resolves, no alias is declared twice, and every
+        // canonical code is its own alias: the table cannot drift into
+        // ambiguity (two spellings of one language must not disagree).
+        let mut seen = std::collections::HashSet::new();
+        for (alias, canonical) in LANG_ALIASES {
+            assert!(seen.insert(*alias), "duplicate alias {alias}");
+            assert_eq!(normalize_lang(alias), *canonical, "alias {alias}");
+            assert_eq!(
+                normalize_lang(canonical),
+                *canonical,
+                "canonical {canonical}"
+            );
+        }
+        assert_eq!(seen.len(), LANG_ALIASES.len());
+    }
+
+    #[test]
+    fn original_language_accepts_both_arr_spellings() {
+        // Sonarr/Radarr `originalLanguage`: object or bare string, and a
+        // blank/null/absent value degrades to None rather than erroring.
+        assert_eq!(
+            original_language(&serde_json::json!({"id": 3, "name": "Japanese"})).as_deref(),
+            Some("Japanese")
+        );
+        assert_eq!(
+            original_language(&serde_json::json!("German")).as_deref(),
+            Some("German")
+        );
+        assert_eq!(original_language(&serde_json::json!({"name": "  "})), None);
+        assert_eq!(original_language(&serde_json::json!(null)), None);
+        assert_eq!(original_language(&serde_json::json!(7)), None);
     }
 
     #[test]

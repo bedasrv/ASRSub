@@ -410,15 +410,10 @@ impl Pipeline {
 
 /// Radarr's `originalLanguage` for a movie (Bazarr passes the Radarr payload
 /// through when it is present). Accepts the usual `{id, name}` object or a
-/// bare string; absent/blank degrades to `None` — never a pass failure.
+/// bare string; absent/blank degrades to `None` — never a pass failure. Same
+/// parser the Sonarr series listing uses (`crate::lang::original_language`).
 fn movie_original_lang(m: &serde_json::Value) -> Option<String> {
-    let v = m.get("originalLanguage")?;
-    let s = match v {
-        serde_json::Value::String(s) => s.clone(),
-        _ => v.get("name").and_then(|n| n.as_str())?.to_string(),
-    };
-    let s = s.trim().to_string();
-    (!s.is_empty()).then_some(s)
+    crate::lang::original_language(m.get("originalLanguage")?)
 }
 
 /// Registry rows whose recorded target sidecar is still on disk, keyed
