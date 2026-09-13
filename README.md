@@ -29,13 +29,16 @@ docs/           DEPLOY.md, HEALTH.md, PLAN.md (historical), PARITY.md
                 deleted 2026-09-08 and removed from `main` 2026-09-09 —
                 rollback is redeploying the previous SHA image per
                 docs/DEPLOY.md; reference code survives in git history)
+tools/          operator scripts; `probe_wire_langs.py` re-measures the codes
+                the configured Whisper endpoint accepts as `language` and
+                exits non-zero when they disagree with `src/lang.rs`
 ```
 
 ## Quickstart
 
 ```bash
 cargo build                    # debug binary at ./target/debug/asrsub
-cargo test                     # 179 unit + 4 integration (offline simulation incl.)
+cargo test                     # 185 unit + 6 integration (offline simulation incl.)
 asrsub daemon                  # self-looping daemon (control API on $WEBHOOK_PORT, default 8085)
 asrsub run-once                # single pass, print stats JSON, exit
 asrsub transcribe -i EP.mkv -o EP.ja.srt
@@ -130,9 +133,12 @@ guarantees every field is a pipeline-owned key, so the UI cannot drift.
   `verbose_json` `language` pins the remaining chunks **only when the
   endpoint is measured to accept that code**; a detected code outside that
   set leaves the later chunks unforced and the source is the detected code.
-  If no code can be established, or a chunk that **carried a pin**
-  contradicts it, the language **fails closed** — nothing is installed,
-  uploaded, or registered `done`, and a retry can redo it. Ladder rows and
+  If no code can be established, or a request that **carried a pin** (the
+  whole file, or one chunk of it) contradicts the code it asserted, the
+  language **fails closed** — nothing is installed, uploaded, or registered
+  `done`, and a retry can redo it. The accept set is a live measurement of
+  the configured endpoint (`tools/probe_wire_langs.py`), not a published
+  list: a code the endpoint answers with HTTP 400 must never be sent. Ladder rows and
   the translation prompt name the real source (`French`, not `Japanese`),
   and the registry `extra` records `source_lang` on every row plus
   `source_stream` on **ASR rows only** (a ladder row has no chosen audio

@@ -120,8 +120,8 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
 > once and the `verbose_json` `language` pins the remaining chunks when the
 > endpoint is measured to accept that code; a detected code it rejects leaves
 > the later chunks unforced and the detected code is the source. If no code can
-> be established, or a chunk that **carried a pin** contradicts the code we
-> pinned, the language errors
+> be established, or a request that **carried a pin** — the whole file, or one
+> chunk of it — contradicts the code we pinned, the language errors
 > like a missing file (`failed`, state row `error`): nothing is installed,
 > uploaded, or registered `done`, and the next pass or a `retry` action redoes
 > it. The foreign-script (SDH placeholder) guard runs for Japanese sources

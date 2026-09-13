@@ -21,6 +21,8 @@
 //! provider *reports*: a detected code is metadata, never a wire value, so it
 //! must not be gated as one.
 
+use std::sync::OnceLock;
+
 /// ISO-639 aliases (2/B, 2/T, full names) → canonical application code.
 /// One table: `normalize_lang` is the single place a tag becomes a code, so
 /// track choice, Whisper's `language` field, and sidecar paths cannot drift.
@@ -139,6 +141,12 @@ const LANG_ALIASES: &[(&str, &str)] = &[
     ("tgl", "tl"),
     ("tagalog", "tl"),
     ("filipino", "tl"),
+    // Same class as Tagalog above: containers and callers spell Javanese `jv`
+    // (ISO 639-1) while the endpoint answers `jv` with HTTP 400 and `jw` with
+    // 200 (2026-09-13 probe, see `WIRE_ACCEPTED_LANGS`). Remapping keeps the
+    // pin, the reported value, the display name and the sidecar suffix on one
+    // code instead of dropping the tag into detection.
+    ("jv", "jw"),
 ];
 
 /// Codes the endpoint is measured to ACCEPT as Whisper's `language` form
@@ -148,29 +156,41 @@ const LANG_ALIASES: &[(&str, &str)] = &[
 /// Measured 2026-09-13 against the live Whisper endpoint the pipeline uses
 /// (`openai/whisper-large-v3-turbo` at
 /// `https://openrouter.ai/api/v1/audio/transcriptions`, the `whisper_stt`
-/// entry of the provider file), one multipart request per candidate with a 1 s
-/// silent MP3: 117 candidates (every alias canonical plus Whisper's other
-/// language codes, the codes round 3 measured as rejected, the N/A token `na`,
-/// and the BCP-47/name spellings `en-US`, `pt-BR`, `zh-Hant`, `tagalog`),
-/// 102 answered HTTP 200. The table below is those 200 responses that are
-/// 2–3 letter codes — every code the pipeline can actually send, because
-/// `normalize_lang` maps a BCP-47/name spelling to its canonical code first.
-/// The endpoint also accepts `en-US`/`pt-BR`/`zh-Hant`/`tagalog` (each
-/// resolving to `en`/`pt`/`zh`/`tl` in that probe's response), so they are
-/// documented here rather than listed as unreachable entries.
+/// entry of the provider file): 118 multipart requests, one 1 s silent MP3
+/// per candidate, run by the committed probe `tools/probe_wire_langs.py`; the
+/// responses are kept beside it as `tools/wire_langs-20260913.csv`, and
+/// `--recheck` compares that CSV with this table offline (zero requests).
 ///
-/// Measured HTTP 400, and therefore never sent: `ceb`, `eo`, `jv`, `zu`,
-/// `fil`, `tgl`, `filipino`, `tam`, `tel`, `slo`, `cat`, `und`, `na`, `zz`.
-/// `na` is also an uncertainty marker (`N/A`), so it can be neither pinned
-/// (`identity_accepts` refuses it) nor sent.
+/// The candidate universe is Whisper's own language table (`openai/whisper`
+/// `whisper/tokenizer.py` `LANGUAGES`, commit
+/// `86098128c0b4f24f0e2aa2994de830614b474227`, 100 entries): every code the
+/// pipeline can actually send, because `normalize_lang` maps any fuller
+/// spelling to its canonical 2–3 letter code before a pin is decided. All 100
+/// answered HTTP 200 and echoed the code they were handed, so the table below
+/// is exactly those 100 — this round added `jw` and `ln`, the two the
+/// previous 98-code table was missing. Both are real losses, not cosmetics:
+/// a `jw`/`ln`-tagged track threw its pin away, transcribed the first piece
+/// unforced and left every later piece unguarded, so a mixed-language file
+/// was committed labelled with its first piece's code.
+///
+/// The same 118 requests covered, and this table deliberately excludes:
+/// * the four spellings unreachable by construction, each rewritten to its
+///   canonical code before any wire decision — `en-US` → `en`, `pt-BR` →
+///   `pt`, `zh-Hant` → `zh`, `tagalog` → `tl`. The endpoint answers all four
+///   200; none of them is ever sent;
+/// * `ceb`, `eo`, `jv`, `zu`, `fil`, `tgl`, `filipino`, `tam`, `tel`, `slo`,
+///   `cat`, `und`, `na`, `zz`, measured HTTP 400 and therefore never sent
+///   (`jv` and the Tagalog spellings are remapped by [`LANG_ALIASES`]; `na`
+///   is also an uncertainty marker — `identity_accepts` refuses it — so it
+///   can be neither pinned nor sent).
 const WIRE_ACCEPTED_LANGS: &[&str] = &[
     "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
     "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
-    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "ka", "kk", "km", "kn", "ko", "la", "lb",
-    "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn", "no",
-    "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq", "sr",
-    "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "yi",
-    "yo", "yue", "zh",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la",
+    "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl",
+    "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so",
+    "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz",
+    "vi", "yi", "yo", "yue", "zh",
 ];
 
 /// Spellings a provider may *report* as its detected language which are not
@@ -481,6 +501,10 @@ pub fn display_name(code: &str) -> &'static str {
         "ta" => "Tamil",
         "ml" => "Malayalam",
         "yue" => "Cantonese",
+        // Accepted by the endpoint (see `WIRE_ACCEPTED_LANGS`), so a detected
+        // `jw`/`ln` source names itself instead of reading `Unknown`.
+        "jw" => "Javanese",
+        "ln" => "Lingala",
         _ => "Unknown",
     }
 }
@@ -513,16 +537,62 @@ pub fn is_kana(c: char) -> bool {
 pub fn is_cjk(c: char) -> bool {
     is_kana(c) || ('\u{3400}'..='\u{4dbf}').contains(&c) || ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
-/// Aliases carrying the same content for one canonical language.
-/// Unknown languages yield an empty slice (callers fall back to the
-/// normalized code itself).
+/// Aliases carrying the same content for one canonical language: every alias
+/// table key that normalizes to the canonical code, plus the canonical itself,
+/// canonical first. Unknown languages yield an empty slice (callers fall back
+/// to the normalized code itself).
+///
+/// Derived from [`LANG_ALIASES`] instead of a literal list, so renaming a
+/// canonical can no longer orphan what an earlier revision of this pipeline
+/// wrote to disk. With the old three hardcoded entries (`ja`/`id`/`en`) the
+/// `fil` → `tl` remap made `replaceable_target_sidecar_paths(stem, "fil")`
+/// stop seeing `{stem}.fil.hi.srt`: HEAD re-transcribed and wrote a duplicate
+/// `{stem}.tl.hi.srt` beside it — no adoption, no clobber, and the stale file
+/// stayed servable. The `pt`/`zh` spellings (`por`, `chi`, `pt-BR`,
+/// `zh-Hant`) had the same hole and are covered by the same derivation.
 pub fn sidecar_aliases(lang: &str) -> &'static [&'static str] {
-    match normalize_lang(lang).as_str() {
-        "ja" => &["ja", "jpn", "jp"],
-        "id" => &["id", "ind"],
-        "en" => &["en", "eng", "enm"],
-        _ => &[],
+    static TABLE: OnceLock<Vec<(&'static str, Vec<&'static str>)>> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut canonicals: Vec<&'static str> = Vec::new();
+        for (_, code) in LANG_ALIASES {
+            let canonical = canonical_code(code);
+            if !canonicals.contains(&canonical) {
+                canonicals.push(canonical);
+            }
+        }
+        canonicals
+            .into_iter()
+            .map(|canonical| {
+                let mut aliases = vec![canonical];
+                for (alias, _) in LANG_ALIASES {
+                    if canonical_code(alias) == canonical && !aliases.contains(alias) {
+                        aliases.push(alias);
+                    }
+                }
+                (canonical, aliases)
+            })
+            .collect()
+    });
+    let want = normalize_lang(lang);
+    table
+        .iter()
+        .find(|(canonical, _)| *canonical == want)
+        .map(|(_, aliases)| aliases.as_slice())
+        .unwrap_or(&[])
+}
+
+/// The code the tables call canonical for a token, following a chained alias
+/// to a fixpoint (`xx` → `jv` → `jw`). Bounded by the table length, so a
+/// cyclic table entry answers with the cycle's first code instead of hanging.
+fn canonical_code(token: &'static str) -> &'static str {
+    let mut code = token;
+    for _ in 0..LANG_ALIASES.len() {
+        match alias_code(code) {
+            Some(next) if next != code => code = next,
+            _ => return code,
+        }
     }
+    code
 }
 
 /// All on-disk sidecar candidates for `{stem}.{lang}[.hi|.forced...].srt`.
@@ -606,6 +676,12 @@ mod tests {
         assert_eq!(normalize_lang("fil"), "tl");
         assert_eq!(normalize_lang("filipino"), "tl");
         assert_eq!(normalize_lang("tagalog"), "tl");
+        // The Javanese spelling the endpoint rejects (`jv`, HTTP 400)
+        // remaps to the one it accepts (`jw`, HTTP 200) — the same class of
+        // remap as `fil` -> `tl`, so the pin, the reported value, the display
+        // name and the sidecar suffix stay on one code.
+        assert_eq!(normalize_lang("jv"), "jw");
+        assert_eq!(normalize_lang("jw"), "jw");
         // Sonarr/Radarr report the language as a full name.
         assert_eq!(normalize_lang("Japanese"), "ja");
         assert_eq!(normalize_lang("French"), "fr");
@@ -715,6 +791,38 @@ mod tests {
     }
 
     #[test]
+    fn wire_accept_set_contents_are_pinned() {
+        // The set is a live measurement of one endpoint, so the drift that
+        // matters is silent: a code dropped (the round-4 table was missing
+        // `jw`/`ln`, and a `jw`-tagged track lost its pin because of it) or a
+        // code added that the endpoint answers with HTTP 400. The measured
+        // list is therefore restated here in full — the deliberate duplicate
+        // is the point — and `tools/probe_wire_langs.py` re-derives it from
+        // the live endpoint (candidate universe: openai/whisper's own
+        // 100-code language table, commit 86098128c0b4).
+        let measured: Vec<&str> = vec![
+            "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs",
+            "cy", "da", "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu",
+            "ha", "haw", "he", "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka",
+            "kk", "km", "kn", "ko", "la", "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml",
+            "mn", "mr", "ms", "mt", "my", "ne", "nl", "nn", "no", "oc", "pa", "pl", "ps", "pt",
+            "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so", "sq", "sr", "su", "sv", "sw",
+            "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz", "vi", "yi", "yo",
+            "yue", "zh",
+        ];
+        assert_eq!(
+            measured.len(),
+            100,
+            "Whisper's own language table has 100 codes"
+        );
+        assert_eq!(
+            WIRE_ACCEPTED_LANGS.to_vec(),
+            measured,
+            "the accept set drifted from the measured 100"
+        );
+    }
+
+    #[test]
     fn identity_accepts_is_the_shape_rule() {
         // Track identity is the round-2 shape rule, not the wire set: a tag
         // naming a language the endpoint rejects still names the track.
@@ -752,10 +860,13 @@ mod tests {
     #[test]
     fn wire_accepts_is_the_measured_set() {
         // The measured 200-set: what the endpoint takes as `language`. The
-        // values below were probed one request per code on 2026-09-13.
+        // values below were probed one request per code on 2026-09-13 (round 5
+        // re-probed Whisper's whole 100-code table with
+        // `tools/probe_wire_langs.py`; `jw` and `ln` were the two the old
+        // 98-code set was missing and are accepted).
         for ok in [
             "en", "ja", "id", "fr", " zh ", "cy", "yue", "haw", "ta", "ml", "tl", "sr", "hr", "ne",
-            "si", "km", "lo", "my", "bn", "ur", "sw",
+            "si", "km", "lo", "my", "bn", "ur", "sw", "jw", "ln",
         ] {
             assert!(wire_accepts(ok), "{ok} was measured accepted");
         }
@@ -813,9 +924,13 @@ mod tests {
                 "{tag}"
             );
         }
+        assert_eq!(sidecar_paths("/m/ep", "tgl"), sidecar_paths("/m/ep", "fil"));
+        // The canonical paths come first, and the legacy `fil` spellings an
+        // earlier revision wrote stay in the list (round 5 derivation).
+        let tl = sidecar_paths("/m/ep", "tgl");
         assert_eq!(
-            sidecar_paths("/m/ep", "tgl"),
-            vec![
+            &tl[..5],
+            &[
                 "/m/ep.tl.srt",
                 "/m/ep.tl.hi.srt",
                 "/m/ep.tl.forced.srt",
@@ -823,6 +938,103 @@ mod tests {
                 "/m/ep.tl.forced.hi.srt",
             ]
         );
+        assert!(tl.contains(&"/m/ep.fil.hi.srt".to_string()), "{tl:?}");
+    }
+
+    #[test]
+    fn sidecar_aliases_cover_every_spelling_of_a_canonical() {
+        // The list is derived from the alias table, so renaming a canonical
+        // cannot orphan an older spelling on disk (`fil` -> `tl` did exactly
+        // that while the list was three hardcoded entries).
+        for (alias, canonical) in LANG_ALIASES {
+            let list = sidecar_aliases(alias);
+            assert!(
+                list.contains(canonical),
+                "{alias}: no {canonical} in {list:?}"
+            );
+            assert!(
+                list.contains(alias),
+                "{alias}: itself missing from {list:?}"
+            );
+            assert_eq!(list[0], *canonical, "{alias}: canonical must come first");
+            // Every spelling in the list really resolves to the canonical.
+            for a in list {
+                assert_eq!(canonical_code(a), *canonical, "{alias}: {a}");
+            }
+        }
+        // A chained alias (a key whose own value is a key) lands on the
+        // canonical too, not on its intermediate.
+        assert_eq!(canonical_code("jv"), "jw");
+        assert!(sidecar_aliases("jw").contains(&"jv"));
+        // ja/id/en keep every spelling they listed before, canonical first.
+        for (code, legacy) in [
+            ("ja", vec!["ja", "jpn", "jp"]),
+            ("id", vec!["id", "ind"]),
+            ("en", vec!["en", "eng", "enm"]),
+        ] {
+            let list = sidecar_aliases(code);
+            assert_eq!(list[0], code);
+            for a in legacy {
+                assert!(list.contains(&a), "{code}: {a} lost from {list:?}");
+            }
+        }
+        // A language no alias names keeps the empty list (callers fall back to
+        // the normalized code itself).
+        assert!(sidecar_aliases("cy").is_empty());
+        assert!(sidecar_aliases("yue").is_empty());
+    }
+
+    #[test]
+    fn legacy_target_spellings_stay_discoverable() {
+        // What an earlier revision of this pipeline wrote for a Filipino
+        // target was `{stem}.fil.hi.srt` (and `.fil.srt`). After the
+        // `fil` -> `tl` remap the canonical file is `.tl.hi.srt`, so those
+        // legacy names must still be discovered — otherwise HEAD writes a
+        // duplicate beside the stale one and never adopts it.
+        for tag in ["fil", "tgl", "tagalog", "filipino"] {
+            let paths = replaceable_target_sidecar_paths("/m/ep", tag);
+            assert_eq!(paths[0], "/m/ep.tl.hi.srt", "{tag}");
+            for legacy in ["/m/ep.fil.hi.srt", "/m/ep.fil.srt"] {
+                assert!(paths.contains(&legacy.to_string()), "{tag}: {paths:?}");
+            }
+        }
+        // Region/script spellings inherit the whole list of their canonical:
+        // `pt-BR` and `zh-Hant` normalize to `pt`/`zh`, so the ISO-639-2
+        // spellings (`por`, `chi`) are discoverable through them too.
+        for (tag, canonical) in [
+            ("pt-BR", "pt"),
+            ("pt_BR", "pt"),
+            ("zh-Hant", "zh"),
+            ("fil-PH", "tl"),
+        ] {
+            assert_eq!(
+                replaceable_target_sidecar_paths("/m/ep", tag),
+                replaceable_target_sidecar_paths("/m/ep", canonical),
+                "{tag}"
+            );
+        }
+        assert!(replaceable_target_sidecar_paths("/m/ep", "pt")
+            .contains(&"/m/ep.por.hi.srt".to_string()));
+        assert!(replaceable_target_sidecar_paths("/m/ep", "zh")
+            .contains(&"/m/ep.chi.hi.srt".to_string()));
+        // ja/id/en behaviour is unchanged: every spelling they listed before
+        // is still listed, canonical HI first.
+        for (lang, legacy) in [
+            ("ja", vec!["ja", "jpn", "jp"]),
+            ("id", vec!["id", "ind"]),
+            ("en", vec!["en", "eng", "enm"]),
+        ] {
+            let paths = replaceable_target_sidecar_paths("/m/ep", lang);
+            assert_eq!(paths[0], format!("/m/ep.{lang}.hi.srt"));
+            for a in legacy {
+                for suffix in [".srt", ".hi.srt"] {
+                    assert!(
+                        paths.contains(&format!("/m/ep.{a}{suffix}")),
+                        "{lang}: {a}{suffix} lost from {paths:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -868,6 +1080,9 @@ mod tests {
         assert_eq!(normalize_reported_lang("French"), "fr");
         assert_eq!(normalize_reported_lang("Japanese (JP)"), "ja");
         assert_eq!(normalize_reported_lang("EN"), "en");
+        // A `jv` response is the Javanese spelling the endpoint rejects; the
+        // alias table remaps it to the accepted `jw` (metadata, never sent).
+        assert_eq!(normalize_reported_lang("jv"), "jw");
         // Unknown values collapse as before, for the caller to judge.
         assert_eq!(normalize_reported_lang("ta"), "ta");
         assert_eq!(normalize_reported_lang("englishus"), "englishus");
@@ -983,6 +1198,12 @@ mod tests {
         // Tagalog/Filipino spellings name themselves through `tl`.
         assert_eq!(display_name("tgl"), "Filipino");
         assert_eq!(display_name("fil"), "Filipino");
+        // The codes the accept set gained (`jw`, `ln`) name themselves too, so
+        // a detected Javanese/Lingala source is not reported as `Unknown`;
+        // `jv` reaches `jw` through the alias table.
+        assert_eq!(display_name("jw"), "Javanese");
+        assert_eq!(display_name("jv"), "Javanese");
+        assert_eq!(display_name("ln"), "Lingala");
         assert_eq!(display_name("xx"), "Unknown");
     }
 

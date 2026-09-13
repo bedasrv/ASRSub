@@ -1,0 +1,119 @@
+code,http,detected,err,role
+en,200,en,,candidate
+zh,200,zh,,candidate
+de,200,de,,candidate
+es,200,es,,candidate
+ru,200,ru,,candidate
+ko,200,ko,,candidate
+fr,200,fr,,candidate
+ja,200,ja,,candidate
+pt,200,pt,,candidate
+tr,200,tr,,candidate
+pl,200,pl,,candidate
+ca,200,ca,,candidate
+nl,200,nl,,candidate
+ar,200,ar,,candidate
+sv,200,sv,,candidate
+it,200,it,,candidate
+id,200,id,,candidate
+hi,200,hi,,candidate
+fi,200,fi,,candidate
+vi,200,vi,,candidate
+he,200,he,,candidate
+uk,200,uk,,candidate
+el,200,el,,candidate
+ms,200,ms,,candidate
+cs,200,cs,,candidate
+ro,200,ro,,candidate
+da,200,da,,candidate
+hu,200,hu,,candidate
+ta,200,ta,,candidate
+no,200,no,,candidate
+th,200,th,,candidate
+ur,200,ur,,candidate
+hr,200,hr,,candidate
+bg,200,bg,,candidate
+lt,200,lt,,candidate
+la,200,la,,candidate
+mi,200,mi,,candidate
+ml,200,ml,,candidate
+cy,200,cy,,candidate
+sk,200,sk,,candidate
+te,200,te,,candidate
+fa,200,fa,,candidate
+lv,200,lv,,candidate
+bn,200,bn,,candidate
+sr,200,sr,,candidate
+az,200,az,,candidate
+sl,200,sl,,candidate
+kn,200,kn,,candidate
+et,200,et,,candidate
+mk,200,mk,,candidate
+br,200,br,,candidate
+eu,200,eu,,candidate
+is,200,is,,candidate
+hy,200,hy,,candidate
+ne,200,ne,,candidate
+mn,200,mn,,candidate
+bs,200,bs,,candidate
+kk,200,kk,,candidate
+sq,200,sq,,candidate
+sw,200,sw,,candidate
+gl,200,gl,,candidate
+mr,200,mr,,candidate
+pa,200,pa,,candidate
+si,200,si,,candidate
+km,200,km,,candidate
+sn,200,sn,,candidate
+yo,200,yo,,candidate
+so,200,so,,candidate
+af,200,af,,candidate
+oc,200,oc,,candidate
+ka,200,ka,,candidate
+be,200,be,,candidate
+tg,200,tg,,candidate
+sd,200,sd,,candidate
+gu,200,gu,,candidate
+am,200,am,,candidate
+yi,200,yi,,candidate
+lo,200,lo,,candidate
+uz,200,uz,,candidate
+fo,200,fo,,candidate
+ht,200,ht,,candidate
+ps,200,ps,,candidate
+tk,200,tk,,candidate
+nn,200,nn,,candidate
+mt,200,mt,,candidate
+sa,200,sa,,candidate
+lb,200,lb,,candidate
+my,200,my,,candidate
+bo,200,bo,,candidate
+tl,200,tl,,candidate
+mg,200,mg,,candidate
+as,200,as,,candidate
+tt,200,tt,,candidate
+haw,200,haw,,candidate
+ln,200,ln,,candidate
+ha,200,ha,,candidate
+ba,200,ba,,candidate
+jw,200,jw,,candidate
+su,200,su,,candidate
+yue,200,yue,,candidate
+en-US,200,en,,unreachable
+pt-BR,200,pt,,unreachable
+zh-Hant,200,zh,,unreachable
+tagalog,200,tl,,unreachable
+ceb,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+eo,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+jv,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+zu,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+fil,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+tgl,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+filipino,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+tam,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+tel,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+slo,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+cat,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+und,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+na,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
+zz,400,,"{""error"":{""message"":""Provider returned 400"",""code"":400}}",control
