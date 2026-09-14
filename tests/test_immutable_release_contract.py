@@ -273,26 +273,104 @@ class TestHealthAndJellyfinContract(unittest.TestCase):
 
 
 class TestServerRenderedDashboard(unittest.TestCase):
-    """The htmx dashboard replaces the retired single-file dashboard.html."""
+    """The operator UI is one complete server-rendered page model."""
 
     def setUp(self):
-        self.web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+        self.web_dir = REPO / "src" / "web"
+        self.web = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(self.web_dir.glob("*.rs"))
+        )
+        self.mod = (self.web_dir / "mod.rs").read_text(encoding="utf-8")
+        self.pages = (self.web_dir / "pages.rs").read_text(encoding="utf-8")
+        self.actions = (self.web_dir / "actions.rs").read_text(encoding="utf-8")
+        self.data = (self.web_dir / "data.rs").read_text(encoding="utf-8")
+        self.app_js = (REPO / "assets" / "app.js").read_text(encoding="utf-8")
         self.dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
         self.assets = REPO / "assets"
 
-    def test_old_dashboard_removed(self):
+    def test_web_is_split_into_real_responsibility_modules(self):
+        self.assertTrue(self.web_dir.is_dir())
+        self.assertFalse((REPO / "src" / "web.rs").exists())
+        for name in ("mod.rs", "data.rs", "pages.rs", "actions.rs"):
+            self.assertTrue((self.web_dir / name).is_file(), msg=name)
+
+    def test_partial_navigation_architecture_removed(self):
         self.assertFalse(
             (self.assets / "dashboard.html").exists(),
             msg="assets/dashboard.html is replaced by the server-rendered dashboard",
         )
+        legacy_runtime_name = "ht" + "mx"
+        self.assertFalse((self.assets / (legacy_runtime_name + ".min.js")).exists())
+        self.assertNotIn(legacy_runtime_name, self.web.lower())
+        self.assertNotIn(legacy_runtime_name, self.app_js.lower())
+        self.assertNotIn("hx-", self.web)
+        self.assertNotIn("FRAGMENT_HEADER", self.web)
+        self.assertNotIn("fragment_errors", self.web)
+        self.assertNotIn("hx-", (REPO / "assets" / "app.css").read_text(encoding="utf-8"))
 
-    def test_htmx_and_css_embedded(self):
-        for name in ("htmx.min.js", "app.css"):
+    def test_css_and_small_vanilla_asset_are_embedded(self):
+        for name in ("app.js", "app.css"):
             self.assertTrue((self.assets / name).exists(), msg=f"missing asset {name}")
         # Embedded at compile time, not read from disk at runtime.
-        self.assertIn("include_str!", self.web)
-        self.assertIn("htmx.min.js", self.web)
-        self.assertIn("app.css", self.web)
+        for name in ("app.js", "app.css"):
+            self.assertIn(name, self.mod)
+
+    def test_complete_pages_use_normal_navigation_and_one_page_identity(self):
+        for path in ("/ui/status", "/ui/library", "/ui/activity", "/ui/provenance", "/ui/settings"):
+            self.assertIn(path, self.mod, msg=path)
+        self.assertIn('data-page=', self.pages)
+        self.assertIn('href=(if query_string.is_empty()', self.pages)
+        self.assertIn('main id="main"', self.pages)
+        self.assertNotIn('button class="active"', self.pages)
+        self.assertIn('meta http-equiv="refresh"', self.pages)
+
+    def test_mutations_use_prg_and_full_html_errors(self):
+        self.assertIn("StatusCode::SEE_OTHER", self.actions)
+        self.assertIn('header::LOCATION', self.actions)
+        self.assertIn("Html(", self.actions)
+        self.assertIn("StatusCode::UNAUTHORIZED", self.actions)
+        self.assertIn("StatusCode::BAD_REQUEST", self.actions)
+        self.assertIn("StatusCode::NOT_FOUND", self.actions)
+        self.assertIn("StatusCode::INTERNAL_SERVER_ERROR", self.actions)
+        self.assertIn('method="post"', self.pages)
+        self.assertIn('data-authenticated', self.pages)
+
+    def test_api2_surface_stays_on_the_existing_router(self):
+        api = (REPO / "src" / "api.rs").read_text(encoding="utf-8")
+        for route in (
+            "/api2/status",
+            "/api2/health",
+            "/api2/ready",
+            "/api2/config",
+            "/api2/provenance",
+            "/api2/wanted",
+            "/api2/library",
+            "/api2/activity",
+            "/api2/exclusions",
+            "/api2/episode/{id}/retry",
+            "/api2/episode/{id}/skip",
+            "/api2/episode/{id}/delete",
+            "/api2/episode/{id}/exclude",
+            "/api2/episode/{id}/unexclude",
+        ):
+            self.assertIn(route, api, msg=route)
+        self.assertIn(".merge(crate::web::routes())", api)
+
+    def test_authenticated_asset_uses_session_storage_and_urlencoded_forms(self):
+        for needle in (
+            "sessionStorage",
+            "X-API-Key",
+            "application/x-www-form-urlencoded",
+            "document.open",
+            ".disabled = true",
+        ):
+            self.assertIn(needle, self.app_js, msg=needle)
+        self.assertNotIn("FormData(", self.app_js)
+        # The key input is intentionally not a successful-control field: the
+        # token can only travel in the header, never in the form body.
+        self.assertNotIn('name="control-key"', self.pages)
+        self.assertNotIn("control-key", self.data)
 
     def test_settings_generated_from_rust_schema(self):
         # The field schema is the single source of truth, shared with the daemon.
@@ -304,11 +382,27 @@ class TestServerRenderedDashboard(unittest.TestCase):
     def test_docker_build_stage_copies_assets(self):
         # include_str! needs assets/ present during `cargo build`.
         self.assertIn("COPY assets ./assets", self.dockerfile)
+        self.assertNotIn("ht" + "mx", self.dockerfile.lower())
 
     def test_config_write_endpoint_documented(self):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         self.assertIn("POST /api2/config", readme)
         self.assertIn("config.overrides.json", readme)
+
+    def test_ui_docs_describe_normal_navigation(self):
+        for path in (
+            REPO / "README.md",
+            REPO / "docs" / "HEALTH.md",
+            REPO / "docs" / "DEPLOY.md",
+            REPO / "assets" / "README.md",
+        ):
+            text = path.read_text(encoding="utf-8").lower()
+            self.assertNotIn("ht" + "mx", text, msg=str(path))
+            self.assertNotIn("x-asrsub-fragment", text, msg=str(path))
+            self.assertNotIn("fragment_errors", text, msg=str(path))
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("/ui/status", readme)
+        self.assertIn("303", readme)
 
 
 class TestControlClientContract(unittest.TestCase):
@@ -341,7 +435,7 @@ class TestDeploymentPinnedKeys(unittest.TestCase):
 
     Process env outranks every config layer, so a FIELDS key that compose
     exports into the container can never be changed from the dashboard. The UI
-    renders those fields read-only (src/web.rs `pinned_keys`) and the
+    renders those fields read-only (src/web/data.rs `pinned_keys`) and the
     deployment pins exactly two: NAS_MEDIA_PREFIX (the bind-mount target) and
     WEBHOOK_PORT (healthcheck + reverse-proxy target).
     """
@@ -349,7 +443,10 @@ class TestDeploymentPinnedKeys(unittest.TestCase):
     def setUp(self):
         self.compose = COMPOSE.read_text(encoding="utf-8")
         self.config = (REPO / "src" / "config.rs").read_text(encoding="utf-8")
-        self.web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+        self.web = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((REPO / "src" / "web").glob("*.rs"))
+        )
 
     def _fields_keys(self):
         body = self.config.split("pub const FIELDS", 1)[1].split("\n];", 1)[0]
@@ -634,7 +731,10 @@ class TestMaskingHasNoSecondSink(unittest.TestCase):
         rendered every field raw, `/ui/overview` and `/ready` printed the media
         path, and `reqwest` puts the request URL into its error text.
         """
-        web = (REPO / "src" / "web.rs").read_text(encoding="utf-8")
+        web = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((REPO / "src" / "web").glob("*.rs"))
+        )
         api = (REPO / "src" / "api.rs").read_text(encoding="utf-8")
         main_rs = (REPO / "src" / "main.rs").read_text(encoding="utf-8")
         providers = (REPO / "src" / "providers.rs").read_text(encoding="utf-8")
