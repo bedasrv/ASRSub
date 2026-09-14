@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::rejection::FormRejection;
+use axum::extract::rejection::{FormRejection, QueryRejection};
 use axum::extract::{Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -17,6 +17,7 @@ use super::pages;
 
 pub(crate) const UNAUTH_MSG: &str =
     "Wrong or missing control key. Enter it in the header and click Unlock, then retry.";
+const LIB_QUERY_MSG: &str = "Library filters could not be decoded.";
 
 fn redirect(location: String) -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response()
@@ -49,9 +50,9 @@ pub(crate) async fn h_config_save(
     let Form(form) = match form {
         Ok(form) => form,
         Err(rejection) => {
-            let status = rejection.into_response().status();
+            let _ = rejection;
             return html_error(
-                status,
+                StatusCode::BAD_REQUEST,
                 pages::settings_page(
                     &s.cfg,
                     Some((false, "Settings form could not be decoded.".to_string())),
@@ -140,14 +141,28 @@ pub(crate) async fn h_episode_action(
     State(s): State<Arc<AppState>>,
     headers: HeaderMap,
     Path((id, action)): Path<(String, String)>,
-    Query(query): Query<LibQuery>,
+    query: Result<Query<LibQuery>, QueryRejection>,
 ) -> Response {
     if !crate::api::check_token(&s.cfg, &headers) {
+        let query = match query {
+            Ok(Query(query)) => query,
+            Err(_) => LibQuery::default(),
+        };
         return html_error(
             StatusCode::UNAUTHORIZED,
             pages::library_page(&s, &query, Some((UNAUTH_MSG, true))).await,
         );
     }
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(rejection) => {
+            let _ = rejection;
+            return html_error(
+                StatusCode::BAD_REQUEST,
+                pages::library_page(&s, &LibQuery::default(), Some((LIB_QUERY_MSG, true))).await,
+            );
+        }
+    };
     let (episode_id, kind) = match crate::api::parse_episode_id(&id) {
         Ok(value) => value,
         Err(error) => {
