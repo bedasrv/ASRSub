@@ -1,16 +1,17 @@
-# Vendored assets
+# Embedded dashboard assets
 
 Both files are embedded into the `asrsub` binary at compile time
-(`include_str!` in `src/web.rs`) and served from `/assets/*`. There is no
+(`include_str!` in `src/web/mod.rs`) and served from `/assets/*`. There is no
 runtime asset directory in the image.
 
-| file | source | sha256 |
-| --- | --- | --- |
-| `htmx.min.js` | https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js | `e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447` |
-| `app.css` | written for this repo | — |
+| file | purpose |
+| --- | --- |
+| `app.js` | session-only control-key display and URL-encoded authenticated form submission |
+| `app.css` | dashboard layout and light/dark styling |
 
-`htmx` is MIT-licensed, © 2020 htmx contributors (https://htmx.org/). It is
-vendored — not fetched at runtime — so the dashboard works without network
-access. To bump it: download the new version, update the version and sha256 in
-this table, re-run `cargo test`, and click through `/` once (the shell relies on
-`htmx:configRequest` and `htmx:beforeSwap`).
+The dashboard uses ordinary browser navigation and complete server-rendered
+HTML pages. `app.js` is intentionally small: it keeps the control key in
+`sessionStorage`, sends it only as `X-API-Key`, disables a submitted form while
+the request is in flight, follows successful `303` responses, and replaces the
+document with complete HTML for error responses. It has no framework/runtime
+dependency and is not fetched from the network.

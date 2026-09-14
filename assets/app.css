@@ -46,17 +46,18 @@ header.top {
 header.top h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
 header.top .spacer { flex: 1; }
 #key-state { font-size: 12px; color: var(--muted); }
-input[type=password], input[type=text], input[type=number], select, textarea {
+input[type=password], input[type=text], input[type=number], input[type=search], select, textarea {
   background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 8px; font: inherit; max-width: 100%;
 }
 
 nav.tabs { display: flex; gap: 4px; padding: 8px 12px; flex-wrap: wrap; }
-nav.tabs button {
+nav.tabs a {
   background: transparent; color: var(--muted); border: 1px solid transparent;
   border-radius: 999px; padding: 6px 14px; font: inherit; cursor: pointer;
+  text-decoration: none;
 }
-nav.tabs button:hover { background: var(--surface-2); color: var(--text); }
+nav.tabs a:hover, nav.tabs a.active { background: var(--surface-2); color: var(--text); }
 
 main { max-width: 1040px; margin: 0 auto; padding: 8px 16px 64px; }
 
@@ -79,6 +80,10 @@ button.btn.primary { background: var(--accent); color: var(--accent-fg); border-
 button.btn.danger { color: var(--danger); }
 button.btn[disabled] { opacity: .5; cursor: default; }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+form { margin: 0; }
+.page-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
+.page-heading h2 { margin: 0; }
+.page-heading p { margin: 2px 0 0; }
 
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -103,8 +108,3 @@ legend { padding: 0 6px; font-weight: 600; }
 .mt-s { margin-top: 8px; }
 .mt-m { margin-top: 12px; }
 .mb-s { margin-bottom: 8px; }
-
-.htmx-request { opacity: .6; }
-#toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-.toast { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; box-shadow: var(--shadow); }
-.toast.err { border-left-color: var(--danger); }

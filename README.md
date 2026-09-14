@@ -14,8 +14,8 @@ via `asrsub_providers.json`. See `docs/` for deploy and health contracts.
 src/            Rust binary (daemon + CLI)
 tests/          Rust integration tests (binary boundary) + release-contract
                 tests (stdlib unittest, no pytest needed)
-assets/         app.css + htmx.min.js, embedded in the binary (include_str!);
-                the dashboard is server-rendered from src/web.rs at /
+assets/         app.js + app.css, embedded in the binary (include_str!);
+                the dashboard is server-rendered from src/web/ at /
 asrsub_providers.json(.example)
                 Remote endpoints for Whisper STT + LLM translation
                 (live file untracked — copy the .example and fill keys)
@@ -91,9 +91,18 @@ the whole model list already *is* the fallback list.)
 
 GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
 
-- `/` server-rendered operator dashboard (htmx, embedded; no asset files).
-  Read views are open; mutations use the control key from the browser's
-  `sessionStorage` via `hx-headers`.
+- `/` and `/ui/status` server-rendered operator dashboard (embedded; no
+  runtime asset directory). `/ui/overview` remains a compatibility alias.
+  Read views are open; normal anchors navigate between complete pages.
+- `/ui/library` (with `q`, `scope`, `sort`, and `dir` filters),
+  `/ui/activity`, `/ui/provenance`, and `/ui/settings`
+- `/ui/control/{action}`, `/ui/episode/{id|m:id|e:id}/{action}`, and
+  `/ui/config` use authenticated POST/redirect/GET. A successful mutation
+  returns `303 See Other`; failures return a complete HTML page with the
+  original `401`, `400`, `404`, or `500` status.
+  The small embedded browser asset keeps the control key in `sessionStorage`
+  and sends it only as `X-API-Key`; it never places the key in a form body,
+  URL, cookie, or redirect.
 - `/health` liveness · `/ready` readiness (media/providers/state) · `/status` daemon state · `/config` masked config
 - `/pause` `/resume` `/run-once` `/wake` control · `/webhook` Tdarr wake + embedded-sub extract
 - `/api2/status /health /ready /config /provenance /wanted /library /activity /exclusions`

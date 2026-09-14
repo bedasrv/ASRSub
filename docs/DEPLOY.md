@@ -21,11 +21,14 @@ non-empty `api_key` and otherwise reads `$key_env` from the process
 environment at call time, and Docker populates that environment when the
 container starts — so after rotating a key, re-run `docker compose up -d`
 (Compose recreates the container when the rendered environment changes).
-The operator dashboard is server-rendered by the daemon at `/` (htmx + CSS
-embedded in the binary — no runtime asset files). Read views are open; the
-settings form and episode actions require the control key, entered once in the
-dashboard header (kept in `sessionStorage` only). Settings writes go to
-`config.overrides.json` and apply on the next daemon restart.
+The operator dashboard is server-rendered by the daemon at `/` and `/ui/*`
+(JavaScript/CSS embedded in the binary — no runtime asset files). Read views
+are open; settings and episode actions use ordinary POST/redirect/GET and
+require the control key, entered once in the dashboard header (kept in
+`sessionStorage` only). Successful mutations return `303 See Other` to a
+complete page; failures remain complete HTML responses with their original
+status. Settings writes go to `config.overrides.json` and apply on the next
+daemon restart.
 
 The settings form exposes only keys the config layers control. A few tuning
 knobs are read straight from the process environment by their consumers
