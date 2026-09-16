@@ -15,8 +15,9 @@ services:
       CONTROL_API_KEY_FILE: /run/secrets/control_api_key
       NAS_MEDIA_PREFIX: /mnt/nas/share/media
       WEBHOOK_PORT: "8085"
-      STATE_FILE: /var/lib/asrsub/state/state.jsonl
       EGRESS_POLICY_FILE: /run/asrsub/egress-policy.json
+    # STATE_FILE is fixed inside the image at /var/lib/asrsub/state/state.jsonl.
+    # Host-side readiness probe: http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready
     env_file:
       - path: ${PROVIDER_KEYS_FILE:-/home/user/.config/asr-pipeline/secrets/provider_keys.env}
         required: false
@@ -73,3 +74,11 @@ services:
         bind: { propagation: rprivate, create_host_path: false }
     command: ["/usr/local/bin/asrsub"]
     restart: unless-stopped
+
+secrets:
+  # CONTROL_API_KEY_FILE_HOST is an operator-only staging input; the
+  # interpolation-free rendered candidate contains the fixed staged target.
+  discord_webhook:
+    file: /var/lib/asrsub/runtime-secrets/discord_webhook
+  control_api_key:
+    file: /var/lib/asrsub/runtime-secrets/control_key

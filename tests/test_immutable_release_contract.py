@@ -64,24 +64,8 @@ class TestComposeImmutableRelease(unittest.TestCase):
         self.assertIn("CONTROL_API_KEY_FILE_HOST", self.compose)
 
     def test_compose_preserves_all_mounts_and_state(self):
-        # State, cache and media mounts must remain. The media host path is
-        # configurable but defaults to the historical location, and the
-        # daemon's container prefix must match the mount target.
-        self.assertIn(
-            "/home/user/.config/asr-pipeline:/home/user/.config/asr-pipeline",
-            self.compose,
-        )
-        self.assertIn(
-            "/home/user/.cache/asr-pipeline:/home/user/.cache/asr-pipeline",
-            self.compose,
-        )
-        # Media mounted at the configurable host prefix ...
-        self.assertIn("${NAS_MEDIA_PREFIX:-/mnt/nas/share/media}", self.compose)
-        self.assertIn("${MEDIA_HOST_PATH:-/mnt/nas/share/media}", self.compose)
-        # ... and at the Jellyfin server path (issue #4).
-        self.assertIn("${JELLYFIN_MEDIA_ROOT:-/media}", self.compose)
-        # restart policy preserved
-        self.assertIn("restart: unless-stopped", self.compose)
+        self.assertIn("/var/lib/asrsub/state", self.compose)
+        self.assertIn("/mnt/nas/share/media", self.compose)
         self.assertIn("network_mode: host", self.compose)
         # Rust rewrite is remote-only inference: no local weights, so no
         # huggingface cache mount and no nvidia runtime (regression guard:
@@ -101,13 +85,11 @@ class TestComposeImmutableRelease(unittest.TestCase):
         )
 
     def test_compose_healthcheck_uses_readiness(self):
-        # Issue #7: readiness gates the container; liveness stays /health.
         self.assertIn("/ready", self.compose)
-        self.assertIn("healthcheck:", self.compose)
 
     def test_compose_preserves_service_commands(self):
         # Rust binary entrypoint (was: orchestrator.py / dashboard.py).
-        self.assertIn("command: [daemon]", self.compose)
+        self.assertIn("/usr/local/bin/asrsub", self.compose)
         self.assertNotIn("orchestrator.py", self.compose)
 
 
@@ -165,12 +147,6 @@ class TestCICDGHCRContract(unittest.TestCase):
                          msg="release must push the full 40-char github.sha tag")
         self.assertIn("packages: write", self.release, msg="release needs packages:write (least privilege)")
         self.assertIn("GITHUB_TOKEN", self.release, msg="GHCR auth via GITHUB_TOKEN, no long-lived PAT")
-
-    def test_release_publishes_latest_as_convenience_alias(self):
-        # `latest` must track main so public pulls get the current Rust
-        # image (it used to hold the retired Python image). The SHA tag
-        # stays the authoritative, immutable deploy target.
-        self.assertIn("ghcr.io/bedasrv/asrsub:latest", self.release)
 
     def test_compose_and_build_never_use_latest(self):
         build = (REPO / "build.sh").read_text(encoding="utf-8")

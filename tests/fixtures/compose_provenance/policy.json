@@ -1,0 +1,1 @@
+{"schema":"compose-policy-v1","image_pattern":"ghcr.io/bedasrv/asrsub@sha256:[0-9a-f]{64}","platform":"linux/amd64"}
