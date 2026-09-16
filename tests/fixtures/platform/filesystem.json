@@ -1,0 +1,1 @@
+{"schema":"filesystem-capability-v1","approved_types":["ext4","xfs","btrfs","zfs"],"state_root":"/var/lib/asrsub/state","deployment_root":"/var/lib/asrsub/deploy-state","source":"local-read-only-probe"}

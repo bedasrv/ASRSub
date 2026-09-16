@@ -94,3 +94,34 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=f"build.sh failed: stdout={result.stdout} stderr={result.stderr}")
         env_text = Path(self.repo_dir, ".release.env").read_text()
         self.assertIn(f"ASRSUB_IMAGE=example.com/x/asrsub:{self.sha}", env_text)
+
+
+class TestPlanningReceipt(unittest.TestCase):
+    def test_planning_receipt_schema(self):
+        path = REPO / "tests/fixtures/platform/planning-receipt.json"
+        value = json.loads(path.read_text())
+        self.assertEqual(value["schema"], "planning-receipt-v1")
+        self.assertEqual(value["phase"], "provisional")
+        for key in ("baseline_commit", "core_implementation_commit", "receipt_parent_commit"):
+            self.assertRegex(value[key], r"^[0-9a-f]{40}$")
+        for key in ("core_plan_sha256", "hardening_plan_sha256", "bundle_signer_sha256", "approval_signer_sha256", "asrsub_env_sha256", "signer_argv_policy_sha256"):
+            self.assertRegex(value[key], r"^[0-9a-f]{64}$")
+        self.assertIsNone(value["package_bundle_sha256"])
+        self.assertIsNone(value["create_approval_sha256"])
+
+
+class TestEnvironmentWrapper(unittest.TestCase):
+    def test_scrubs_inherited_state_and_uses_private_target(self):
+        env = os.environ.copy()
+        env.update({"DISCORD_WEBHOOK_URL": "fixture-value", "PIPELINE_ENV": "fixture-value", "HTTP_PROXY": "fixture-value"})
+        result = subprocess.run(
+            [str(REPO / "tools/asrsub-env"), "python3", "-c", "import os; print(os.environ.get('CARGO_TARGET_DIR','')); print(os.environ.get('DISCORD_WEBHOOK_URL',''))"],
+            cwd=REPO, env=env, capture_output=True, text=True, check=True,
+        )
+        lines = result.stdout.splitlines()
+        self.assertTrue(lines[0].startswith("/tmp/agent-scratch/asrsub-implementation/target"))
+        self.assertEqual(lines[1], "")
+        self.assertNotIn("fixture-value", result.stderr)
+
+    def test_wrapper_is_executable(self):
+        self.assertTrue(os.access(REPO / "tools/asrsub-env", os.X_OK))
