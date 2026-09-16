@@ -24,7 +24,6 @@
 //! how many episodes are queued. Every remote call has a deadline so one hung
 //! free-tier endpoint cannot stall the sweep.
 
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,12 +32,12 @@ use tokio::sync::Semaphore;
 
 use crate::bazarr::Bazarr;
 use crate::config::Config;
-use crate::episode::sidecar_exists;
 use crate::feature_modules::discord_text::SafeDisplayText;
 use crate::feature_modules::discord_types::BoundedReports;
 use crate::feature_modules::discord_types::{
-    AggregateDisposition, BoundedTargets, EpisodeKind, EpisodeRunReport, TargetLanguage,
-    TargetRunResult, TargetStatus,
+    AggregateDisposition, BoundedTargets, EpisodeKind, EpisodeRunReport, EpisodeRunResult,
+    FailureClass, ItemFailure, ReportConstructionError, TargetLanguage, TargetRunResult,
+    TargetStatus,
 };
 use crate::feature_modules::process::ToolPaths;
 use crate::glossary::Glossary;
@@ -98,6 +97,91 @@ impl PassOutcome {
     pub(crate) fn into_parts(self) -> (PassStats, BoundedReports, u64) {
         (self.stats, self.reports, self.omitted_reports)
     }
+}
+
+pub(crate) fn reduce_target_outcomes(
+    kind: EpisodeKind,
+    episode_id: i64,
+    title: SafeDisplayText,
+    season: Option<u32>,
+    episode: Option<u32>,
+    targets: Vec<TargetRunResult>,
+    item_failure: Option<ItemFailure>,
+) -> Result<EpisodeRunReport, ReportConstructionError> {
+    let targets = BoundedTargets::try_from(targets)?;
+    let completed = targets
+        .as_slice()
+        .iter()
+        .filter(|target| matches!(target.status(), TargetStatus::Completed { .. }))
+        .count();
+    let warning = targets.as_slice().iter().any(|target| {
+        matches!(
+            target.status(),
+            TargetStatus::Completed { warning: Some(_) }
+        )
+    });
+    let aggregate = if completed == targets.as_slice().len() && item_failure.is_none() {
+        if warning {
+            AggregateDisposition::CompleteWithWarning
+        } else {
+            AggregateDisposition::Complete
+        }
+    } else if completed > 0 {
+        AggregateDisposition::Partial
+    } else {
+        AggregateDisposition::Failed
+    };
+    EpisodeRunReport::try_new(
+        kind,
+        episode_id,
+        title,
+        season,
+        episode,
+        targets,
+        item_failure,
+        aggregate,
+    )
+}
+
+fn bound_pass_reports(
+    reports: Vec<EpisodeRunReport>,
+) -> Result<(BoundedReports, u64), ReportConstructionError> {
+    BoundedReports::from_reports(reports)
+}
+
+fn failure_report_for_candidate(candidate: &Candidate) -> Option<EpisodeRunReport> {
+    let kind = if candidate.is_movie {
+        EpisodeKind::Movie
+    } else {
+        EpisodeKind::Series
+    };
+    let title = SafeDisplayText::sanitize(&candidate.series_title)
+        .or_else(|_| SafeDisplayText::sanitize("?"))
+        .ok()?;
+    let targets = candidate
+        .missing
+        .iter()
+        .map(|language| {
+            TargetRunResult::try_new(
+                TargetLanguage::parse(language).ok()?,
+                TargetStatus::Failed {
+                    class: FailureClass::Unknown,
+                },
+                None,
+            )
+            .ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    reduce_target_outcomes(
+        kind,
+        candidate.episode_id,
+        title,
+        None,
+        None,
+        targets,
+        Some(ItemFailure::Unknown),
+    )
+    .ok()
 }
 
 pub struct Pipeline {
@@ -174,7 +258,7 @@ impl Pipeline {
     /// episodes are processed concurrently under an `EPISODE_CONCURRENCY`
     /// semaphore. Skipped ids from `consume_actions` filter candidates
     /// before the `MAX_EPS_PER_RUN` cap is applied.
-    async fn run_pass_legacy(&self) -> (PassStats, BoundedReports) {
+    async fn run_pass_legacy(&self) -> (PassStats, BoundedReports, u64) {
         let (skip_ids, retries) = self.consume_actions().await;
         // Discover (Bazarr) and series titles (Sonarr) are independent:
         // fire together, latency is the max, not the sum.
@@ -204,12 +288,9 @@ impl Pipeline {
             .collect();
         stats.processed = caps.len();
         if caps.is_empty() {
-            return (
-                stats,
-                BoundedReports::from_reports(std::iter::empty())
-                    .expect("empty report collector")
-                    .0,
-            );
+            let (reports, omitted) =
+                bound_pass_reports(Vec::new()).expect("empty report collector");
+            return (stats, reports, omitted);
         }
         let sem = Arc::new(Semaphore::new(self.cfg.episode_concurrency.max(1)));
         let mut jobs = Vec::with_capacity(caps.len());
@@ -223,35 +304,57 @@ impl Pipeline {
             });
         }
         let mut reports = Vec::new();
-        for (cand, r) in futures::future::join_all(jobs).await {
+        for (cand, result) in futures::future::join_all(jobs).await {
             let eid = cand.episode_id;
-            match r {
-                Ok(n) if n > 0 => {
-                    stats.done += 1;
-                    self.processed_total.fetch_add(1, Ordering::Relaxed);
-                    if let Some(report) = self.committed_report_for_candidate(&cand) {
-                        reports.push(report);
+            match result {
+                Ok(EpisodeRunResult::Report(report)) => {
+                    let has_completed =
+                        report.targets().as_slice().iter().any(|target| {
+                            matches!(target.status(), TargetStatus::Completed { .. })
+                        });
+                    let aggregate = report.aggregate();
+                    match aggregate {
+                        AggregateDisposition::Complete
+                        | AggregateDisposition::CompleteWithWarning
+                        | AggregateDisposition::Partial => {
+                            if has_completed {
+                                stats.done += 1;
+                                self.processed_total.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                stats.failed += 1;
+                            }
+                        }
+                        AggregateDisposition::Failed => stats.failed += 1,
                     }
+                    if aggregate == AggregateDisposition::Failed {
+                        let kind = if cand.is_movie { "movie" } else { "series" };
+                        self.append_state(eid, None, "error", "", kind).await;
+                    }
+                    reports.push(report);
                 }
-                Ok(_) => stats.skipped += 1,
-                Err(e) => {
+                Ok(EpisodeRunResult::NoTarget(_)) => stats.skipped += 1,
+                Err(error) => {
                     tracing::warn!(
                         episode = eid,
-                        error = %crate::config::mask_for_log(&e.to_string()),
+                        error = %crate::config::mask_for_log(&error.to_string()),
                         "episode failed"
                     );
                     stats.failed += 1;
-                    self.append_state(eid, None, "error", "", "series").await;
+                    let kind = if cand.is_movie { "movie" } else { "series" };
+                    self.append_state(eid, None, "error", "", kind).await;
+                    if let Some(report) = failure_report_for_candidate(&cand) {
+                        reports.push(report);
+                    }
                 }
             }
         }
-        let (reports, _) = BoundedReports::from_reports(reports).expect("bounded report collector");
-        (stats, reports)
+        let (reports, omitted) = bound_pass_reports(reports).expect("bounded report collector");
+        (stats, reports, omitted)
     }
 
     pub(crate) async fn run_pass_outcome(&self, _tools: &ToolPaths) -> PassOutcome {
-        let (stats, reports) = self.run_pass_legacy().await;
-        PassOutcome::new(stats, reports, 0)
+        let (stats, reports, omitted_reports) = self.run_pass_legacy().await;
+        PassOutcome::new(stats, reports, omitted_reports)
     }
 
     pub async fn run_pass(&self) -> PassStats {
@@ -446,15 +549,11 @@ impl Pipeline {
                 if !Path::new(&media).is_file() {
                     continue;
                 }
-                let stem = crate::lang::stem_of(&media);
                 let mut missing = Vec::new();
                 for l in &self.cfg.target_langs {
                     if done.contains(&("movie".to_string(), rid, l.clone()))
                         && verified.contains(&("movie".to_string(), rid, l.clone()))
                     {
-                        continue;
-                    }
-                    if sidecar_exists(stem, l) {
                         continue;
                     }
                     missing.push(l.clone());
@@ -478,69 +577,6 @@ impl Pipeline {
         }
         out.sort_by_key(|c| c.episode_id);
         out
-    }
-
-    fn committed_report_for_candidate(&self, candidate: &Candidate) -> Option<EpisodeRunReport> {
-        let kind_token = if candidate.is_movie {
-            "movie"
-        } else {
-            "series"
-        };
-        let known_stem = candidate
-            .path
-            .as_deref()
-            .map(|path| crate::lang::stem_of(&self.cfg.map_path(path)).to_string());
-        let registry: Vec<state::RegistryRow> = state::load_jsonl(&self.cfg.registry_file);
-        let mut targets = Vec::new();
-        for language in &candidate.missing {
-            let row = registry.iter().rev().find(|row| {
-                row.episode_id == Some(candidate.episode_id)
-                    && crate::lang::normalize_lang(row.lang.as_deref().unwrap_or(""))
-                        == crate::lang::normalize_lang(language)
-                    && row
-                        .extra
-                        .get("kind")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("series")
-                        == kind_token
-                    && known_stem
-                        .as_ref()
-                        .is_none_or(|stem| row.stem.as_deref() == Some(stem.as_str()))
-            })?;
-            let target = row.target_path.as_deref()?;
-            let bytes = std::fs::read(target).ok()?;
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let digest: [u8; 32] = hasher.finalize().into();
-            targets.push(
-                TargetRunResult::try_new(
-                    TargetLanguage::parse(language).ok()?,
-                    TargetStatus::Completed { warning: None },
-                    Some(digest),
-                )
-                .ok()?,
-            );
-        }
-        if targets.is_empty() {
-            return None;
-        }
-        let kind = if candidate.is_movie {
-            EpisodeKind::Movie
-        } else {
-            EpisodeKind::Series
-        };
-        let title = SafeDisplayText::sanitize(&candidate.series_title).ok()?;
-        EpisodeRunReport::try_new(
-            kind,
-            candidate.episode_id,
-            title,
-            None,
-            None,
-            BoundedTargets::try_from(targets).ok()?,
-            None,
-            AggregateDisposition::Complete,
-        )
-        .ok()
     }
 }
 
@@ -646,6 +682,47 @@ mod tests {
         assert!(v.contains(&("movie".to_string(), 100, "id".to_string())));
     }
 
+    #[test]
+    fn reduces_one_success_and_one_failure_to_partial_report() {
+        use crate::feature_modules::discord_text::SafeDisplayText;
+        use crate::feature_modules::discord_types::*;
+
+        let report = reduce_target_outcomes(
+            EpisodeKind::Series,
+            7,
+            SafeDisplayText::sanitize("title").unwrap(),
+            Some(1),
+            Some(2),
+            vec![
+                TargetRunResult::try_new(
+                    TargetLanguage::parse("id").unwrap(),
+                    TargetStatus::Completed { warning: None },
+                    Some([1; 32]),
+                )
+                .unwrap(),
+                TargetRunResult::try_new(
+                    TargetLanguage::parse("en").unwrap(),
+                    TargetStatus::Failed {
+                        class: FailureClass::Translation,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ],
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.aggregate(), AggregateDisposition::Partial);
+        assert_eq!(report.targets().as_slice().len(), 2);
+        assert!(matches!(
+            report.targets().as_slice()[0].status(),
+            TargetStatus::Failed {
+                class: FailureClass::Translation
+            }
+        ));
+    }
+
     fn report(id: i64) -> crate::feature_modules::discord_types::EpisodeRunReport {
         use crate::feature_modules::discord_text::SafeDisplayText;
         use crate::feature_modules::discord_types::*;
@@ -666,6 +743,18 @@ mod tests {
             AggregateDisposition::Complete,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn retains_bounded_report_omission_count() {
+        let reports = (0..=crate::feature_modules::discord_types::MAX_PASS_REPORTS as i64)
+            .map(report)
+            .collect::<Vec<_>>();
+        let (bounded, omitted) = bound_pass_reports(reports).unwrap();
+        let outcome = PassOutcome::new(PassStats::default(), bounded, omitted);
+
+        assert_eq!(outcome.reports().len(), 128);
+        assert_eq!(outcome.omitted_reports(), 1);
     }
 
     #[test]

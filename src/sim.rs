@@ -388,7 +388,11 @@ exit 0
 
     // ---- Phase A: ASR path (no ja sidecar) ----
     let stats = pipe.run_pass_with_tools(&pipe.tools).await;
-    assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
+    assert_eq!(
+        (stats.scanned, stats.processed, stats.done, stats.failed),
+        (1, 1, 1, 0),
+        "run_pass compatibility fields must retain their legacy meanings"
+    );
     // One shared transcription for both languages.
     assert_eq!(*stubs.whisper_hits.lock().await, 1);
     // Both target sidecars land with the AI marker.
@@ -738,6 +742,82 @@ fi
             .count(),
         2
     );
+
+    // ---- Phase J: sibling target reduction keeps one success + one failure ----
+    // Re-run both missing targets. Make the id registry row contradict the
+    // strict identity while leaving en unchanged; the pass must retain both
+    // target outcomes and reduce them to a partial report.
+    for lang in ["id", "en"] {
+        std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
+    }
+    std::fs::write(&pipe.cfg.state_file, "").unwrap();
+    let mut registry = registry_rows(&pipe.cfg.registry_file);
+    for row in &mut registry {
+        if row.lang.as_deref() == Some("id") {
+            row.source = Some("contradiction".to_string());
+        }
+    }
+    crate::state::rewrite_jsonl(&pipe.cfg.registry_file, &registry).unwrap();
+    assert_eq!(
+        registry
+            .iter()
+            .find(|row| row.lang.as_deref() == Some("id"))
+            .and_then(|row| row.source.as_deref()),
+        Some("contradiction")
+    );
+    let outcome = pipe.run_pass_outcome(&pipe.tools).await;
+    let (stats, reports, omitted) = outcome.into_parts();
+    assert_eq!(
+        (stats.scanned, stats.processed, stats.done, stats.failed),
+        (1, 1, 1, 0)
+    );
+    assert_eq!(omitted, 0);
+    assert_eq!(reports.len(), 1);
+    let report = reports.iter().next().unwrap();
+    assert_eq!(
+        report.aggregate(),
+        crate::feature_modules::discord_types::AggregateDisposition::Partial,
+        "target outcomes: {:?}",
+        report.targets()
+    );
+    assert!(report.targets().as_slice().iter().any(|target| {
+        target.language().as_str() == "id"
+            && matches!(
+                target.status(),
+                crate::feature_modules::discord_types::TargetStatus::Failed {
+                    class: crate::feature_modules::discord_types::FailureClass::Storage
+                }
+            )
+    }));
+    assert!(report.targets().as_slice().iter().any(|target| {
+        target.language().as_str() == "en"
+            && matches!(
+                target.status(),
+                crate::feature_modules::discord_types::TargetStatus::Completed { .. }
+            )
+    }));
+
+    // A later pass must not promote the installed-but-unadmitted id sidecar.
+    let retry = pipe.run_pass_outcome(&pipe.tools).await;
+    let (retry_stats, retry_reports, retry_omitted) = retry.into_parts();
+    assert_eq!(
+        (
+            retry_stats.scanned,
+            retry_stats.processed,
+            retry_stats.done,
+            retry_stats.failed
+        ),
+        (1, 1, 0, 1)
+    );
+    assert_eq!(retry_omitted, 0);
+    assert_eq!(retry_reports.len(), 1);
+    assert_eq!(
+        retry_reports.iter().next().unwrap().aggregate(),
+        crate::feature_modules::discord_types::AggregateDisposition::Failed
+    );
+    assert!(!state_rows(&pipe.cfg.state_file).iter().any(|row| {
+        row.language.as_deref() == Some("id") && row.status.as_deref() == Some("done")
+    }));
 }
 
 #[cfg(test)]

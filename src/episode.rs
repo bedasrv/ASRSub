@@ -9,8 +9,18 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::asr;
+use crate::feature_modules::discord_text::SafeDisplayText;
+use crate::feature_modules::discord_types::{
+    EpisodeKind, EpisodeRunResult, FailureClass, NoTargetCase, TargetLanguage, TargetRunResult,
+    TargetStatus, WarningClass,
+};
+use crate::feature_modules::pipeline_commit::{
+    commit_target_ledgers, CommitLedgerError, CommitWitness, LedgerCommitRequest, LedgerIdentity,
+    LedgerPaths,
+};
 use crate::ladder::LadderQuery;
 use crate::lang::normalize_lang;
 use crate::pipeline::{Candidate, Pipeline};
@@ -48,6 +58,45 @@ struct LangWork {
     src_stream: Option<u32>,
 }
 
+#[derive(Debug)]
+struct TargetFailure {
+    class: FailureClass,
+    error: anyhow::Error,
+}
+
+impl TargetFailure {
+    fn new(class: FailureClass, error: anyhow::Error) -> Self {
+        Self { class, error }
+    }
+
+    fn translation(error: anyhow::Error) -> Self {
+        Self::new(FailureClass::Translation, error)
+    }
+
+    fn storage_error(error: anyhow::Error) -> Self {
+        Self::new(FailureClass::Storage, error)
+    }
+
+    fn storage(error: CommitLedgerError) -> Self {
+        Self::storage_error(anyhow::anyhow!("target ledger commit failed: {error:?}"))
+    }
+}
+
+fn publish_target_ledgers(
+    paths: LedgerPaths,
+    identity: LedgerIdentity,
+    registry_row: serde_json::Value,
+    state_row: serde_json::Value,
+) -> std::result::Result<CommitWitness, TargetFailure> {
+    commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+        paths,
+        identity,
+        registry_row,
+        state_row,
+    })
+    .map_err(TargetFailure::storage)
+}
+
 /// Episode-scoped context shared (by reference) across one episode's
 /// concurrent language tasks: candidate, paths, duration. Keeps per-lang
 /// fn signatures small; everything outlives the phase-2 join.
@@ -61,23 +110,158 @@ struct EpisodeCtx<'a> {
     duration_s: Option<f64>,
 }
 
+fn target_result(
+    lang: &str,
+    status: TargetStatus,
+    artifact_sha256: Option<[u8; 32]>,
+) -> Result<TargetRunResult> {
+    let language = TargetLanguage::parse(lang)
+        .map_err(|error| anyhow::anyhow!("invalid target language {lang:?}: {error:?}"))?;
+    TargetRunResult::try_new(language, status, artifact_sha256)
+        .map_err(|error| anyhow::anyhow!("invalid target result for {lang:?}: {error:?}"))
+}
+
+fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+fn existing_target_digest(stem: &str, lang: &str) -> Result<[u8; 32]> {
+    let target = crate::lang::replaceable_target_sidecar_paths(stem, lang)
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .context("target sidecar disappeared")?;
+    let bytes = std::fs::read(&target).with_context(|| format!("read target sidecar {target}"))?;
+    Ok(digest_bytes(&bytes))
+}
+
+fn target_is_verified(cfg: &crate::config::Config, candidate: &Candidate, lang: &str) -> bool {
+    let kind = if candidate.is_movie {
+        "movie"
+    } else {
+        "series"
+    };
+    let language = normalize_lang(lang);
+    let registry_ok = state::load_jsonl::<RegistryRow>(&cfg.registry_file)
+        .into_iter()
+        .rev()
+        .any(|row| {
+            row.episode_id == Some(candidate.episode_id)
+                && normalize_lang(row.lang.as_deref().unwrap_or("")) == language
+                && row
+                    .extra
+                    .get("kind")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("series")
+                    == kind
+                && row
+                    .target_path
+                    .as_deref()
+                    .is_some_and(|path| Path::new(path).is_file())
+        });
+    let state_ok = state::load_jsonl::<StateEntry>(&cfg.state_file)
+        .into_iter()
+        .rev()
+        .any(|entry| {
+            entry.episode_id == Some(candidate.episode_id)
+                && normalize_lang(entry.language.as_deref().unwrap_or("")) == language
+                && entry.status.as_deref() == Some("done")
+                && entry.kind.as_deref().unwrap_or("series") == kind
+        });
+    registry_ok && state_ok
+}
+
+fn target_ledger_rows(
+    commit: &RegistryCommit<'_>,
+    artifact_sha256: [u8; 32],
+) -> Result<(LedgerIdentity, serde_json::Value, serde_json::Value)> {
+    let episode_id = commit
+        .episode_id
+        .context("target ledger missing episode id")?;
+    let language = normalize_lang(commit.lang);
+    let digest = crate::feature_modules::discord_state_codec::hex(&artifact_sha256);
+    let target = crate::lang::canonical_target_sidecar(commit.stem, commit.lang);
+
+    let mut registry_extra = std::collections::HashMap::new();
+    registry_extra.insert(
+        "media_path".to_string(),
+        serde_json::Value::String(commit.media_path.to_string()),
+    );
+    registry_extra.insert(
+        "source_lang".to_string(),
+        serde_json::Value::String(normalize_lang(commit.source_lang)),
+    );
+    registry_extra.insert(
+        "artifact_sha256".to_string(),
+        serde_json::Value::String(digest.clone()),
+    );
+    if let Some(stream) = commit.source_stream {
+        registry_extra.insert("source_stream".to_string(), serde_json::Value::from(stream));
+    }
+    if commit.kind == "movie" {
+        registry_extra.insert(
+            "kind".to_string(),
+            serde_json::Value::String("movie".to_string()),
+        );
+    }
+    let registry_row = RegistryRow {
+        stem: Some(commit.stem.to_string()),
+        lang: Some(language.clone()),
+        episode_id: Some(episode_id),
+        source: Some(commit.source.to_string()),
+        source_kind: commit.source_kind.map(str::to_string),
+        source_path: Some(target.clone()),
+        target_path: Some(target),
+        ts: None,
+        extra: registry_extra,
+    };
+
+    let mut state_extra = std::collections::HashMap::new();
+    state_extra.insert(
+        "artifact_sha256".to_string(),
+        serde_json::Value::String(digest),
+    );
+    state_extra.insert(
+        "detail".to_string(),
+        serde_json::Value::String(String::new()),
+    );
+    let state_row = StateEntry {
+        episode_id: Some(episode_id),
+        language: Some(language.clone()),
+        status: Some("done".to_string()),
+        kind: (commit.kind == "movie").then(|| "movie".to_string()),
+        ts: None,
+        extra: state_extra,
+    };
+    let identity = LedgerIdentity {
+        kind: commit.kind.to_string(),
+        episode_id,
+        language,
+        artifact_sha256,
+    };
+    Ok((
+        identity,
+        serde_json::to_value(registry_row)?,
+        serde_json::to_value(state_row)?,
+    ))
+}
+
 impl Pipeline {
     /// Process one episode/movie for all its missing languages.
-    /// Returns the number of languages completed.
     ///
-    /// Source choice is per target language (mirroring `choose_source` call
-    /// sites in `run_pass`): a track already in the target language is
-    /// transcribed directly with no translation step. ASR cues are shared
-    /// across the episode's languages via a per-choice cache (the tag, or
-    /// the chosen stream for an untagged track), so `id`+`en` targets pay
-    /// for one transcription.
+    /// Each target produces one typed result. A target failure therefore does
+    /// not cancel or hide sibling target completions from the same episode.
     pub(crate) async fn process_one(
         &self,
         cand: &Candidate,
         series_titles: &std::collections::HashMap<i64, crate::sonarr::SeriesInfo>,
-    ) -> Result<usize> {
+    ) -> Result<EpisodeRunResult> {
         if self.paused.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(0);
+            return Ok(EpisodeRunResult::NoTarget(NoTargetCase::Paused));
+        }
+        if cand.missing.is_empty() {
+            return Ok(EpisodeRunResult::NoTarget(NoTargetCase::NoMissingTargets));
         }
         let kind = if cand.is_movie { "movie" } else { "series" };
         // Resolve media path (+ series identity for the ladder/Jimaku).
@@ -128,10 +312,33 @@ impl Pipeline {
         // Sequential keeps cache races out by construction.
         let mut asr_cache: std::collections::HashMap<String, asr::Transcript> =
             std::collections::HashMap::new();
+        let mut target_outcomes = Vec::with_capacity(cand.missing.len());
         let mut works = Vec::with_capacity(cand.missing.len());
         for lang in &cand.missing {
-            if sidecar_exists(&stem, lang) {
+            if sidecar_exists(&stem, lang) && target_is_verified(&self.cfg, cand, lang) {
                 tracing::info!(episode = cand.episode_id, lang = %lang, "skip: sidecar already exists");
+                match existing_target_digest(&stem, lang) {
+                    Ok(digest) => target_outcomes.push(target_result(
+                        lang,
+                        TargetStatus::Completed { warning: None },
+                        Some(digest),
+                    )?),
+                    Err(error) => {
+                        tracing::warn!(
+                            episode = cand.episode_id,
+                            lang = %lang,
+                            error = %crate::config::mask_for_log(&error.to_string()),
+                            "existing target could not be read"
+                        );
+                        target_outcomes.push(target_result(
+                            lang,
+                            TargetStatus::Failed {
+                                class: FailureClass::Storage,
+                            },
+                            None,
+                        )?);
+                    }
+                }
                 continue;
             }
             // Ladder fast-path first (adequate ja/en sidecar or Jimaku
@@ -168,8 +375,24 @@ impl Pipeline {
                     )
                 }
                 None => {
-                    let choice = asr::choose_source(&mapped, lang, original_lang.as_deref())
-                        .context("no audio streams")?;
+                    let Some(choice) = asr::choose_source(&mapped, lang, original_lang.as_deref())
+                    else {
+                        let error = anyhow::anyhow!("no audio streams");
+                        tracing::warn!(
+                            episode = cand.episode_id,
+                            lang = %lang,
+                            error = %error,
+                            "source selection failed"
+                        );
+                        target_outcomes.push(target_result(
+                            lang,
+                            TargetStatus::Failed {
+                                class: FailureClass::Source,
+                            },
+                            None,
+                        )?);
+                        continue;
+                    };
                     // Cache key is stable before the language is known (the
                     // tag, or the chosen stream when it must be detected),
                     // so two targets sharing one track share one transcription.
@@ -178,7 +401,7 @@ impl Pipeline {
                         Some(cached) => cached.clone(),
                         None => {
                             let key = format!("ep{}_{}", cand.episode_id, cache_key);
-                            let fresh = asr::transcribe_episode(
+                            let fresh = match asr::transcribe_episode(
                                 &self.pool,
                                 asr::TranscribeJob {
                                     tmp_dir: &self.cfg.tmp_dir,
@@ -195,7 +418,26 @@ impl Pipeline {
                                     max_cue_ms: self.cfg.max_cue_ms,
                                 },
                             )
-                            .await?;
+                            .await
+                            {
+                                Ok(transcript) => transcript,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        episode = cand.episode_id,
+                                        lang = %lang,
+                                        error = %crate::config::mask_for_log(&error.to_string()),
+                                        "transcription failed"
+                                    );
+                                    target_outcomes.push(target_result(
+                                        lang,
+                                        TargetStatus::Failed {
+                                            class: FailureClass::Transcription,
+                                        },
+                                        None,
+                                    )?);
+                                    continue;
+                                }
+                            };
                             asr_cache.insert(cache_key, fresh.clone());
                             fresh
                         }
@@ -241,12 +483,24 @@ impl Pipeline {
                 src_stream,
             });
         }
+
+        if works.is_empty()
+            && target_outcomes.len() == cand.missing.len()
+            && target_outcomes
+                .iter()
+                .all(|target| matches!(target.status(), TargetStatus::Completed { .. }))
+        {
+            return Ok(EpisodeRunResult::NoTarget(
+                NoTargetCase::AllTargetsAlreadyPresent,
+            ));
+        }
+
         // Phase 2 (concurrent): translate + merge + upload + commit per
-        // language. The pool is shared across episodes already, so sharing
-        // across languages is equally sound; failures return Err like the
-        // old sequential `?` (partial per-lang commits persist either way).
+        // language. Every future is reduced after join_all, so one failure
+        // cannot discard a sibling completion.
         let mut jobs = Vec::with_capacity(works.len());
         for w in works {
+            let lang = w.lang.clone();
             // Reborrow per task: the async move owns `w` but only borrows
             // the episode locals (all outlive the join below).
             let ctx = EpisodeCtx {
@@ -258,17 +512,38 @@ impl Pipeline {
                 duration_s,
             };
             jobs.push(async move {
-                let translated: Vec<String> = if !w.needs_translate {
-                    w.src_cues.iter().map(|c| c.text.clone()).collect()
+                let result = if !w.needs_translate {
+                    let translated: Vec<String> =
+                        w.src_cues.iter().map(|cue| cue.text.clone()).collect();
+                    self.finish_lang(ctx, w, translated).await
                 } else {
-                    self.translate_lang(ctx.series_title, &w).await?
+                    match self.translate_lang(ctx.series_title, &w).await {
+                        Ok(translated) => self.finish_lang(ctx, w, translated).await,
+                        Err(error) => Err(TargetFailure::translation(error)),
+                    }
                 };
-                self.finish_lang(ctx, w, translated).await
+                (lang, result)
             });
         }
-        let mut completed = 0;
-        for r in futures::future::join_all(jobs).await {
-            completed += r?;
+        for (lang, result) in futures::future::join_all(jobs).await {
+            match result {
+                Ok(target) => target_outcomes.push(target),
+                Err(failure) => {
+                    tracing::warn!(
+                        episode = cand.episode_id,
+                        lang = %lang,
+                        error = %crate::config::mask_for_log(&failure.error.to_string()),
+                        "target failed"
+                    );
+                    target_outcomes.push(target_result(
+                        &lang,
+                        TargetStatus::Failed {
+                            class: failure.class,
+                        },
+                        None,
+                    )?);
+                }
+            }
         }
         self.jellyfin
             .refresh_for(
@@ -277,7 +552,26 @@ impl Pipeline {
                 if cand.is_movie { "Movie" } else { "Episode" },
             )
             .await;
-        Ok(completed)
+
+        let title = SafeDisplayText::sanitize(&series_title)
+            .map_err(|error| anyhow::anyhow!("invalid report title: {error:?}"))?;
+        let report = crate::pipeline::reduce_target_outcomes(
+            if cand.is_movie {
+                EpisodeKind::Movie
+            } else {
+                EpisodeKind::Series
+            },
+            cand.episode_id,
+            title,
+            season.and_then(|value| u32::try_from(value).ok()),
+            (!cand.is_movie && ep_num > 0)
+                .then(|| u32::try_from(ep_num).ok())
+                .flatten(),
+            target_outcomes,
+            None,
+        )
+        .map_err(|error| anyhow::anyhow!("invalid episode outcome: {error:?}"))?;
+        Ok(EpisodeRunResult::Report(report))
     }
 
     /// Translate one language's source cues (knowledge block included).
@@ -310,13 +604,14 @@ impl Pipeline {
     }
 
     /// Merge, gate, install, upload, and commit one translated language.
-    /// Returns 1 on completion (the caller's completion count).
+    /// The target is admitted only after the strict paired-ledger commit
+    /// returns its witness.
     async fn finish_lang(
         &self,
         ctx: EpisodeCtx<'_>,
         w: LangWork,
         translated: Vec<String>,
-    ) -> Result<usize> {
+    ) -> std::result::Result<TargetRunResult, TargetFailure> {
         let lang = &w.lang;
         let cand = ctx.cand;
         // Assemble cues: translated text keeps SOURCE timing.
@@ -333,11 +628,13 @@ impl Pipeline {
         if !violations.is_empty() {
             tracing::warn!(episode = cand.episode_id, lang = %lang, n = violations.len(), "timeline violations after merge");
         }
-        let srt_text = srt::write_srt(&merged, self.cfg.ai_marker_cue, self.cfg.ai_marker_cue_ms);
-        self.install_and_upload(cand, ctx.media_path, ctx.stem, lang, srt_text.into_bytes())
-            .await?;
-        // Registry + state commit.
-        self.commit_registry(RegistryCommit {
+        let srt_bytes =
+            srt::write_srt(&merged, self.cfg.ai_marker_cue, self.cfg.ai_marker_cue_ms).into_bytes();
+        let (warning, artifact_sha256) = self
+            .install_and_upload(cand, ctx.media_path, ctx.stem, lang, srt_bytes.clone())
+            .await
+            .map_err(TargetFailure::storage_error)?;
+        let registry_commit = RegistryCommit {
             stem: ctx.stem,
             lang,
             source: &w.reg_source,
@@ -347,11 +644,25 @@ impl Pipeline {
             media_path: ctx.media_path,
             source_lang: &w.src_lang,
             source_stream: w.src_stream,
-        })
-        .await;
-        self.append_state(cand.episode_id, Some(lang.as_str()), "done", "", ctx.kind)
-            .await;
-        Ok(1)
+        };
+        let (identity, registry_row, state_row) =
+            target_ledger_rows(&registry_commit, artifact_sha256)
+                .map_err(TargetFailure::storage_error)?;
+        let _witness = publish_target_ledgers(
+            LedgerPaths {
+                registry: self.cfg.registry_file.clone(),
+                state: self.cfg.state_file.clone(),
+            },
+            identity,
+            registry_row,
+            state_row,
+        )?;
+        target_result(
+            lang,
+            TargetStatus::Completed { warning },
+            Some(artifact_sha256),
+        )
+        .map_err(TargetFailure::storage_error)
     }
 
     async fn install_and_upload(
@@ -361,7 +672,7 @@ impl Pipeline {
         stem: &str,
         lang: &str,
         srt_bytes: Vec<u8>,
-    ) -> Result<()> {
+    ) -> Result<(Option<WarningClass>, [u8; 32])> {
         let target = crate::lang::canonical_target_sidecar(stem, lang);
         // Atomic local install first (Bazarr async job may crash and never
         // land the file; the local copy is authoritative for the registry).
@@ -379,7 +690,7 @@ impl Pipeline {
                     && srt::parse_srt(&String::from_utf8_lossy(&existing)).len() >= 10
                 {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    return Ok(());
+                    return Ok((None, digest_bytes(&existing)));
                 }
             }
             tokio::fs::rename(&tmp, &target).await?;
@@ -431,58 +742,10 @@ impl Pipeline {
         }
         tracing::info!(episode = cand.episode_id, lang = %lang, upload = ?code, target = %target, "subtitle committed");
         let _ = media_path;
-        Ok(())
-    }
-
-    /// Provenance commit. ASR rows carry `source = "asr"` with NO
-    /// `source_kind`; ladder rows carry `jpn`/`eng` + `external`.
-    /// `extra` also records the effective source language and, for ASR, the
-    /// chosen audio stream: an `fr`-sourced row is distinguishable from a
-    /// `ja`-sourced one (the shape of `/api2/provenance` is unchanged — it
-    /// reports counts, not fields).
-    /// Paths are recorded for human debugging; nothing verifies hashes, so
-    /// none are stored (and no file re-read happens here).
-    async fn commit_registry(&self, c: RegistryCommit<'_>) {
-        let stem = c.stem;
-        let lang = c.lang;
-        let source = c.source;
-        let source_kind = c.source_kind;
-        let episode_id = c.episode_id;
-        let kind = c.kind;
-        let media_path = c.media_path;
-        let source_lang = c.source_lang;
-        let source_stream = c.source_stream;
-        let target = crate::lang::canonical_target_sidecar(stem, lang);
-        let mut extra = std::collections::HashMap::new();
-        extra.insert(
-            "media_path".to_string(),
-            serde_json::Value::String(media_path.to_string()),
-        );
-        extra.insert(
-            "source_lang".to_string(),
-            serde_json::Value::String(normalize_lang(source_lang)),
-        );
-        if let Some(stream) = source_stream {
-            extra.insert("source_stream".to_string(), serde_json::Value::from(stream));
-        }
-        if kind == "movie" {
-            extra.insert(
-                "kind".to_string(),
-                serde_json::Value::String("movie".to_string()),
-            );
-        }
-        let row = RegistryRow {
-            stem: Some(stem.to_string()),
-            lang: Some(normalize_lang(lang)),
-            episode_id,
-            source: Some(source.to_string()),
-            source_kind: source_kind.map(str::to_string),
-            source_path: Some(target.clone()),
-            target_path: Some(target),
-            ts: Some(state::utc_now_iso()),
-            extra,
-        };
-        let _ = state::append_jsonl(&self.cfg.registry_file, &row);
+        Ok((
+            (code != Some(204)).then_some(WarningClass::Upload),
+            digest_bytes(&srt_bytes),
+        ))
     }
 
     /// State commit. Movies carry `"kind": "movie"` (series rows omit it,
@@ -532,6 +795,39 @@ pub(crate) fn sidecar_exists(stem: &str, lang: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_ledger_failure_propagates_without_success() {
+        use crate::feature_modules::discord_types::FailureClass;
+        use crate::feature_modules::pipeline_commit::{LedgerIdentity, LedgerPaths};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state");
+        std::fs::create_dir(&state_path).unwrap();
+        let row = serde_json::json!({
+            "kind": "series",
+            "episode_id": 7,
+            "language": "id",
+            "artifact_sha256": "0101010101010101010101010101010101010101010101010101010101010101"
+        });
+        let error = publish_target_ledgers(
+            LedgerPaths {
+                registry: dir.path().join("registry"),
+                state: state_path,
+            },
+            LedgerIdentity {
+                kind: "series".to_string(),
+                episode_id: 7,
+                language: "id".to_string(),
+                artifact_sha256: [1; 32],
+            },
+            row.clone(),
+            row,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.class, FailureClass::Storage);
+    }
 
     #[test]
     fn sidecar_exists_covers_alias_variants() {

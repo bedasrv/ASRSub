@@ -201,6 +201,7 @@ fn row_identity(value: &serde_json::Value) -> Option<LedgerIdentity> {
         .as_i64()?;
     let language = o
         .get("language")
+        .or_else(|| o.get("lang"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_ascii_lowercase();
@@ -301,5 +302,28 @@ mod tests {
             .unwrap_err(),
             CommitLedgerError::Contradiction
         );
+    }
+
+    #[test]
+    fn registry_row_serialization_preserves_identity() {
+        let extra = [(
+            "artifact_sha256".to_string(),
+            serde_json::json!("0303030303030303030303030303030303030303030303030303030303030303"),
+        )]
+        .into_iter()
+        .collect();
+        let value = serde_json::to_value(crate::state::RegistryRow {
+            stem: Some("/m/ep".to_string()),
+            lang: Some("id".to_string()),
+            episode_id: Some(7),
+            source: Some("asr".to_string()),
+            source_kind: None,
+            source_path: Some("/m/ep.id.hi.srt".to_string()),
+            target_path: Some("/m/ep.id.hi.srt".to_string()),
+            ts: None,
+            extra,
+        })
+        .unwrap();
+        assert_eq!(row_identity(&value), Some(id()));
     }
 }
