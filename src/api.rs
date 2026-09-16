@@ -385,6 +385,12 @@ async fn h_config_put(
     };
     let mut pairs: Vec<(String, String)> = Vec::new();
     for (k, v) in obj {
+        if crate::feature_modules::discord_config::is_reserved_key(k) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "DISCORD_WEBHOOK_URL is reserved"})),
+            ));
+        }
         if !crate::config::is_editable_key(k) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -1006,5 +1012,12 @@ mod tests {
         assert_eq!(body["integrations"]["jellyfin"], json!(false));
         // Key without URL is surfaced, not silently ignored.
         assert_eq!(body["integrations"]["jellyfin_misconfigured"], json!(true));
+    }
+
+    #[test]
+    fn config_write_rejects_discord_key() {
+        assert!(crate::feature_modules::discord_config::is_reserved_key(
+            "discord_webhook_url"
+        ));
     }
 }
