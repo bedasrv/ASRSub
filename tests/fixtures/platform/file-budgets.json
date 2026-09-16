@@ -113,7 +113,11 @@
     {"path":"tests/fixtures/run_once_audit/media-runtime-image-inspect.json","owner_task":"hardening-task-3","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/run_once_audit/media-runtime-dependencies.json","owner_task":"hardening-task-3","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/run_once_audit/run_audit.py","owner_task":"hardening-task-3","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tools/generate_media_runtime_manifest.py","owner_task":"hardening-task-3","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
+    {"path":"tools/generate_media_runtime_manifest.py","owner_task":"hardening-task-3","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"src/egress.rs","owner_task":"hardening-task-8","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/deployment_commands.rs","src/discord_transport.rs"],"max_direct_production_importers":2,"waiver":"none"},
+    {"path":"tests/fixtures/egress/resolver_snapshot.json","owner_task":"hardening-task-8","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/egress/policy.json","owner_task":"hardening-task-8","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/egress/run_fixture.py","owner_task":"hardening-task-8","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
   ],
   "shared_paths": [
     {"path":"src/main.rs","modifiers":["core-task-2","core-task-9","hardening-task-2","hardening-task-3","hardening-task-6"]},

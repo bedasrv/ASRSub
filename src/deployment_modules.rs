@@ -19,4 +19,6 @@ pub(crate) mod deployment_journal_store;
 pub(crate) mod deployment_quiesce;
 #[path = "deployment_recovery.rs"]
 pub(crate) mod deployment_recovery;
+#[path = "egress.rs"]
+pub(crate) mod egress;
 pub(crate) use crate::feature_modules::discord_state_codec;
