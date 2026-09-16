@@ -1,4 +1,23 @@
 #![allow(dead_code)]
+use super::discord_fs::{ProductionStateRoot, ProductionStateStore};
+use super::discord_state_schema::StateSnapshotBytes;
+
+fn hash_bytes(value: &str) -> anyhow::Result<[u8; 32]> {
+    if value.len() != 64 {
+        anyhow::bail!("invalid state hash");
+    }
+    let mut output = [0; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        output[index] = u8::from_str_radix(std::str::from_utf8(pair)?, 16)?;
+    }
+    Ok(output)
+}
+
+fn transaction_path(nonce: &str, name: &str) -> std::path::PathBuf {
+    std::path::Path::new("/var/lib/asrsub/deploy-state/transactions")
+        .join(nonce)
+        .join(name)
+}
 pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     let mut it = args.iter().skip(1);
     let operation = it
@@ -62,6 +81,50 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         _ => anyhow::bail!("unknown state operation"),
+    }
+    let store = ProductionStateStore::open(ProductionStateRoot::fixed())
+        .map_err(|error| anyhow::anyhow!("state store: {error:?}"))?;
+    let lane = store.lane();
+    match operation.as_str() {
+        "snapshot" | "post-snapshot" => {
+            let nonce = nonce.as_deref().expect("validated nonce");
+            let snapshot = lane
+                .snapshot()
+                .map_err(|error| anyhow::anyhow!("state snapshot: {error:?}"))?;
+            let path = transaction_path(
+                nonce,
+                if operation == "snapshot" {
+                    "state-snapshot.json"
+                } else {
+                    "state-snapshot-forward.json"
+                },
+            );
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, snapshot.as_bytes())?;
+        }
+        "restore" => {
+            let nonce = nonce.as_deref().expect("validated nonce");
+            let path = transaction_path(nonce, "state-snapshot.json");
+            let bytes = std::fs::read(path)?;
+            let snapshot = StateSnapshotBytes::new(
+                bytes.into_boxed_slice(),
+                hash_bytes(expected_hash.as_deref().unwrap())?,
+            )
+            .map_err(|error| anyhow::anyhow!("state snapshot: {error:?}"))?;
+            lane.restore(
+                snapshot,
+                hash_bytes(expected_hash.as_deref().unwrap())?,
+                expected_generation.unwrap(),
+            )
+            .map_err(|error| anyhow::anyhow!("state restore: {error:?}"))?;
+        }
+        "reset" => {
+            lane.reset_delivery(hash_bytes(expected_hash.as_deref().unwrap())?)
+                .map_err(|error| anyhow::anyhow!("state reset: {error:?}"))?;
+        }
+        _ => unreachable!(),
     }
     Ok(())
 }

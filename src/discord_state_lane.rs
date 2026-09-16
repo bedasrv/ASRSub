@@ -233,9 +233,10 @@ impl StateLaneHandle {
 
     pub(crate) fn reset_delivery(
         &self,
-        _expected_state_hash: [u8; 32],
+        expected_state_hash: [u8; 32],
     ) -> Result<StateCommit, NotificationStateError> {
         let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
+        if state_hash(&state) != expected_state_hash { return Err(NotificationStateError::InvalidInput); }
         state.disabled = false;
         commit(&mut state)
     }
