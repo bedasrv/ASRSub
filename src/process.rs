@@ -206,10 +206,9 @@ mod tests {
     }
     #[test]
     fn grandchild_cleanup_is_bounded() {
-        assert_eq!(
+        assert!(
             crate::feature_modules::process_supervisor::bounded_cleanup_witness()
-                .descendants_reaped,
-            true
+                .descendants_reaped
         );
     }
     #[test]

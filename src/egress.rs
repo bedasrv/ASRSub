@@ -26,7 +26,6 @@ pub(crate) fn uses_literal_snapshot_addresses(addresses: &[IpAddr]) -> bool {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
     #[test]
     fn rejects_private_answers() {
         assert!(super::rejects_private_answers("127.0.0.1".parse().unwrap()));
