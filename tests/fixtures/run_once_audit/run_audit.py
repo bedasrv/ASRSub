@@ -82,6 +82,7 @@ def test_run_once_zero_notification_access(args):
     value=_receipt(args.binary,args.providers_file,args.evidence_root,preload,result,"run-once-zero-notification-access")
     args.receipt.parent.mkdir(mode=0o700,parents=True,exist_ok=True); args.receipt.write_bytes(canonical(value)+b"\n")
     loaded=json.loads(args.receipt.read_text()); required={"schema","kind","implementation_commit","binary_sha256","command_argv","preload_path","events","observed_result","evidence_manifest_hash"}; assert required <= loaded.keys(); assert loaded["observed_result"]=="run-once-zero-notification-access" and loaded["events"]==[]
+    schema=json.loads((ROOT/"receipt_schema.json").read_text()); assert set(schema["required"]) <= set(loaded)
 
 def test_all_child_environments(args):
     _fixed_file(args.binary); _fixed_fixture(args.providers_file)
@@ -93,14 +94,18 @@ def test_all_child_environments(args):
     if result.returncode != 0: raise AssertionError("run-once audit binary failed")
     hidden=_run_hidden(args.binary,args.evidence_root,preload)
     if hidden.returncode != 0: raise AssertionError("hidden child audit failed")
-    records=[]
-    for name in HELPERS+CALLERS:
-        records.append({"name":name,"environment":["LANG=C","LC_ALL=C","HOME=/nonexistent","TMPDIR=FreshChildTmpDir"],"fixed_tool_paths":["/usr/bin/ffmpeg","/usr/bin/ffprobe"],"protected_keys_absent":True,"fake_path_rejected":True,"termination":"exited"})
-    if len(records)!=8 or len({r["name"] for r in records})!=8: raise AssertionError("child record set is not exactly eight")
+    try: audit=json.loads(hidden.stdout)
+    except json.JSONDecodeError as error: raise AssertionError("hidden audit did not emit JSON") from error
+    if audit.get("schema")!="child-audit-receipt-v1" or audit.get("events")!=[] or audit.get("observed_result")!="child-environments-complete": raise AssertionError("child audit receipt classification drift")
+    records=audit.get("records")
+    if len(records)!=8 or {record.get("name") for record in records} != set(HELPERS+CALLERS): raise AssertionError("child record set is not exactly eight")
+    for record in records:
+        if record.get("environment") != ["LANG=C","LC_ALL=C","HOME=/nonexistent","TMPDIR=FreshChildTmpDir"] or not record.get("protected_keys_absent") or not record.get("fake_path_rejected") or record.get("termination")!="exited": raise AssertionError("child environment record failed policy")
     value={"schema":"child-audit-receipt-v1","kind":"test","implementation_commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"events":[],"observed_result":"child-environments-complete","records":records,"allowlist":["LANG=C","LC_ALL=C","HOME=/nonexistent","TMPDIR=FreshChildTmpDir"],"protected_keys_absent":True,"evidence_manifest_hash":hashlib.sha256(canonical(records)).hexdigest(),"created_epoch_ns":0}
     args.receipt.parent.mkdir(mode=0o700,parents=True,exist_ok=True); args.receipt.write_bytes(canonical(value)+b"\n")
     args.child_environment_receipt.parent.mkdir(mode=0o700,parents=True,exist_ok=True); args.child_environment_receipt.write_bytes(canonical({"schema":"child-environment-receipt-v1","records":records})+b"\n")
     loaded=json.loads(args.receipt.read_text()); assert {"schema","records","observed_result","events"} <= loaded.keys(); assert loaded["observed_result"]=="child-environments-complete" and len(loaded["records"])==8
+    schema=json.loads((ROOT/"child_environment_schema.json").read_text()); assert schema["allowlist"]==["LANG=C","LC_ALL=C","HOME=/nonexistent","TMPDIR=FreshChildTmpDir"]
 
 def test_media_runtime_manifest_valid(_args):
     with tempfile.TemporaryDirectory(prefix="asrsub-runtime-manifest-") as raw:
