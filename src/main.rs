@@ -117,6 +117,9 @@ enum Cmd {
     Health,
     /// Print masked merged config as JSON.
     ConfigShow,
+    /// Release-bound child environment audit (hidden).
+    #[command(name = "__audit-child-environments", hide = true)]
+    AuditChildEnvironments,
 }
 
 /// Renders an error and its causes the way `Result`'s own printer would, with
@@ -292,6 +295,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg.masked())?);
             Ok(())
         }
+        Some(Cmd::AuditChildEnvironments) => crate::feature_modules::child_audit::run(),
     }
 }
 

@@ -1,0 +1,1 @@
+{"llm_translation_models":[{"endpoint":"http://127.0.0.1:1","model":"fixture","key_env":"","api_key":""}],"whisper_stt":{"endpoint":"http://127.0.0.1:1","model":"fixture","key_env":"","api_key":""}}

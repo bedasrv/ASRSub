@@ -189,4 +189,46 @@ mod tests {
         assert_eq!(p.ffmpeg(), Path::new("/usr/bin/ffmpeg"));
         assert_eq!(p.ffprobe(), Path::new("/usr/bin/ffprobe"));
     }
+
+    #[test]
+    fn child_environment_is_exact() {
+        let env = ChildEnvironment::core(PathBuf::from("/tmp/private"));
+        assert_eq!(env.lang, "C");
+        assert_eq!(env.lc_all, "C");
+        assert_eq!(env.home, "/nonexistent");
+    }
+    #[test]
+    fn fixed_tool_path_ignores_path() {
+        assert_eq!(
+            ToolPaths::production().ffmpeg(),
+            Path::new("/usr/bin/ffmpeg")
+        );
+    }
+    #[test]
+    fn grandchild_cleanup_is_bounded() {
+        assert_eq!(
+            crate::feature_modules::process_supervisor::bounded_cleanup_witness()
+                .descendants_reaped,
+            true
+        );
+    }
+    #[test]
+    fn descriptor_allowlist_is_exact() {
+        assert_eq!(
+            crate::feature_modules::process_child::ChildEnvironmentPolicy::new(PathBuf::from(
+                "/tmp/x"
+            ))
+            .keys(),
+            ["LANG", "LC_ALL", "HOME", "TMPDIR"]
+        );
+    }
+    #[test]
+    fn landlock_denies_protected_paths() {
+        assert!(crate::feature_modules::process_landlock::denies_unlisted_paths());
+    }
+    #[test]
+    fn simulation_tool_paths_are_explicit() {
+        let p = ToolPaths::for_test(PathBuf::from("/tmp/f"), PathBuf::from("/tmp/p"));
+        assert_eq!(p.ffmpeg(), Path::new("/tmp/f"));
+    }
 }

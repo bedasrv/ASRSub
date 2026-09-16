@@ -1,6 +1,8 @@
 //! Feature-root declarations.  Keeping these leaves explicit lets focused
 //! binaries reuse the pure contracts without importing the daemon.
 
+#[path = "child_audit.rs"]
+pub(crate) mod child_audit;
 #[path = "discord_config.rs"]
 pub(crate) mod discord_config;
 #[path = "discord_coordinator.rs"]
@@ -39,3 +41,13 @@ pub(crate) mod discord_unicode;
 pub(crate) mod pipeline_commit;
 #[path = "process.rs"]
 pub(crate) mod process;
+#[path = "process_cgroup.rs"]
+pub(crate) mod process_cgroup;
+#[path = "process_child.rs"]
+pub(crate) mod process_child;
+#[path = "process_landlock.rs"]
+pub(crate) mod process_landlock;
+#[path = "process_linux.rs"]
+pub(crate) mod process_linux;
+#[path = "process_supervisor.rs"]
+pub(crate) mod process_supervisor;
