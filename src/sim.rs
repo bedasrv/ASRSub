@@ -222,56 +222,6 @@ fn router(cx: StubCx) -> axum::Router {
         .with_state(cx)
 }
 
-/// Restores process env on drop (the sim owns `PATH` while it runs).
-struct EnvGuard {
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, val: &str) -> Self {
-        Self {
-            saved: vec![(key, std::env::var(key).ok())],
-        }
-        .and_set(key, val)
-    }
-
-    fn and_set(mut self, key: &'static str, val: &str) -> Self {
-        if !self.saved.iter().any(|(k, _)| *k == key) {
-            self.saved.push((key, std::env::var(key).ok()));
-        }
-        unsafe { std::env::set_var(key, val) };
-        self
-    }
-
-    fn scrub_proxy(mut self) -> Self {
-        for k in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            if !self.saved.iter().any(|(x, _)| *x == k) {
-                self.saved.push((k, std::env::var(k).ok()));
-            }
-            unsafe { std::env::remove_var(k) };
-        }
-        self
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (k, v) in self.saved.drain(..) {
-            match v {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-    }
-}
-
 fn write_exe(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -327,7 +277,7 @@ async fn simulate_library_pass() {
     write_exe(
         &bin_dir.join("ffprobe"),
         r#"#!/bin/sh
-if printf '%s' "$*" | grep -q "stream=index"; then
+if printf '%s' "$*" | /usr/bin/grep -q "stream=index"; then
   printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio","tags":{"language":"jpn"}}],"format":{"duration":"300.0"}}'
 else
   printf '{"format":{"duration":"300.0"}}'
@@ -348,13 +298,6 @@ esac
 exit 0
 "#,
     );
-    let orig_path = std::env::var("PATH").unwrap_or_default();
-    let _env = EnvGuard::set(
-        "PATH",
-        &format!("{}:{orig_path}", bin_dir.to_string_lossy()),
-    )
-    .scrub_proxy();
-
     // One stub server for every remote dependency.
     let stubs = Arc::new(Stubs::default());
     stubs.wanted_id_missing.store(true, Ordering::Relaxed);
@@ -437,10 +380,14 @@ exit 0
         },
         http.clone(),
     );
-    let pipe = crate::pipeline::Pipeline::new(_cfg.clone(), pool, http.clone());
+    let tools = crate::feature_modules::process::ToolPaths::for_test(
+        bin_dir.join("ffmpeg"),
+        bin_dir.join("ffprobe"),
+    );
+    let pipe = crate::pipeline::Pipeline::new_with_tools(_cfg.clone(), pool, http.clone(), tools);
 
     // ---- Phase A: ASR path (no ja sidecar) ----
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     // One shared transcription for both languages.
     assert_eq!(*stubs.whisper_hits.lock().await, 1);
@@ -497,7 +444,7 @@ exit 0
     }
     stubs.uploads.lock().await.clear();
     std::fs::write(format!("{stem_s}.ja.srt"), ladder_ja_fixture()).unwrap();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(*stubs.whisper_hits.lock().await, 1, "ladder must skip ASR");
     assert!(*stubs.llm_hits.lock().await > 0);
@@ -533,7 +480,7 @@ exit 0
         "{\"type\":\"retry\",\"episode_id\":7,\"kind\":\"series\",\"language\":\"id\"}\n",
     )
     .unwrap();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
     stubs.wanted_id_missing.store(true, Ordering::Relaxed);
     let rows = state_rows(&pipe.cfg.state_file);
@@ -552,10 +499,10 @@ exit 0
         "{\"type\":\"skip\",\"episode_id\":7}\n",
     )
     .unwrap();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(stats.scanned, 0, "skip must filter the candidate");
     // Actions consumed: next pass sees the missing language again.
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
 
     // ---- Phase D: whisper failover (primary 500s, fallback serves) ----
@@ -592,8 +539,13 @@ exit 0
         },
         http.clone(),
     );
-    let pipe2 = crate::pipeline::Pipeline::new(pipe.cfg.clone(), failover_pool, http);
-    let stats = pipe2.run_pass().await;
+    let pipe2 = crate::pipeline::Pipeline::new_with_tools(
+        pipe.cfg.clone(),
+        failover_pool,
+        http,
+        pipe.tools.clone(),
+    );
+    let stats = pipe2.run_pass_with_tools(&pipe2.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     // Primary attempted (and failed) first, fallback served the shared
     // transcription — one serving hit, not two.
@@ -615,7 +567,7 @@ exit 0
     .unwrap();
     stubs.movie_on.store(true, Ordering::Relaxed);
     stubs.uploads.lock().await.clear();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     for lang in ["id", "en"] {
         let p = format!("{mstem_s}.{lang}.hi.srt");
@@ -656,7 +608,7 @@ exit 0
     std::fs::remove_file(format!("{stem_s}.id.hi.srt")).unwrap();
     stubs.uploads.lock().await.clear();
     let whisper_before = *stubs.whisper_hits.lock().await;
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     let text = std::fs::read_to_string(format!("{stem_s}.id.hi.srt")).unwrap();
     assert!(text.contains("[AI-generated by ASRSub]"));
@@ -672,7 +624,7 @@ exit 0
     stubs.uploads.lock().await.clear();
     stubs.upload_attempts.store(0, Ordering::SeqCst);
     stubs.upload_failures.store(2, Ordering::SeqCst);
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     let text = std::fs::read_to_string(format!("{mstem_s}.id.hi.srt")).unwrap();
@@ -682,7 +634,7 @@ exit 0
     std::fs::remove_file(format!("{mstem_s}.en.hi.srt")).unwrap();
     stubs.upload_attempts.store(0, Ordering::SeqCst);
     stubs.upload_failures.store(99, Ordering::SeqCst);
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     assert!(std::path::Path::new(&format!("{mstem_s}.en.hi.srt")).is_file());
@@ -701,14 +653,14 @@ exit 0
     write_exe(
         &bin_dir.join("ffprobe"),
         r#"#!/bin/sh
-if printf '%s' "$*" | grep -q "stream=index"; then
+if printf '%s' "$*" | /usr/bin/grep -q "stream=index"; then
   printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"300.0"}}'
 else
   printf '{"format":{"duration":"300.0"}}'
 fi
 "#,
     );
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(
         (stats.scanned, stats.done, stats.failed),
         (1, 0, 1),
@@ -738,7 +690,7 @@ fi
     stubs.upload_failures.store(0, Ordering::SeqCst);
     let bodies_before = stubs.whisper_bodies.lock().await.len();
     let hits_before = *stubs.whisper_hits.lock().await;
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(
         (stats.scanned, stats.done, stats.failed),
         (1, 1, 0),

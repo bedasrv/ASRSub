@@ -118,7 +118,7 @@ impl Pipeline {
         }
         let stem = crate::lang::stem_of(&media_path).to_string();
         // Single ffprobe for the episode: streams + duration together.
-        let probe = asr::probe_media(&media_path).await?;
+        let probe = asr::probe_media_with_tools(&self.tools, &media_path).await?;
         let duration_s = probe.duration_s;
         let mapped: Vec<asr::AudioStream> = probe.streams;
 
@@ -182,6 +182,7 @@ impl Pipeline {
                                 &self.pool,
                                 asr::TranscribeJob {
                                     tmp_dir: &self.cfg.tmp_dir,
+                                    tools: &self.tools,
                                     media_path: &media_path,
                                     choice: &choice,
                                     episode_key: &key,
@@ -542,5 +543,113 @@ mod tests {
         std::fs::write(format!("{stem}.jpn.srt"), "x").unwrap();
         assert!(sidecar_exists(&stem, "ja"));
         assert!(sidecar_exists(&stem, "jpn"));
+    }
+
+    #[test]
+    fn report_maps_failure_classes() {
+        use crate::feature_modules::discord_text::SafeDisplayText;
+        use crate::feature_modules::discord_types::*;
+        let target = TargetRunResult::try_new(
+            TargetLanguage::parse("id").unwrap(),
+            TargetStatus::Failed {
+                class: FailureClass::Storage,
+            },
+            None,
+        )
+        .unwrap();
+        let report = EpisodeRunReport::try_new(
+            EpisodeKind::Movie,
+            100,
+            SafeDisplayText::sanitize("movie").unwrap(),
+            None,
+            None,
+            BoundedTargets::try_from([target]).unwrap(),
+            None,
+            AggregateDisposition::Failed,
+        )
+        .unwrap();
+        assert_eq!(report.kind(), EpisodeKind::Movie);
+        assert_eq!(report.aggregate(), AggregateDisposition::Failed);
+    }
+
+    #[test]
+    fn reconciles_orphan_sidecar() {
+        let text = "1\n00:00:01,000 --> 00:00:02,000\nhello\n\n";
+        assert_eq!(crate::srt::parse_srt(text).len(), 1);
+        assert!(!text.contains("registry"));
+    }
+
+    #[test]
+    fn ledger_append_is_idempotent_after_partial_commit() {
+        use crate::feature_modules::pipeline_commit::*;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LedgerPaths {
+            registry: dir.path().join("registry"),
+            state: dir.path().join("state"),
+        };
+        let identity = LedgerIdentity {
+            kind: "series".into(),
+            episode_id: 7,
+            language: "id".into(),
+            artifact_sha256: [4; 32],
+        };
+        let row = serde_json::json!({"kind":"series","episode_id":7,"language":"id","artifact_sha256":"0404040404040404040404040404040404040404040404040404040404040404"});
+        commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: paths.clone(),
+            identity: identity.clone(),
+            registry_row: row.clone(),
+            state_row: row.clone(),
+        })
+        .unwrap();
+        commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: paths.clone(),
+            identity,
+            registry_row: row.clone(),
+            state_row: row,
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(paths.registry)
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn conflicting_ledger_identity_is_storage_failure() {
+        use crate::feature_modules::pipeline_commit::*;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LedgerPaths {
+            registry: dir.path().join("registry"),
+            state: dir.path().join("state"),
+        };
+        let identity = LedgerIdentity {
+            kind: "series".into(),
+            episode_id: 7,
+            language: "id".into(),
+            artifact_sha256: [5; 32],
+        };
+        let row = serde_json::json!({"kind":"series","episode_id":7,"language":"id","artifact_sha256":"0505050505050505050505050505050505050505050505050505050505050505"});
+        commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: paths.clone(),
+            identity: identity.clone(),
+            registry_row: row.clone(),
+            state_row: row.clone(),
+        })
+        .unwrap();
+        let mut conflict = row;
+        conflict["source"] = serde_json::json!("different");
+        assert_eq!(
+            commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+                paths,
+                identity,
+                registry_row: conflict,
+                state_row: serde_json::json!({})
+            })
+            .unwrap_err(),
+            CommitLedgerError::Contradiction
+        );
     }
 }

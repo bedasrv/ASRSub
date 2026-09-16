@@ -15,9 +15,12 @@
 mod actions;
 mod api;
 mod asr;
+#[cfg(test)]
+mod asr_child_tests;
 mod bazarr;
 mod config;
 mod episode;
+mod feature_modules;
 mod glossary;
 mod jellyfin;
 mod jimaku;
@@ -322,8 +325,9 @@ async fn transcribe_cmd(
     stream: Option<u32>,
 ) -> Result<()> {
     let (cfg, pool, _) = load_stack(providers_file).await?;
+    let tools = crate::feature_modules::process::ToolPaths::production();
     let input_s = input.to_string_lossy().to_string();
-    let probe = asr::probe_media(&input_s).await?;
+    let probe = asr::probe_media_with_tools(&tools, &input_s).await?;
     let mapped: Vec<asr::AudioStream> = probe.streams;
     // Explicit stream: the caller's `--lang` is the pin, and it must be a
     // language the provider accepts (never silently dropped).
@@ -343,6 +347,7 @@ async fn transcribe_cmd(
     let transcript = asr::transcribe_episode(
         &pool,
         asr::TranscribeJob {
+            tools: &tools,
             tmp_dir: &cfg.tmp_dir,
             media_path: &input_s,
             choice: &choice,
@@ -712,8 +717,17 @@ async fn claim_inflight(
 /// Extract embedded ja/en/id subtitle streams to canonical
 /// `{stem}.{lang}.hi.srt` sidecars (what the pipeline owns everywhere else).
 async fn extract_embedded(media: &str) -> Result<()> {
-    let out = tokio::process::Command::new("ffprobe")
-        .args([
+    let tools = crate::feature_modules::process::ToolPaths::production();
+    extract_embedded_with_tools(media, &tools).await
+}
+
+async fn extract_embedded_with_tools(
+    media: &str,
+    tools: &crate::feature_modules::process::ToolPaths,
+) -> Result<()> {
+    let probe_spec = crate::feature_modules::process::MediaChildSpec::new(
+        crate::feature_modules::process::ChildProgram::Ffprobe,
+        [
             "-v",
             "error",
             "-show_entries",
@@ -721,9 +735,15 @@ async fn extract_embedded(media: &str) -> Result<()> {
             "-of",
             "json",
             media,
-        ])
-        .output()
-        .await?;
+        ]
+        .into_iter()
+        .map(str::to_string),
+        std::time::Duration::from_secs(120),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid embedded probe invocation"))?;
+    let out = crate::feature_modules::process::run(tools, probe_spec)
+        .await
+        .map_err(|e| anyhow::anyhow!("embedded probe failed: {e:?}"))?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let stem = lang::stem_of(media);
     for s in v
@@ -755,8 +775,9 @@ async fn extract_embedded(media: &str) -> Result<()> {
             continue;
         }
         let dest = lang::canonical_target_sidecar(stem, &lang);
-        let st = tokio::process::Command::new("ffmpeg")
-            .args([
+        let spec = crate::feature_modules::process::MediaChildSpec::new(
+            crate::feature_modules::process::ChildProgram::Ffmpeg,
+            [
                 "-v",
                 "error",
                 "-y",
@@ -765,10 +786,19 @@ async fn extract_embedded(media: &str) -> Result<()> {
                 "-map",
                 &format!("0:{idx}"),
                 &dest,
-            ])
-            .status()
-            .await?;
-        if st.success() {
+            ]
+            .into_iter()
+            .map(str::to_string),
+            std::time::Duration::from_secs(600),
+        )
+        .map_err(|_| anyhow::anyhow!("invalid embedded extraction invocation"))?;
+        let output = crate::feature_modules::process::run(tools, spec)
+            .await
+            .map_err(|e| anyhow::anyhow!("embedded extraction failed: {e:?}"))?;
+        if matches!(
+            output.termination,
+            crate::feature_modules::process::ChildTermination::Exited(0)
+        ) {
             tracing::info!("webhook: extracted embedded {lang} -> {dest}");
         }
     }

@@ -33,6 +33,8 @@ use tokio::sync::Semaphore;
 use crate::bazarr::Bazarr;
 use crate::config::Config;
 use crate::episode::sidecar_exists;
+use crate::feature_modules::discord_types::BoundedReports;
+use crate::feature_modules::process::ToolPaths;
 use crate::glossary::Glossary;
 use crate::jellyfin::Jellyfin;
 use crate::jimaku::Jimaku;
@@ -64,6 +66,34 @@ pub struct PassStats {
     pub skipped: usize,
 }
 
+pub(crate) struct PassOutcome {
+    stats: PassStats,
+    reports: BoundedReports,
+    omitted_reports: u64,
+}
+
+impl PassOutcome {
+    pub(crate) fn new(stats: PassStats, reports: BoundedReports, omitted_reports: u64) -> Self {
+        Self {
+            stats,
+            reports,
+            omitted_reports,
+        }
+    }
+    pub(crate) fn stats(&self) -> &PassStats {
+        &self.stats
+    }
+    pub(crate) fn reports(&self) -> &BoundedReports {
+        &self.reports
+    }
+    pub(crate) fn omitted_reports(&self) -> u64 {
+        self.omitted_reports
+    }
+    pub(crate) fn into_parts(self) -> (PassStats, BoundedReports, u64) {
+        (self.stats, self.reports, self.omitted_reports)
+    }
+}
+
 pub struct Pipeline {
     pub cfg: Config,
     pub pool: ProviderPool,
@@ -83,10 +113,20 @@ pub struct Pipeline {
     /// the desired backstop, not a bug.
     pub(crate) jimaku_tried:
         std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    pub(crate) tools: ToolPaths,
 }
 
 impl Pipeline {
     pub fn new(cfg: Config, pool: ProviderPool, http: reqwest::Client) -> Self {
+        Self::new_with_tools(cfg, pool, http, ToolPaths::production())
+    }
+
+    pub(crate) fn new_with_tools(
+        cfg: Config,
+        pool: ProviderPool,
+        http: reqwest::Client,
+        tools: ToolPaths,
+    ) -> Self {
         let sonarr = Sonarr::new(&cfg.sonarr_url, &cfg.sonarr_api_key, http.clone());
         let bazarr = Bazarr::new(
             &cfg.bazarr_url,
@@ -118,6 +158,7 @@ impl Pipeline {
             processed_total: AtomicU64::new(0),
             upload_sem,
             jimaku_tried: std::sync::Mutex::new(std::collections::HashMap::new()),
+            tools,
         }
     }
 
@@ -127,7 +168,7 @@ impl Pipeline {
     /// episodes are processed concurrently under an `EPISODE_CONCURRENCY`
     /// semaphore. Skipped ids from `consume_actions` filter candidates
     /// before the `MAX_EPS_PER_RUN` cap is applied.
-    pub async fn run_pass(&self) -> PassStats {
+    async fn run_pass_legacy(&self) -> PassStats {
         let (skip_ids, retries) = self.consume_actions().await;
         // Discover (Bazarr) and series titles (Sonarr) are independent:
         // fire together, latency is the max, not the sum.
@@ -191,6 +232,25 @@ impl Pipeline {
             }
         }
         stats
+    }
+
+    pub(crate) async fn run_pass_outcome(&self, _tools: &ToolPaths) -> PassOutcome {
+        let stats = self.run_pass_legacy().await;
+        let (reports, omitted_reports) = BoundedReports::from_reports(std::iter::empty())
+            .expect("empty bounded report collector");
+        PassOutcome::new(stats, reports, omitted_reports)
+    }
+
+    pub async fn run_pass(&self) -> PassStats {
+        self.run_pass_outcome(&ToolPaths::production())
+            .await
+            .into_parts()
+            .0
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn run_pass_with_tools(&self, tools: &ToolPaths) -> PassStats {
+        self.run_pass_outcome(tools).await.into_parts().0
     }
 
     /// Resolve operator retries into same-pass candidates (see `run_pass`).
@@ -508,5 +568,62 @@ mod tests {
         assert!(!v.contains(&("series".to_string(), 7, "en".to_string())));
         assert!(v.contains(&("series".to_string(), 100, "id".to_string())));
         assert!(v.contains(&("movie".to_string(), 100, "id".to_string())));
+    }
+
+    fn report(id: i64) -> crate::feature_modules::discord_types::EpisodeRunReport {
+        use crate::feature_modules::discord_text::SafeDisplayText;
+        use crate::feature_modules::discord_types::*;
+        EpisodeRunReport::try_new(
+            EpisodeKind::Series,
+            id,
+            SafeDisplayText::sanitize("title").unwrap(),
+            Some(1),
+            Some(1),
+            BoundedTargets::try_from([TargetRunResult::try_new(
+                TargetLanguage::parse("id").unwrap(),
+                TargetStatus::Completed { warning: None },
+                Some([id as u8; 32]),
+            )
+            .unwrap()])
+            .unwrap(),
+            None,
+            AggregateDisposition::Complete,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn run_pass_wrapper_discards_reports() {
+        let (reports, omitted) =
+            crate::feature_modules::discord_types::BoundedReports::from_reports(
+                std::iter::empty::<crate::feature_modules::discord_types::EpisodeRunReport>(),
+            )
+            .unwrap();
+        let outcome = PassOutcome::new(PassStats::default(), reports, omitted);
+        assert_eq!(outcome.reports().len(), 0);
+        assert_eq!(outcome.omitted_reports(), 0);
+    }
+
+    #[test]
+    fn reports_sort_deterministically() {
+        let (reports, _) = crate::feature_modules::discord_types::BoundedReports::from_reports([
+            report(9),
+            report(2),
+        ])
+        .unwrap();
+        assert_eq!(
+            reports.iter().map(|r| r.episode_id()).collect::<Vec<_>>(),
+            vec![2, 9]
+        );
+    }
+
+    #[test]
+    fn commit_id_is_stable() {
+        let a = report(7);
+        let b = report(7);
+        assert_eq!(
+            a.pipeline_commit_id().unwrap().as_str(),
+            b.pipeline_commit_id().unwrap().as_str()
+        );
     }
 }
