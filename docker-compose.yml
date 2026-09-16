@@ -72,7 +72,13 @@ services:
         target: /run/asrsub/egress-policy.json
         read_only: true
         bind: { propagation: rprivate, create_host_path: false }
-    command: ["/usr/local/bin/asrsub"]
+    command: ["daemon"]
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: "no"
 
 secrets:

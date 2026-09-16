@@ -1,3 +1,15 @@
 #!/bin/sh
 set -eu
-case "${1:-}" in --preflight) exit 0;; *) exit 2;; esac
+
+# The systemd-installed wrapper has one fixed adapter source.  It never accepts
+# a caller-selected repository, interpreter, environment file, or fixture.
+entrypoint=/opt/mediastack/asrsub/tools/production_entrypoint.py
+if [ ! -f "$entrypoint" ]; then
+    printf '%s\n' 'ASRSub production preflight blocked: approved adapter source is absent' >&2
+    exit 75
+fi
+if [ "${1:-}" != "--preflight" ] || [ "$#" -ne 1 ]; then
+    printf '%s\n' 'ASRSub production preflight blocked: recovery action is not allowlisted' >&2
+    exit 75
+fi
+exec /usr/bin/python3 "$entrypoint" recover --preflight

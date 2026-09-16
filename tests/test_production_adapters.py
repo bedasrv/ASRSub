@@ -131,6 +131,20 @@ print("CONTROL_API_KEY=super-secret-verifier-output")
         return deployment, bundle, manifest, docker_evidence, systemd, cgroup, manifest_hash, approval, verifier
 
 
+class TestProductionEntrypoints(AdapterTestCase):
+    def test_missing_fixed_host_artifacts_block_recovery_and_runtime(self):
+        for script, action in (("asrsub-recover", "--preflight"), ("asrsub-runtime", "--reconcile")):
+            result = subprocess.run(
+                [str(ROOT / "scripts" / script), action],
+                cwd=ROOT,
+                env={"PATH": os.environ.get("PATH", "")},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0, script)
+            self.assertIn("blocked", (result.stdout + result.stderr).lower(), script)
+
+
 class TestProductionModeAndDocker(AdapterTestCase):
     def test_production_mode_is_explicit_and_never_uses_fixture_fallback(self):
         fixture = self.root / "fixture.json"
@@ -263,13 +277,113 @@ class TestProductionModeAndDocker(AdapterTestCase):
         self.assertIn("<redacted>", text)
 
 
+    def test_production_rejects_nonfixed_compose_path(self):
+        compose = self.root / "compose.yaml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        result = run_tool(
+            "deploy_docker.py",
+            "--production",
+            "compose-up",
+            "--digest",
+            DIGEST,
+            "--compose-file",
+            compose,
+            "--output",
+            self.root / "evidence.json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixed", (result.stdout + result.stderr).lower())
+
+    def test_test_seam_rejects_forbidden_ambient_docker_environment(self):
+        fake = self.write_fake_docker()
+        compose = self.root / "compose.yaml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        env = os.environ.copy()
+        env["ASRSUB_ARGV_LOG"] = str(self.root / "argv.json")
+        env["DOCKER_HOST"] = "tcp://unapproved.example"
+        result = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "deploy_docker.py"),
+                "--test-seam",
+                "--docker-executable",
+                str(fake),
+                "compose-up",
+                "--compose-file",
+                str(compose),
+                "--output",
+                str(self.root / "evidence.json"),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ambient", (result.stdout + result.stderr).lower())
+
+
+    def test_compose_uses_entrypoint_compatible_daemon_and_real_healthcheck(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        self.assertIn('command: ["daemon"]', compose)
+        self.assertNotIn('command: ["/usr/local/bin/asrsub"]', compose)
+        self.assertRegex(compose, r"(?ms)^\s*healthcheck:\n.*test:.*?/ready")
+
+
+    def test_output_write_failure_is_bounded_after_side_effect(self):
+        fake = self.write_executable(
+            "side-effect.py",
+            """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ["ASRSUB_SIDE_EFFECT"]).write_text("side effect\\n", encoding="utf-8")
+print(json.dumps({"Id": "sha256:" + "a" * 64, "RepoDigests": ["ghcr.io/bedasrv/asrsub@sha256:" + "a" * 64]}))
+""",
+        )
+        side_effect = self.root / "side-effect.marker"
+        blocked_parent = self.root / "not-a-directory"
+        blocked_parent.write_text("x", encoding="utf-8")
+        env = os.environ.copy()
+        env["ASRSUB_SIDE_EFFECT"] = str(side_effect)
+        result = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "deploy_docker.py"),
+                "--test-seam",
+                "--docker-executable",
+                str(fake),
+                "image-inspect",
+                "--digest",
+                DIGEST,
+                "--output",
+                blocked_parent / "evidence.json",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(side_effect.exists())
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+
+    def test_deploy_docs_require_digest_and_systemd_owned_flow(self):
+        docs = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn("@sha256:", docs)
+        self.assertIn("asrsub-recover --preflight", docs)
+        self.assertIn("asrsub-runtime --reconcile", docs)
+        production_section = docs.split("## Deploy", 1)[1].split("## Reverse proxy", 1)[0]
+        self.assertNotRegex(production_section, r"ASRSUB_IMAGE=ghcr\.io/bedasrv/asrsub:<full-40-char-sha>")
+
+
 class TestProductionStateFs(AdapterTestCase):
     def test_statefs_rejects_traversal_and_symlink_and_emits_real_identity(self):
         state = self.root / "state"
         evidence = self.root / "evidence"
         result = run_tool(
             "provision_statefs.py",
-            "--production",
+            "--test-seam",
             "--state-root",
             state,
             "--evidence-root",
@@ -344,10 +458,70 @@ class TestProductionStateFs(AdapterTestCase):
         self.assertNotEqual(bad_commit.returncode, 0)
 
 
+    def test_statefs_rerun_preserves_valid_admission_and_rejects_malformed_state(self):
+        state = self.root / "state"
+        first_evidence = self.root / "evidence-1"
+        args = [
+            "provision_statefs.py",
+            "--test-seam",
+            "--state-root",
+            state,
+            "--evidence-root",
+            first_evidence,
+            "--implementation-commit",
+            SHA,
+        ]
+        first = run_tool(*args)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        admission = state / "deployment-admission" / "admission.json"
+        before = admission.read_bytes()
+        second_args = [
+            "provision_statefs.py",
+            "--test-seam",
+            "--state-root",
+            state,
+            "--evidence-root",
+            self.root / "evidence-2",
+            "--implementation-commit",
+            SHA,
+        ]
+        second = run_tool(*second_args)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(admission.read_bytes(), before)
+        admission.write_bytes(b"not-json")
+        malformed_args = [
+            "provision_statefs.py",
+            "--test-seam",
+            "--state-root",
+            state,
+            "--evidence-root",
+            self.root / "evidence-3",
+            "--implementation-commit",
+            SHA,
+        ]
+        malformed = run_tool(*malformed_args)
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn("admission", malformed.stderr.lower())
+
+    def test_production_statefs_rejects_caller_selected_root(self):
+        result = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--state-root",
+            self.root / "state",
+            "--evidence-root",
+            self.root / "evidence",
+            "--implementation-commit",
+            SHA,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/var/lib/asrsub/state", (result.stdout + result.stderr).lower())
+
+
 class TestProductionBundleInstall(AdapterTestCase):
     def production_install_args(self, bundle, manifest, approval, verifier, target, output):
         return (
-            "--production",
+            "--test-seam",
             "--bundle-root",
             bundle,
             "--manifest",
@@ -452,6 +626,30 @@ class TestProductionBundleInstall(AdapterTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "outside").exists())
 
+    def test_production_rejects_arbitrary_verifier_even_when_executable(self):
+        bundle, manifest, approval, _, _ = self.make_bundle()
+        result = run_tool(
+            "install_runtime_bundle.py",
+            "--production",
+            "--bundle-root",
+            bundle,
+            "--manifest",
+            manifest,
+            "--approval",
+            approval,
+            "--verify-command",
+            "/usr/bin/true",
+            "--release-sha",
+            SHA,
+            "--target-root",
+            self.root / "installed",
+            "--output",
+            self.root / "receipt.json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fixed", (result.stdout + result.stderr).lower())
+        self.assertFalse((self.root / "installed").exists())
+
     def test_check_fixture_remains_explicit_fixture_mode(self):
         result = run_tool("install_runtime_bundle.py", "--check-fixture")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -461,7 +659,7 @@ class TestProductionRollout(AdapterTestCase):
     def rollout_args(self, inputs, output):
         deployment, bundle, manifest, docker, systemd, cgroup, manifest_hash, _, _ = inputs
         return (
-            "--production",
+            "--test-seam",
             "--deployment-root",
             deployment,
             "--runtime-bundle",
@@ -517,6 +715,15 @@ class TestProductionRollout(AdapterTestCase):
         result = run_tool("record_rollout.py", *mixed)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(output.exists())
+
+
+    def test_production_requires_process_health_and_target_artifacts(self):
+        inputs = self.make_rollout_inputs()
+        args = list(self.rollout_args(inputs, self.root / "rollout.json"))
+        args[0] = "--production"
+        result = run_tool("record_rollout.py", *args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertRegex((result.stdout + result.stderr).lower(), r"health|process|runtime|fixed")
 
 
 if __name__ == "__main__":
