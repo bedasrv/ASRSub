@@ -25,6 +25,30 @@ the *decisions*.
 - Each row maps one legacy behavior area to its Rust status. Live contracts
   remain `README.md` + `docs/HEALTH.md`; `docs/PLAN.md` is provenance only.
 
+## Deployment-hardening parity boundary
+
+The Discord feature adds a new outbound destination without changing inbound
+webhook semantics or episode counters. The following are explicit hardening
+requirements, not claims that the current host has been changed:
+
+- **Requirement:** production Compose is rendered from the tracked template,
+  binds staged secrets and enumerated mounts, runs as `1000:1000`, drops all
+  capabilities, and uses a host-side readiness probe.
+- **Requirement:** notification StateFs remains separate from the pipeline
+  ledgers; no-follow identity checks, lock-held atomic replacement, quarantine,
+  fsync, and readback belong to the production adapter.
+- **Requirement:** child process groups, pidfds/cgroup cleanup, Landlock, signed
+  digest provenance, authenticated admission/quiesce, deployment journals,
+  recovery, rotation, rollback, and systemd ownership are hardening gates.
+- **Requirement:** the notifier shares the daemon process with other network
+  integrations, so no Discord-only firewall claim is made. Resolver/address
+  binding is evidenced at the transport boundary instead.
+- **Local evidence:** repository fixtures use fake data, localhost services,
+  and disposable roots only. **Rollout-only evidence:** live VM identity,
+  effective mounts/environment, running digest, resolver peers, systemd
+  restart ownership, and rollback/rotation events cannot be inferred from
+  local parity tests.
+
 ## Legend
 
 | Status | Meaning |

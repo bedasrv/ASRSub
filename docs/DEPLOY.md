@@ -1,10 +1,16 @@
 # ASRSub Deploy Instructions (Explicit, Immutable Release)
 
-Images are built by CI and published to GHCR; deployment pulls an explicit
-image by git SHA and starts it. There is no `deploy.sh` (deleted
-2026-09-09), and compose never consumes a mutable `latest` tag — the release
-image must always be set explicitly via `ASRSUB_IMAGE` (CI publishes a
-`latest` alias as a convenience; see Build).
+**Requirement (not executed evidence):** images are built by CI and published
+as immutable OCI digests. The tracked `docker-compose.yml` is a template; the
+sole renderer is `tools/compose_provenance.py`, which produces the exact
+interpolation-free candidate installed at `/opt/mediastack/asrsub/compose.yaml`.
+The template hash and rendered Compose hash are separate approval-bound
+identities. A mutable tag or registry lookup is never a production identity.
+
+**Rollout-only evidence:** the final digest, release SHA, signed bundle,
+approval generation, installed inventory, and target receipt must be read back
+on the approved target before systemd may start the runtime. This document
+does not claim that any rollout, secret activation, or host mutation has run.
 
 ## What's in the image
 
@@ -62,6 +68,32 @@ every config layer, so the dashboard renders them read-only — a value saved
 from the UI could never take effect. Change them in the compose `.env`.
 
 ## Prerequisites
+
+## Hardened boundary (requirements)
+
+- Runtime secrets are staged by a root-owned, journaled deployment operation
+  into `/var/lib/asrsub/runtime-secrets/`; the container sees only the fixed
+  read-only projections `/run/secrets/discord_webhook` and
+  `/run/secrets/control_api_key`. The operator source directory, provider-key
+  source, approval files, rollback material, deployment journal, and Docker
+  socket are never mounted.
+- The application runs as UID/GID `1000:1000` with no capabilities and
+  `no-new-privileges`. StateFs is separate from the pipeline JSONL ledgers and
+  is admitted only after no-follow, ownership, mode, filesystem, and mount
+  identity checks. Systemd owns recovery and restart; Compose does not.
+- Deployment admission is blocked before quiesce, replacement, recovery, or
+  journal mutation and is reopened only after terminal journal, receipt,
+  evidence, and active-set witnesses read back. Pending notification state is
+  preserved across deployment; no drain/reset side effect is defined.
+- The daemon uses an in-process resolver snapshot for Discord. It does **not**
+  claim a Discord-only firewall or cgroup allowlist because Discord shares the
+  ASRSub process with other integrations.
+
+**Local evidence:** disposable fixtures and localhost/fake transports verify
+Compose projections, journal transitions, StateFs behavior, child policy,
+provenance, and receipts. **Rollout-only evidence:** effective container
+mounts, cgroup delegation, resolver peers, systemd ownership, running image
+identity, and rollback timestamps require a target-VM receipt.
 
 - GHCR read access on the host (one time):
   ```bash
