@@ -538,6 +538,14 @@ async fn refine_cmd(
 
 /// Daemon: single-instance flock + control API + adaptive sleep loop.
 async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
+    daemon_with_store_factory(
+        providers_file,
+        crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed(),
+    )
+    .await
+}
+
+async fn daemon_loop(providers_file: Option<PathBuf>) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
     let lock_path = crate::config::lock_path(&cfg.state_file);
@@ -664,7 +672,7 @@ async fn daemon_with_store_factory<
     let _store = factory
         .open_for_daemon()
         .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
-    daemon(providers_file).await
+    daemon_loop(providers_file).await
 }
 
 fn build_daemon_dependencies_with_factory<
@@ -936,6 +944,21 @@ mod tests {
     async fn daemon_only_constructs_discord() {
         let (sender, _join) = crate::feature_modules::discord_coordinator::start();
         drop(sender);
+    }
+
+    #[test]
+    fn production_daemon_selects_production_state_store() {
+        let factory = crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed();
+        assert_eq!(
+            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
+                &factory
+            ),
+            "production-statefs"
+        );
+        assert_eq!(
+            crate::feature_modules::discord_fs::PRODUCTION_STATE_ROOT,
+            "/var/lib/asrsub/state"
+        );
     }
 
     #[test]

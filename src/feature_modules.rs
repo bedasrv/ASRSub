@@ -5,6 +5,10 @@
 pub(crate) mod discord_config;
 #[path = "discord_coordinator.rs"]
 pub(crate) mod discord_coordinator;
+#[path = "discord_fs.rs"]
+pub(crate) mod discord_fs;
+#[path = "discord_fs_linux.rs"]
+pub(crate) mod discord_fs_linux;
 #[path = "discord_renderer.rs"]
 pub(crate) mod discord_renderer;
 #[path = "discord_state.rs"]

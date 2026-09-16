@@ -76,7 +76,9 @@
     {"path":"tests/fixtures/discord_state/clock_vectors.json","owner_task":"core-task-6","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/discord_state/outbox_crash_vectors.json","owner_task":"core-task-7","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/discord_transport/response_matrix.json","owner_task":"core-task-8","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tests/fixtures/core_acceptance/acceptance-manifest.json","owner_task":"core-task-10","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
+    {"path":"tests/fixtures/core_acceptance/acceptance-manifest.json","owner_task":"core-task-10","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"src/discord_fs.rs","owner_task":"hardening-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/main.rs","src/state_control.rs"],"max_direct_production_importers":2,"waiver":"none"},
+    {"path":"src/discord_fs_linux.rs","owner_task":"hardening-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/discord_fs.rs"],"max_direct_production_importers":1,"waiver":"none"}
   ],
   "shared_paths": [
     {"path":"src/main.rs","modifiers":["core-task-2","core-task-9","hardening-task-2","hardening-task-3","hardening-task-6"]},
