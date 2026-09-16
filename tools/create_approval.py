@@ -38,9 +38,17 @@ def canonical(value: Any) -> bytes:
 
 
 def absolute(path: Path, *, name: str) -> Path:
-    if not path.is_absolute() or any(part == ".." for part in path.parts):
-        raise ValueError(f"{name} must be an absolute path without traversal")
-    return path
+    if any(part == ".." for part in path.parts):
+        raise ValueError(f"{name} must not contain path traversal")
+    if path.is_absolute():
+        return path
+    root = Path.cwd().resolve()
+    try:
+        resolved = (root / path).resolve(strict=False)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{name} must stay within the current working directory") from exc
+    return resolved
 
 
 def _read_canonical(path: Path) -> tuple[dict[str, Any], bytes]:

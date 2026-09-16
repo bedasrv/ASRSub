@@ -15,11 +15,12 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 
 OPENSSL = Path("/usr/bin/openssl")
+GIT = Path("/usr/bin/git")
 RELEASE_RE = set("0123456789abcdef")
 RUNTIME_MEMBERS = frozenset(
     {
@@ -69,15 +70,53 @@ def canonical(value: Any) -> bytes:
 
 
 def absolute(path: Path, *, name: str) -> Path:
-    if not path.is_absolute() or any(part == ".." for part in path.parts):
-        raise ValueError(f"{name} must be an absolute path without traversal")
-    return path
+    if any(part == ".." for part in path.parts):
+        raise ValueError(f"{name} must not contain path traversal")
+    if path.is_absolute():
+        return path
+    root = Path.cwd().resolve()
+    try:
+        resolved = (root / path).resolve(strict=False)
+        resolved.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{name} must stay within the current working directory") from exc
+    return resolved
 
 
 def release_sha(value: str) -> str:
     if not isinstance(value, str) or len(value) != 40 or value.lower() != value or any(char not in RELEASE_RE for char in value):
         raise ValueError("release SHA must be exactly 40 lowercase hexadecimal characters")
     return value
+
+
+def release_sha_from_git(cwd: Path | None = None) -> str:
+    workdir = Path.cwd() if cwd is None else cwd
+    try:
+        completed = subprocess.run(
+            [os.fspath(GIT), "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"],
+            cwd=workdir,
+            capture_output=True,
+            check=False,
+            shell=False,
+            text=True,
+            env={
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("cannot resolve a full lowercase 40-character HEAD SHA from git") from exc
+    raw = completed.stdout
+    if completed.returncode != 0 or raw.count("\n") != 1 or not raw.endswith("\n"):
+        raise ValueError("cannot resolve a full lowercase 40-character HEAD SHA from git")
+    try:
+        return release_sha(raw[:-1])
+    except ValueError as exc:
+        raise ValueError("git HEAD is not a full lowercase 40-character SHA") from exc
 
 
 def _regular(path: Path, *, name: str, mode: int | None = None) -> None:
@@ -186,16 +225,18 @@ def _copy_tree(runtime_source: Path, systemd_source: Path, output: Path, members
 
 
 def package_bundle(args: argparse.Namespace, *, test_seam: bool) -> int:
-    if args.runtime_source_root is None or args.systemd_source_root is None or args.output_root is None or args.release_sha is None:
-        raise ValueError("bundle mode requires --runtime-source-root, --systemd-source-root, --output-root, and --release-sha")
+    if args.runtime_source_root is None or args.systemd_source_root is None or args.output_root is None:
+        raise ValueError("bundle mode requires --runtime-source-root, --systemd-source-root, and --output-root")
+    if (args.release_sha is None) == (not args.release_sha_from_git):
+        raise ValueError("bundle mode requires exactly one of --release-sha or --release-sha-from-git")
     if args.key_fd is None:
         raise ValueError("bundle mode requires a real signing key through --key-fd")
     runtime_source = absolute(args.runtime_source_root, name="runtime source root")
     systemd_source = absolute(args.systemd_source_root, name="systemd source root")
     output_root = absolute(args.output_root, name="bundle output root")
-    release = release_sha(args.release_sha)
     if not runtime_source.is_dir() or not systemd_source.is_dir():
         raise ValueError("required release input directory is absent")
+    release = release_sha_from_git() if args.release_sha_from_git else release_sha(args.release_sha)
     if output_root.exists() or output_root.is_symlink():
         raise ValueError("bundle output root must not already exist")
     manifest_output = absolute(args.manifest_output or output_root.parent / "bundle-manifest.json", name="manifest output")
@@ -267,6 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--approved-image-hash", type=Path)
     parser.add_argument("--image-ref")
     parser.add_argument("--release-sha")
+    parser.add_argument("--release-sha-from-git", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--runtime-source-root", type=Path)
     parser.add_argument("--systemd-source-root", type=Path)
