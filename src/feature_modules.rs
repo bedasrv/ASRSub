@@ -1,6 +1,8 @@
 //! Feature-root declarations.  Keeping these leaves explicit lets focused
 //! binaries reuse the pure contracts without importing the daemon.
 
+#[path = "discord_renderer.rs"]
+pub(crate) mod discord_renderer;
 #[path = "discord_state_codec.rs"]
 pub(crate) mod discord_state_codec;
 #[path = "discord_state_schema.rs"]

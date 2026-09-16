@@ -63,7 +63,10 @@
     {"path":"tests/fixtures/platform/planning-receipt.json","owner_task":"hardening-task-1","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"src/asr_child_tests.rs","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/generate_unicode_tables.py","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tests/fixtures/unicode_15_1/derived_core_properties.json","owner_task":"core-task-2","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
+    {"path":"tests/fixtures/unicode_15_1/derived_core_properties.json","owner_task":"core-task-2","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/discord_renderer/budget_boundaries.json","owner_task":"core-task-3","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/discord_renderer/row_order.json","owner_task":"core-task-3","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/unicode_sanitization.json","owner_task":"core-task-3","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
   ],
   "shared_paths": [
     {"path":"src/main.rs","modifiers":["core-task-2","core-task-9","hardening-task-2","hardening-task-3","hardening-task-6"]},
