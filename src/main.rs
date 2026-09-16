@@ -690,8 +690,24 @@ async fn daemon_with_store_factory<
         .open_for_daemon()
         .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
     let lane = store.lane().clone();
-    let (notifier, _join) =
-        crate::feature_modules::discord_coordinator::start_with_lane(Some(lane));
+    let transport = crate::feature_modules::discord_config::read_optional_runtime_secret(
+        std::path::Path::new("/run/secrets/discord_webhook"),
+    )
+    .and_then(|secret| {
+        crate::feature_modules::discord_transport::ValidatedWebhookUrl::from_runtime_secret(&secret)
+            .ok()
+    })
+    .and_then(|url| crate::feature_modules::discord_transport::DiscordTransport::new(url).ok())
+    .map(|transport| {
+        std::sync::Arc::new(transport)
+            as std::sync::Arc<dyn crate::feature_modules::discord_transport::DeliveryTransport>
+    });
+    let (notifier, _join) = match transport {
+        Some(transport) => {
+            crate::feature_modules::discord_coordinator::start_with_dependencies(lane, transport)
+        }
+        None => crate::feature_modules::discord_coordinator::start_with_lane(Some(lane)),
+    };
     daemon_loop(providers_file, Some(notifier)).await
 }
 

@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 //! Dedicated outbound Discord transport.
 
+use std::future::Future;
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -68,6 +70,22 @@ pub(crate) enum DeliveryResult {
     Failed(SafeDeliveryError),
 }
 
+pub(crate) trait DeliveryTransport: Send + Sync {
+    fn send<'a>(
+        &'a self,
+        payload: &'a PayloadBytes,
+    ) -> Pin<Box<dyn Future<Output = DeliveryResult> + Send + 'a>>;
+}
+
+impl DeliveryTransport for DiscordTransport {
+    fn send<'a>(
+        &'a self,
+        payload: &'a PayloadBytes,
+    ) -> Pin<Box<dyn Future<Output = DeliveryResult> + Send + 'a>> {
+        Box::pin(async move { DiscordTransport::send(self, payload).await })
+    }
+}
+
 pub(crate) fn classify_status(status: u16) -> DeliveryResult {
     if (200..=299).contains(&status) {
         DeliveryResult::Accepted
@@ -115,6 +133,16 @@ impl FakeTransport {
     }
     pub(crate) fn payload_count(&self) -> usize {
         self.payloads.lock().unwrap().len()
+    }
+}
+
+#[cfg(test)]
+impl DeliveryTransport for FakeTransport {
+    fn send<'a>(
+        &'a self,
+        payload: &'a PayloadBytes,
+    ) -> Pin<Box<dyn Future<Output = DeliveryResult> + Send + 'a>> {
+        Box::pin(async move { FakeTransport::send(self, payload).await })
     }
 }
 

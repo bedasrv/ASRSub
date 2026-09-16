@@ -207,6 +207,23 @@ impl DeliveryView {
             reports,
         }
     }
+    pub(crate) fn with_captures(
+        state_generation: u64,
+        reports: BoundedReports,
+        overflow_summary: OverflowSummaryV1,
+        captured_pending: Box<[(EpisodeKind, i64, u64)]>,
+        captured_transaction_ids: Box<[[u8; 32]]>,
+    ) -> Self {
+        Self {
+            state_generation,
+            captured_pending,
+            overflow_summary,
+            captured_overflow_generation: 0,
+            captured_overflow_snapshot_sha256: [0; 32],
+            captured_transaction_ids,
+            reports,
+        }
+    }
     pub(crate) fn state_generation(&self) -> u64 {
         self.state_generation
     }

@@ -481,13 +481,34 @@ impl Pipeline {
     }
 
     fn committed_report_for_candidate(&self, candidate: &Candidate) -> Option<EpisodeRunReport> {
-        let path = candidate.path.as_deref()?;
-        let media = self.cfg.map_path(path);
-        let stem = crate::lang::stem_of(&media);
+        let kind_token = if candidate.is_movie {
+            "movie"
+        } else {
+            "series"
+        };
+        let known_stem = candidate
+            .path
+            .as_deref()
+            .map(|path| crate::lang::stem_of(&self.cfg.map_path(path)).to_string());
+        let registry: Vec<state::RegistryRow> = state::load_jsonl(&self.cfg.registry_file);
         let mut targets = Vec::new();
         for language in &candidate.missing {
-            let target = crate::lang::canonical_target_sidecar(stem, language);
-            let bytes = std::fs::read(&target).ok()?;
+            let row = registry.iter().rev().find(|row| {
+                row.episode_id == Some(candidate.episode_id)
+                    && crate::lang::normalize_lang(row.lang.as_deref().unwrap_or(""))
+                        == crate::lang::normalize_lang(language)
+                    && row
+                        .extra
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("series")
+                        == kind_token
+                    && known_stem
+                        .as_ref()
+                        .is_none_or(|stem| row.stem.as_deref() == Some(stem.as_str()))
+            })?;
+            let target = row.target_path.as_deref()?;
+            let bytes = std::fs::read(target).ok()?;
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let digest: [u8; 32] = hasher.finalize().into();

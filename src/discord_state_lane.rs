@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::discord_state_codec;
 use super::discord_state_schema::*;
-use super::discord_types::{BoundedReports, EpisodeRunReport};
+use super::discord_types::{BoundedReports, EpisodeKind, EpisodeRunReport};
 
 #[derive(Clone)]
 pub(crate) struct StateLaneHandle {
@@ -25,6 +25,9 @@ struct Reservation {
     id: [u8; 32],
     payload: PayloadBytes,
     captured: Box<[String]>,
+    attempt_started_epoch_ns: u64,
+    attempt_started_monotonic_ns: u64,
+    reserved_next_attempt_epoch_ns: u64,
 }
 
 struct LaneState {
@@ -32,11 +35,15 @@ struct LaneState {
     lock_path: PathBuf,
     generation: u64,
     reports: Vec<EpisodeRunReport>,
+    blocked: Vec<EpisodeRunReport>,
     reservation: Option<Reservation>,
     disabled: bool,
     operation_id: u64,
     fenced: bool,
     overflow: OverflowSummaryV1,
+    last_attempt_epoch_ns: Option<u64>,
+    next_attempt_epoch_ns: Option<u64>,
+    backoff_seconds: u64,
 }
 
 impl StateLaneHandle {
@@ -54,11 +61,15 @@ impl StateLaneHandle {
             lock_path,
             generation: 0,
             reports: Vec::new(),
+            blocked: Vec::new(),
             reservation: None,
             disabled: false,
             operation_id: 0,
             fenced: false,
             overflow: OverflowSummaryV1::default(),
+            last_attempt_epoch_ns: None,
+            next_attempt_epoch_ns: None,
+            backoff_seconds: 0,
         };
         if state.path.exists() {
             if let Err(_error) = load_state(&mut state) {
@@ -76,7 +87,7 @@ impl StateLaneHandle {
 
     pub(crate) fn inspect_due(
         &self,
-        _now: ClockSample,
+        now: ClockSample,
     ) -> Result<InspectDueResult, NotificationStateError> {
         let state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         if state.fenced {
@@ -85,25 +96,49 @@ impl StateLaneHandle {
         if state.disabled {
             return Err(NotificationStateError::Disabled);
         }
+        validate_clock(&now)?;
         if state.reservation.is_some() || state.reports.is_empty() {
+            return Ok(InspectDueResult::Idle);
+        }
+        if state
+            .next_attempt_epoch_ns
+            .is_some_and(|deadline| now.epoch_ns() < deadline)
+        {
             return Ok(InspectDueResult::Idle);
         }
         let (reports, _) = BoundedReports::from_reports(state.reports.clone())
             .map_err(|_| NotificationStateError::Capacity)?;
-        Ok(InspectDueResult::Ready(DeliveryView::new(
+        let pending: Box<[(EpisodeKind, i64, u64)]> = state
+            .reports
+            .iter()
+            .map(|report| (report.kind(), report.episode_id(), 1))
+            .collect();
+        let transaction_ids: Box<[[u8; 32]]> = state
+            .reports
+            .iter()
+            .filter_map(|report| {
+                report.pipeline_commit_id().map(|id| {
+                    discord_state_codec::domain_hash(b"asrsub-transaction-v1", id.as_bytes())
+                })
+            })
+            .collect();
+        Ok(InspectDueResult::Ready(DeliveryView::with_captures(
             state.generation,
             reports,
             state.overflow,
+            pending,
+            transaction_ids,
         )))
     }
 
     pub(crate) fn enqueue(
         &self,
         reports: BoundedReports,
-        _now: ClockSample,
+        now: ClockSample,
     ) -> Result<StateCommit, NotificationStateError> {
         let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
+        validate_clock(&now)?;
         for report in reports.iter() {
             let id = report
                 .pipeline_commit_id()
@@ -117,7 +152,11 @@ impl StateLaneHandle {
                 continue;
             }
             if state.reports.len() >= 128 {
-                return Err(NotificationStateError::Capacity);
+                if state.blocked.len() >= 16 {
+                    return Err(NotificationStateError::Capacity);
+                }
+                state.blocked.push(report.clone());
+                continue;
             }
             state.reports.push(report.clone());
         }
@@ -126,14 +165,21 @@ impl StateLaneHandle {
 
     pub(crate) fn reserve_rendered(
         &self,
-        _now: ClockSample,
+        now: ClockSample,
         view: DeliveryView,
         payload: PayloadBytes,
     ) -> Result<ReservedDelivery, NotificationStateError> {
         let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
+        validate_clock(&now)?;
         if state.reservation.is_some() || view.state_generation() != state.generation {
             return Err(NotificationStateError::StaleView);
+        }
+        if state
+            .next_attempt_epoch_ns
+            .is_some_and(|deadline| now.epoch_ns() < deadline)
+        {
+            return Err(NotificationStateError::Clock);
         }
         let mut h = Sha256::new();
         h.update(b"asrsub-reservation-v1\0");
@@ -153,7 +199,18 @@ impl StateLaneHandle {
                         .map(|value| value.as_str().to_string())
                 })
                 .collect(),
+            attempt_started_epoch_ns: now.epoch_ns(),
+            attempt_started_monotonic_ns: now.monotonic_ns(),
+            reserved_next_attempt_epoch_ns: now
+                .epoch_ns()
+                .checked_add(super::discord_state_clock::ATTEMPT_WINDOW_NS)
+                .ok_or(NotificationStateError::Clock)?,
         });
+        state.last_attempt_epoch_ns = Some(now.epoch_ns());
+        state.next_attempt_epoch_ns = state
+            .reservation
+            .as_ref()
+            .map(|r| r.reserved_next_attempt_epoch_ns);
         let commit = commit(&mut state)?;
         Ok(ReservedDelivery::new(
             commit.state_generation(),
@@ -165,18 +222,39 @@ impl StateLaneHandle {
 
     pub(crate) fn resume_reservation(
         &self,
-        _now: ClockSample,
+        now: ClockSample,
     ) -> Result<Option<ResumedReservation>, NotificationStateError> {
-        let state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
+        let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
-        Ok(state.reservation.as_ref().map(|reservation| {
-            ResumedReservation::new(
-                state.generation,
-                state_hash(&state),
-                reservation.id,
-                reservation.payload.clone(),
-            )
-        }))
+        validate_clock(&now)?;
+        if state
+            .next_attempt_epoch_ns
+            .is_some_and(|deadline| now.epoch_ns() < deadline)
+        {
+            return Ok(None);
+        }
+        let Some(reservation) = state.reservation.as_mut() else {
+            return Ok(None);
+        };
+        reservation.attempt_started_epoch_ns = now.epoch_ns();
+        reservation.attempt_started_monotonic_ns = now.monotonic_ns();
+        reservation.reserved_next_attempt_epoch_ns = now
+            .epoch_ns()
+            .checked_add(super::discord_state_clock::ATTEMPT_WINDOW_NS)
+            .ok_or(NotificationStateError::Clock)?;
+        let reservation_id = reservation.id;
+        let payload = reservation.payload.clone();
+        let next_attempt = reservation.reserved_next_attempt_epoch_ns;
+        let _ = reservation;
+        state.last_attempt_epoch_ns = Some(now.epoch_ns());
+        state.next_attempt_epoch_ns = Some(next_attempt);
+        let commit = commit(&mut state)?;
+        Ok(Some(ResumedReservation::new(
+            commit.state_generation(),
+            commit.state_hash(),
+            reservation_id,
+            payload,
+        )))
     }
 
     pub(crate) fn acknowledge(
@@ -199,36 +277,84 @@ impl StateLaneHandle {
                 .map(|value| !reservation.captured.iter().any(|id| id == value.as_str()))
                 .unwrap_or(true)
         });
+        state.backoff_seconds = 0;
         commit(&mut state)
     }
 
     pub(crate) fn record_attempt_failure(
         &self,
         reservation_id: [u8; 32],
-        _class: SafeDeliveryError,
-        _response_sample: ClockSample,
-        _retry_after: Option<RetryAfterSeconds>,
+        class: SafeDeliveryError,
+        response_sample: ClockSample,
+        retry_after: Option<RetryAfterSeconds>,
     ) -> Result<StateCommit, NotificationStateError> {
         let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
         if state.reservation.as_ref().map(|r| r.id) != Some(reservation_id) {
             return Err(NotificationStateError::InvalidInput);
         }
+        validate_clock(&response_sample)?;
         state.reservation = None;
+        match class {
+            SafeDeliveryError::PermanentResponse
+            | SafeDeliveryError::Disabled
+            | SafeDeliveryError::Corrupt => {
+                state.disabled = true;
+            }
+            _ => {
+                let backoff = super::discord_state_clock::next_backoff(state.backoff_seconds)
+                    .ok_or(NotificationStateError::Clock)?;
+                let deadline = super::discord_state_clock::next_deadline(
+                    response_sample.epoch_ns(),
+                    response_sample.epoch_ns(),
+                    backoff,
+                    retry_after.map(|value| value.as_u64()),
+                )
+                .ok_or(NotificationStateError::Clock)?;
+                state.backoff_seconds = backoff;
+                state.last_attempt_epoch_ns = Some(response_sample.epoch_ns());
+                state.next_attempt_epoch_ns = Some(deadline);
+            }
+        }
         commit(&mut state)
     }
 
     pub(crate) fn retry_blocked(
         &self,
-        _now: ClockSample,
+        now: ClockSample,
     ) -> Result<BlockedRetryResult, NotificationStateError> {
-        let state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
+        let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
-        Ok(BlockedRetryResult::new(
-            state.generation,
-            state_hash(&state),
-            0,
-        ))
+        validate_clock(&now)?;
+        let mut promoted = 0u32;
+        while state.reports.len() < 128 && !state.blocked.is_empty() {
+            let report = state.blocked.remove(0);
+            if state
+                .reports
+                .iter()
+                .any(|old| old.pipeline_commit_id() == report.pipeline_commit_id())
+            {
+                continue;
+            }
+            state.reports.push(report);
+            promoted = promoted
+                .checked_add(1)
+                .ok_or(NotificationStateError::Capacity)?;
+        }
+        if promoted > 0 {
+            let commit = commit(&mut state)?;
+            Ok(BlockedRetryResult::new(
+                commit.state_generation(),
+                commit.state_hash(),
+                promoted,
+            ))
+        } else {
+            Ok(BlockedRetryResult::new(
+                state.generation,
+                state_hash(&state),
+                0,
+            ))
+        }
     }
 
     pub(crate) fn reset_delivery(
@@ -309,6 +435,13 @@ fn ensure_open(state: &LaneState) -> Result<(), NotificationStateError> {
     }
 }
 
+fn validate_clock(sample: &ClockSample) -> Result<(), NotificationStateError> {
+    if !sample.synchronized() || sample.boot_id().as_str().is_empty() {
+        return Err(NotificationStateError::Clock);
+    }
+    Ok(())
+}
+
 fn commit(state: &mut LaneState) -> Result<StateCommit, NotificationStateError> {
     state.generation = state
         .generation
@@ -332,10 +465,21 @@ fn quoted(value: &str) -> String {
 
 fn canonical_state(state: &LaneState) -> Vec<u8> {
     let mut out = format!(
-        "{{\"schema\":\"state-v1\",\"state_generation\":{},\"disabled\":{},\"reports\":[",
-        state.generation, state.disabled
+        "{{\"schema\":\"state-v1\",\"state_generation\":{},\"disabled\":{},\"last_attempt_epoch_ns\":{},\"next_attempt_epoch_ns\":{},\"backoff_seconds\":{},\"reports\":[",
+        state.generation,
+        state.disabled,
+        state.last_attempt_epoch_ns.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        state.next_attempt_epoch_ns.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        state.backoff_seconds,
     );
     for (index, report) in state.reports.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(&quoted(&hex(&discord_state_codec::encode_report(report))));
+    }
+    out.push_str("],\"blocked\":[");
+    for (index, report) in state.blocked.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -355,6 +499,12 @@ fn canonical_state(state: &LaneState) -> Vec<u8> {
             out.push_str(&quoted(id));
         }
         out.push(']');
+        out.push_str(",\"attempt_started_epoch_ns\":");
+        out.push_str(&reservation.attempt_started_epoch_ns.to_string());
+        out.push_str(",\"attempt_started_monotonic_ns\":");
+        out.push_str(&reservation.attempt_started_monotonic_ns.to_string());
+        out.push_str(",\"reserved_next_attempt_epoch_ns\":");
+        out.push_str(&reservation.reserved_next_attempt_epoch_ns.to_string());
         out.push('}');
     } else {
         out.push_str("null");
@@ -389,7 +539,15 @@ fn persist(state: &mut LaneState) -> Result<(), NotificationStateError> {
 
 fn parse_state_bytes(
     bytes: &[u8],
-) -> Result<(Vec<EpisodeRunReport>, bool, Option<Reservation>), NotificationStateError> {
+) -> Result<
+    (
+        Vec<EpisodeRunReport>,
+        bool,
+        Option<Reservation>,
+        Vec<EpisodeRunReport>,
+    ),
+    NotificationStateError,
+> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| NotificationStateError::Corrupt)?;
     let object = value.as_object().ok_or(NotificationStateError::Corrupt)?;
@@ -400,6 +558,7 @@ fn parse_state_bytes(
         .get("disabled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let next_attempt_epoch_ns = object.get("next_attempt_epoch_ns").and_then(|v| v.as_u64());
     let mut reports = Vec::new();
     for encoded in object
         .get("reports")
@@ -409,6 +568,14 @@ fn parse_state_bytes(
         let hex_bytes = encoded.as_str().ok_or(NotificationStateError::Corrupt)?;
         let bytes = decode_hex(hex_bytes).ok_or(NotificationStateError::Corrupt)?;
         reports.push(discord_state_codec::decode_report(&bytes)?);
+    }
+    let mut blocked = Vec::new();
+    if let Some(items) = object.get("blocked").and_then(|v| v.as_array()) {
+        for encoded in items {
+            let bytes = decode_hex(encoded.as_str().ok_or(NotificationStateError::Corrupt)?)
+                .ok_or(NotificationStateError::Corrupt)?;
+            blocked.push(discord_state_codec::decode_report(&bytes)?);
+        }
     }
     let reservation = match object.get("reservation") {
         None | Some(serde_json::Value::Null) => None,
@@ -445,14 +612,38 @@ fn parse_state_bytes(
                         .into_boxed_slice()
                 })
                 .unwrap_or_else(|| Vec::<String>::new().into_boxed_slice());
+            let attempt_started_epoch_ns = reservation
+                .get("attempt_started_epoch_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(
+                    next_attempt_epoch_ns
+                        .unwrap_or(0)
+                        .saturating_sub(super::discord_state_clock::ATTEMPT_WINDOW_NS),
+                );
+            let attempt_started_monotonic_ns = reservation
+                .get("attempt_started_monotonic_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let reserved_next_attempt_epoch_ns = reservation
+                .get("reserved_next_attempt_epoch_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(
+                    next_attempt_epoch_ns.unwrap_or(
+                        attempt_started_epoch_ns
+                            .saturating_add(super::discord_state_clock::ATTEMPT_WINDOW_NS),
+                    ),
+                );
             Some(Reservation {
                 id: id_bytes,
                 payload,
                 captured,
+                attempt_started_epoch_ns,
+                attempt_started_monotonic_ns,
+                reserved_next_attempt_epoch_ns,
             })
         }
     };
-    Ok((reports, disabled, reservation))
+    Ok((reports, disabled, reservation, blocked))
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
@@ -474,10 +665,17 @@ fn load_state(state: &mut LaneState) -> Result<(), NotificationStateError> {
         .get("state_generation")
         .and_then(|v| v.as_u64())
         .ok_or(NotificationStateError::Corrupt)?;
-    let (reports, disabled, reservation) = parse_state_bytes(&bytes)?;
+    let (reports, disabled, reservation, blocked) = parse_state_bytes(&bytes)?;
     state.reports = reports;
     state.disabled = disabled;
     state.reservation = reservation;
+    state.blocked = blocked;
+    state.last_attempt_epoch_ns = value.get("last_attempt_epoch_ns").and_then(|v| v.as_u64());
+    state.next_attempt_epoch_ns = value.get("next_attempt_epoch_ns").and_then(|v| v.as_u64());
+    state.backoff_seconds = value
+        .get("backoff_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     Ok(())
 }
 
