@@ -1,0 +1,523 @@
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PYTHON = sys.executable
+SHA = "1" * 40
+DIGEST = "ghcr.io/bedasrv/asrsub@sha256:" + "a" * 64
+BUNDLE_SHA = "b" * 64
+
+
+def run_tool(name, *args):
+    return subprocess.run(
+        [PYTHON, str(ROOT / "tools" / name), *map(str, args)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+class AdapterTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="asrsub-prod-adapters-")
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_executable(self, name, body):
+        path = self.root / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def write_fake_docker(self):
+        return self.write_executable(
+            "docker-fake.py",
+            """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["ASRSUB_ARGV_LOG"]).write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+print(json.dumps({
+    "Id": "sha256:" + "a" * 64,
+    "RepoDigests": ["ghcr.io/bedasrv/asrsub@sha256:" + "a" * 64],
+    "CONTROL_API_KEY": "super-secret-docker-output",
+    "bare": os.environ.get("ASRSUB_SECRET", ""),
+}))
+""",
+        )
+
+    def make_bundle(self):
+        bundle = self.root / "bundle"
+        (bundle / "bin").mkdir(parents=True, exist_ok=True)
+        payload = bundle / "bin" / "asrsub"
+        payload.write_bytes(b"runtime-binary\n")
+        payload.chmod(0o755)
+        member = {
+            "path": "bin/asrsub",
+            "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+            "mode": "0755",
+        }
+        manifest = {
+            "schema": "runtime-bundle-manifest-v1",
+            "release_sha": SHA,
+            "members": [member],
+        }
+        manifest_path = bundle / "manifest.json"
+        manifest_path.write_bytes(canonical(manifest) + b"\n")
+        approval = self.root / "approval.json"
+        approval.write_text(
+            json.dumps({"schema": "approval-v1", "release_sha": SHA}), encoding="utf-8"
+        )
+        verifier = self.write_executable(
+            "verify.py",
+            """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+Path(os.environ.get("ASRSUB_VERIFY_LOG", "/dev/null")).write_text("verified\\n" + " ".join(sys.argv[1:]), encoding="utf-8")
+print("CONTROL_API_KEY=super-secret-verifier-output")
+""",
+        )
+        return bundle, manifest_path, approval, verifier, hashlib.sha256(canonical(manifest)).hexdigest()
+
+    def make_rollout_inputs(self):
+        deployment = self.root / "deployment"
+        deployment.mkdir()
+        (deployment / "state.jsonl").write_text("{}\n", encoding="utf-8")
+        bundle, manifest, approval, verifier, manifest_hash = self.make_bundle()
+        docker_evidence = self.root / "docker-evidence.json"
+        docker_evidence.write_text(
+            json.dumps(
+                {
+                    "schema": "docker-operation-evidence-v1",
+                    "operation": "image-inspect",
+                    "requested_digest": DIGEST,
+                    "image_digest": DIGEST,
+                    "release_sha": SHA,
+                    "observed": {
+                        "image_ref": DIGEST,
+                        "RepoDigests": [DIGEST],
+                    },
+                    "stdout": "CONTROL_API_KEY=secret-from-adapter",
+                }
+            ),
+            encoding="utf-8",
+        )
+        systemd = self.root / "systemd"
+        (systemd / "docker.service.d").mkdir(parents=True)
+        (systemd / "asrsub-recovery.service").write_text("[Unit]\n", encoding="utf-8")
+        (systemd / "asrsub-runtime.service").write_text("[Unit]\n", encoding="utf-8")
+        (systemd / "docker.service.d" / "asrsub-recovery.conf").write_text("[Service]\n", encoding="utf-8")
+        cgroup = self.root / "cgroup"
+        cgroup.mkdir()
+        (cgroup / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+        (cgroup / "cgroup.procs").write_text(str(os.getpid()) + "\n", encoding="utf-8")
+        return deployment, bundle, manifest, docker_evidence, systemd, cgroup, manifest_hash, approval, verifier
+
+
+class TestProductionModeAndDocker(AdapterTestCase):
+    def test_production_mode_is_explicit_and_never_uses_fixture_fallback(self):
+        fixture = self.root / "fixture.json"
+        fixture.write_text(json.dumps({"image_ref": DIGEST}), encoding="utf-8")
+        output = self.root / "inspect.json"
+        no_mode = run_tool(
+            "deploy_docker.py",
+            "image-inspect",
+            "--digest",
+            DIGEST,
+            "--output",
+            output,
+        )
+        self.assertNotEqual(no_mode.returncode, 0)
+        self.assertFalse(output.exists())
+        ambiguous = run_tool(
+            "deploy_docker.py",
+            "--production",
+            "image-inspect",
+            "--fixture-input",
+            fixture,
+            "--digest",
+            DIGEST,
+            "--output",
+            output,
+        )
+        self.assertNotEqual(ambiguous.returncode, 0)
+        self.assertIn("fixture", (ambiguous.stdout + ambiguous.stderr).lower())
+
+    def test_production_rejects_injected_docker_path(self):
+        fake = self.write_fake_docker()
+        result = run_tool(
+            "deploy_docker.py",
+            "--production",
+            "--docker-executable",
+            fake,
+            "image-inspect",
+            "--digest",
+            DIGEST,
+            "--output",
+            self.root / "evidence.json",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("test seam", (result.stdout + result.stderr).lower())
+
+    def test_test_seam_uses_exact_context_argv_and_no_shell(self):
+        fake = self.write_fake_docker()
+        argv_log = self.root / "argv.json"
+        compose = self.root / "compose.yaml"
+        compose.write_text("services: {}\n", encoding="utf-8")
+        output = self.root / "evidence.json"
+        env = os.environ.copy()
+        env["ASRSUB_ARGV_LOG"] = str(argv_log)
+        result = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "deploy_docker.py"),
+                "--test-seam",
+                "--docker-executable",
+                str(fake),
+                "up",
+                "--compose-file",
+                str(compose),
+                "--output",
+                str(output),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        self.assertEqual(argv[:2], ["--context", "default"])
+        self.assertEqual(argv[2:5], ["compose", "-f", str(compose)])
+        self.assertEqual(argv[5:], ["up", "-d", "--no-build", "--pull=never"])
+        source = (ROOT / "tools" / "deploy_docker.py").read_text(encoding="utf-8")
+        self.assertNotIn("shell=True", source)
+        evidence = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(evidence["returncode"], 0)
+
+    def test_digest_validation_and_secret_redaction(self):
+        fake = self.write_fake_docker()
+        output = self.root / "evidence.json"
+        env = os.environ.copy()
+        env["ASRSUB_ARGV_LOG"] = str(self.root / "argv.json")
+        env["ASRSUB_SECRET"] = "super-secret-environment-value"
+        invalid = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "deploy_docker.py"),
+                "--test-seam",
+                "--docker-executable",
+                str(fake),
+                "image-inspect",
+                "--digest",
+                "ghcr.io/bedasrv/asrsub:latest",
+                "--output",
+                str(output),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertFalse(output.exists())
+        valid = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "deploy_docker.py"),
+                "--test-seam",
+                "--docker-executable",
+                str(fake),
+                "image-inspect",
+                "--digest",
+                DIGEST,
+                "--output",
+                str(output),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        text = output.read_text(encoding="utf-8") + valid.stdout + valid.stderr
+        self.assertNotIn("super-secret-docker-output", text)
+        self.assertNotIn("super-secret-environment-value", text)
+        self.assertIn("<redacted>", text)
+
+
+class TestProductionStateFs(AdapterTestCase):
+    def test_statefs_rejects_traversal_and_symlink_and_emits_real_identity(self):
+        state = self.root / "state"
+        evidence = self.root / "evidence"
+        result = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--state-root",
+            state,
+            "--evidence-root",
+            evidence,
+            "--implementation-commit",
+            SHA,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt_path = evidence / "statefs-provision" / "statefs-provision-receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["implementation_commit"], SHA)
+        identity = receipt["root_identity"]
+        self.assertGreater(identity["device"], 0)
+        self.assertGreater(identity["inode"], 0)
+        self.assertGreater(identity["mount_id"], 0)
+        self.assertNotEqual(identity["filesystem"], "")
+        self.assertTrue((state / "deployment-admission" / "admission.json").is_file())
+        self.assertEqual(stat.S_IMODE(state.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE((state / "state.jsonl").stat().st_mode), 0o600)
+
+        traversal = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--state-root",
+            self.root / "a" / ".." / "escaped",
+            "--evidence-root",
+            self.root / "evidence-2",
+            "--implementation-commit",
+            SHA,
+        )
+        self.assertNotEqual(traversal.returncode, 0)
+
+        outside = self.root / "outside"
+        link = self.root / "state-link"
+        link.symlink_to(outside, target_is_directory=True)
+        symlink_result = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--state-root",
+            link,
+            "--evidence-root",
+            self.root / "evidence-3",
+            "--implementation-commit",
+            SHA,
+        )
+        self.assertNotEqual(symlink_result.returncode, 0)
+        self.assertFalse(outside.exists())
+
+    def test_statefs_production_rejects_fixture_mixing_and_bad_commit(self):
+        fixture = self.root / "fixture"
+        result = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--fixture-root",
+            fixture,
+            "--evidence-root",
+            self.root / "evidence",
+            "--implementation-commit",
+            SHA,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        bad_commit = run_tool(
+            "provision_statefs.py",
+            "--production",
+            "--state-root",
+            self.root / "state",
+            "--evidence-root",
+            self.root / "evidence-2",
+            "--implementation-commit",
+            "short",
+        )
+        self.assertNotEqual(bad_commit.returncode, 0)
+
+
+class TestProductionBundleInstall(AdapterTestCase):
+    def production_install_args(self, bundle, manifest, approval, verifier, target, output):
+        return (
+            "--production",
+            "--bundle-root",
+            bundle,
+            "--manifest",
+            manifest,
+            "--approval",
+            approval,
+            "--verify-command",
+            verifier,
+            "--release-sha",
+            SHA,
+            "--target-root",
+            target,
+            "--output",
+            output,
+        )
+
+    def test_bundle_installs_atomically_with_hash_manifest_and_dry_run(self):
+        bundle, manifest, approval, verifier, manifest_hash = self.make_bundle()
+        target = self.root / "installed"
+        output = self.root / "install-receipt.json"
+        env = os.environ.copy()
+        env["ASRSUB_VERIFY_LOG"] = str(self.root / "verify.log")
+        result = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "install_runtime_bundle.py"),
+                *map(str, self.production_install_args(bundle, manifest, approval, verifier, target, output)),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((target / "bin" / "asrsub").read_bytes(), b"runtime-binary\n")
+        self.assertEqual(stat.S_IMODE((target / "bin" / "asrsub").stat().st_mode), 0o755)
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["manifest_sha256"], manifest_hash)
+        self.assertTrue((self.root / "verify.log").exists())
+        self.assertNotIn("super-secret-verifier-output", output.read_text(encoding="utf-8"))
+
+        dry_target = self.root / "dry-target"
+        dry_output = self.root / "dry-receipt.json"
+        dry = subprocess.run(
+            [
+                PYTHON,
+                str(ROOT / "tools" / "install_runtime_bundle.py"),
+                *map(str, self.production_install_args(bundle, manifest, approval, verifier, dry_target, dry_output)),
+                "--dry-run",
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertFalse(dry_target.exists())
+        self.assertTrue(json.loads(dry_output.read_text(encoding="utf-8"))["dry_run"])
+
+        wrong_mode_target = self.root / "wrong-mode-target"
+        wrong_mode_target.mkdir(mode=0o700)
+        wrong_mode = run_tool(
+            "install_runtime_bundle.py",
+            *self.production_install_args(bundle, manifest, approval, verifier, wrong_mode_target, self.root / "wrong-mode.json"),
+        )
+        self.assertNotEqual(wrong_mode.returncode, 0)
+        self.assertEqual(stat.S_IMODE(wrong_mode_target.stat().st_mode), 0o700)
+
+    def test_bundle_rejects_hash_traversal_symlink_and_missing_approval_or_verifier(self):
+        bundle, manifest, approval, verifier, _ = self.make_bundle()
+        target = self.root / "installed"
+        output = self.root / "receipt.json"
+        base = list(self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        missing_approval = base.copy()
+        missing_approval[missing_approval.index("--approval") + 1] = self.root / "missing-approval.json"
+        result = run_tool("install_runtime_bundle.py", *missing_approval)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(target.exists())
+        missing_verifier = base.copy()
+        missing_verifier[missing_verifier.index("--verify-command") + 1] = self.root / "missing-verifier"
+        result = run_tool("install_runtime_bundle.py", *missing_verifier)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(target.exists())
+
+        manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_value["members"][0]["sha256"] = "0" * 64
+        manifest.write_bytes(canonical(manifest_value) + b"\n")
+        result = run_tool("install_runtime_bundle.py", *base)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(target.exists())
+
+        bundle, manifest, approval, verifier, _ = self.make_bundle()
+        (bundle / "outside-link").symlink_to(self.root / "outside")
+        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(target.exists())
+
+        manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_value["members"][0]["path"] = "../outside"
+        manifest.write_bytes(canonical(manifest_value) + b"\n")
+        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "outside").exists())
+
+    def test_check_fixture_remains_explicit_fixture_mode(self):
+        result = run_tool("install_runtime_bundle.py", "--check-fixture")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class TestProductionRollout(AdapterTestCase):
+    def rollout_args(self, inputs, output):
+        deployment, bundle, manifest, docker, systemd, cgroup, manifest_hash, _, _ = inputs
+        return (
+            "--production",
+            "--deployment-root",
+            deployment,
+            "--runtime-bundle",
+            bundle,
+            "--bundle-manifest",
+            manifest,
+            "--docker-evidence",
+            docker,
+            "--systemd-root",
+            systemd,
+            "--cgroup-root",
+            cgroup,
+            "--release-sha",
+            SHA,
+            "--image-digest",
+            DIGEST,
+            "--bundle-sha256",
+            manifest_hash,
+            "--output",
+            output,
+        )
+
+    def test_rollout_receipt_binds_observed_evidence_and_redacts_secrets(self):
+        inputs = self.make_rollout_inputs()
+        output = self.root / "rollout.json"
+        result = run_tool("record_rollout.py", *self.rollout_args(inputs, output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["release_sha"], SHA)
+        self.assertEqual(receipt["image_digest"], DIGEST)
+        self.assertEqual(receipt["bundle_sha256"], inputs[-3])
+        self.assertTrue(receipt["evidence"]["deployment_root"]["observed"])
+        self.assertTrue(receipt["evidence"]["cgroup"]["available"])
+        self.assertNotIn("secret-from-adapter", output.read_text(encoding="utf-8"))
+
+    def test_rollout_rejects_missing_or_mismatched_evidence(self):
+        inputs = self.make_rollout_inputs()
+        output = self.root / "rollout.json"
+        missing = list(self.rollout_args(inputs, output))
+        missing[missing.index("--docker-evidence") + 1] = self.root / "missing-docker.json"
+        result = run_tool("record_rollout.py", *missing)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+        mismatch = list(self.rollout_args(inputs, output))
+        mismatch[mismatch.index("--release-sha") + 1] = "2" * 40
+        result = run_tool("record_rollout.py", *mismatch)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+        mixed = list(self.rollout_args(inputs, output))
+        mixed.extend(["--fixture", self.root / "fixture.json"])
+        result = run_tool("record_rollout.py", *mixed)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(output.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
