@@ -233,20 +233,38 @@ class TestFinalBundle(unittest.TestCase):
             runtime, systemd = self._release_sources(root, package)
             victim = runtime / "asrsub"
             original = victim.read_bytes()
+            victim_stat = victim.stat()
+            victim_identity = (victim_stat.st_dev, victim_stat.st_ino)
             decoy = root / "decoy"
             decoy.write_bytes(b"decoy\n")
-            real_read_bytes = Path.read_bytes
+            real_read = package["os"].read
+            real_fstat = package["os"].fstat
+            replaced = False
 
-            def replace_before_read(path):
-                if path == victim and victim.is_file() and not victim.is_symlink():
-                    victim.unlink()
-                    victim.symlink_to(decoy)
-                return real_read_bytes(path)
+            def replace_after_read(file_fd, size):
+                nonlocal replaced
+                block = real_read(file_fd, size)
+                if not replaced:
+                    fd_stat = real_fstat(file_fd)
+                    if (fd_stat.st_dev, fd_stat.st_ino) == victim_identity:
+                        victim.unlink()
+                        victim.symlink_to(decoy)
+                        replaced = True
+                return block
 
-            with mock.patch.object(Path, "read_bytes", new=replace_before_read):
+            with mock.patch.object(package["os"], "read", side_effect=replace_after_read):
                 manifest, _members = package["_manifest"](runtime, systemd, "1" * 40)
+            self.assertTrue(replaced, "the low-level capture read seam was not exercised")
             member = next(item for item in manifest["members"] if item["path"] == "asrsub")
             self.assertEqual(member["sha256"], hashlib.sha256(original).hexdigest())
+
+            victim.unlink()
+            victim.write_bytes(original)
+            victim.chmod(package["MEMBER_MODES"]["asrsub"])
+            victim.unlink()
+            victim.symlink_to(decoy)
+            with self.assertRaises(ValueError):
+                package["_manifest"](runtime, systemd, "1" * 40)
 
     def test_bundle_publication_failure_removes_every_final_and_stage_artifact(self):
         package = runpy.run_path(str(ROOT / "tools" / "package_bundle.py"))
@@ -304,21 +322,35 @@ class TestFinalBundle(unittest.TestCase):
             decoy = root / "decoy.json"
             source.write_bytes(b'{"schema":"fixture-approval-v1"}\n')
             decoy.write_bytes(b'{"schema":"decoy-approval-v1"}\n')
-            real_read_bytes = Path.read_bytes
+            original = source.read_bytes()
+            source_stat = source.stat()
+            source_identity = (source_stat.st_dev, source_stat.st_ino)
+            real_read = approval["os"].read
+            real_fstat = approval["os"].fstat
+            replaced = False
 
-            def replace_before_read(path):
-                if path == source and source.is_file() and not source.is_symlink():
-                    source.unlink()
-                    source.symlink_to(decoy)
-                return real_read_bytes(path)
+            def replace_after_read(file_fd, size):
+                nonlocal replaced
+                block = real_read(file_fd, size)
+                if not replaced:
+                    fd_stat = real_fstat(file_fd)
+                    if (fd_stat.st_dev, fd_stat.st_ino) == source_identity:
+                        source.unlink()
+                        source.symlink_to(decoy)
+                        replaced = True
+                return block
 
-            with mock.patch.object(Path, "read_bytes", new=replace_before_read):
+            with mock.patch.object(approval["os"], "read", side_effect=replace_after_read):
                 value, raw = approval["_read_canonical"](source)
+            self.assertTrue(replaced, "the low-level capture read seam was not exercised")
             self.assertEqual(value["schema"], "fixture-approval-v1")
-            self.assertEqual(raw, b'{"schema":"fixture-approval-v1"}\n')
+            self.assertEqual(raw, original)
 
+            with self.assertRaises(ValueError):
+                approval["_read_canonical"](source)
             source.unlink()
-            source.write_bytes(b'{"schema":"fixture-approval-v1"}\n')
+            source.write_bytes(original)
+
             manifest = root / "manifest.json"
             signature = root / "approval.sig"
             calls = 0
