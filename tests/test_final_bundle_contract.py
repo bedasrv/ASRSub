@@ -226,6 +226,28 @@ class TestFinalBundle(unittest.TestCase):
             path.chmod(0o644)
         return runtime, systemd
 
+    def _capture_then_replace(self, module, source, decoy, capture):
+        source_identity = (source.stat().st_dev, source.stat().st_ino)
+        real_read = module["os"].read
+        real_fstat = module["os"].fstat
+        replaced = False
+
+        def replace_after_read(file_fd, size):
+            nonlocal replaced
+            block = real_read(file_fd, size)
+            if not replaced:
+                fd_stat = real_fstat(file_fd)
+                if (fd_stat.st_dev, fd_stat.st_ino) == source_identity:
+                    source.unlink()
+                    source.symlink_to(decoy)
+                    replaced = True
+            return block
+
+        with mock.patch.object(module["os"], "read", side_effect=replace_after_read):
+            result = capture()
+        self.assertTrue(replaced, "the low-level capture read seam was not exercised")
+        return result
+
     def test_bundle_manifest_uses_captured_bytes_after_path_replacement(self):
         package = runpy.run_path(str(ROOT / "tools" / "package_bundle.py"))
         with tempfile.TemporaryDirectory(prefix="asrsub-capture-", dir=SCRATCH) as directory:
@@ -233,28 +255,11 @@ class TestFinalBundle(unittest.TestCase):
             runtime, systemd = self._release_sources(root, package)
             victim = runtime / "asrsub"
             original = victim.read_bytes()
-            victim_stat = victim.stat()
-            victim_identity = (victim_stat.st_dev, victim_stat.st_ino)
             decoy = root / "decoy"
             decoy.write_bytes(b"decoy\n")
-            real_read = package["os"].read
-            real_fstat = package["os"].fstat
-            replaced = False
-
-            def replace_after_read(file_fd, size):
-                nonlocal replaced
-                block = real_read(file_fd, size)
-                if not replaced:
-                    fd_stat = real_fstat(file_fd)
-                    if (fd_stat.st_dev, fd_stat.st_ino) == victim_identity:
-                        victim.unlink()
-                        victim.symlink_to(decoy)
-                        replaced = True
-                return block
-
-            with mock.patch.object(package["os"], "read", side_effect=replace_after_read):
-                manifest, _members = package["_manifest"](runtime, systemd, "1" * 40)
-            self.assertTrue(replaced, "the low-level capture read seam was not exercised")
+            manifest, _members = self._capture_then_replace(
+                package, victim, decoy, lambda: package["_manifest"](runtime, systemd, "1" * 40)
+            )
             member = next(item for item in manifest["members"] if item["path"] == "asrsub")
             self.assertEqual(member["sha256"], hashlib.sha256(original).hexdigest())
 
@@ -323,26 +328,9 @@ class TestFinalBundle(unittest.TestCase):
             source.write_bytes(b'{"schema":"fixture-approval-v1"}\n')
             decoy.write_bytes(b'{"schema":"decoy-approval-v1"}\n')
             original = source.read_bytes()
-            source_stat = source.stat()
-            source_identity = (source_stat.st_dev, source_stat.st_ino)
-            real_read = approval["os"].read
-            real_fstat = approval["os"].fstat
-            replaced = False
-
-            def replace_after_read(file_fd, size):
-                nonlocal replaced
-                block = real_read(file_fd, size)
-                if not replaced:
-                    fd_stat = real_fstat(file_fd)
-                    if (fd_stat.st_dev, fd_stat.st_ino) == source_identity:
-                        source.unlink()
-                        source.symlink_to(decoy)
-                        replaced = True
-                return block
-
-            with mock.patch.object(approval["os"], "read", side_effect=replace_after_read):
-                value, raw = approval["_read_canonical"](source)
-            self.assertTrue(replaced, "the low-level capture read seam was not exercised")
+            value, raw = self._capture_then_replace(
+                approval, source, decoy, lambda: approval["_read_canonical"](source)
+            )
             self.assertEqual(value["schema"], "fixture-approval-v1")
             self.assertEqual(raw, original)
 
