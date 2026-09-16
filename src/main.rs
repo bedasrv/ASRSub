@@ -550,7 +550,10 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
     .await
 }
 
-async fn daemon_loop(providers_file: Option<PathBuf>) -> Result<()> {
+async fn daemon_loop(
+    providers_file: Option<PathBuf>,
+    notifier: Option<crate::feature_modules::discord_coordinator::CoordinatorHandle>,
+) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
     let lock_path = crate::config::lock_path(&cfg.state_file);
@@ -627,7 +630,8 @@ async fn daemon_loop(providers_file: Option<PathBuf>) -> Result<()> {
             }
         }
         *app_state.current.lock().await = Some("pass".to_string());
-        let stats = pipe.run_pass().await;
+        let outcome = pipe.run_pass_outcome(&pipe.tools).await;
+        let (stats, reports, omitted_reports) = outcome.into_parts();
         *app_state.current.lock().await = None;
         {
             let mut last = app_state.last_pass.lock().await;
@@ -657,6 +661,14 @@ async fn daemon_loop(providers_file: Option<PathBuf>) -> Result<()> {
         if app_state.run_once.load(Ordering::Relaxed) {
             app_state.run_once.store(false, Ordering::Relaxed);
         }
+        if let Some(notifier) = notifier.as_ref() {
+            let _ = notifier.try_send(
+                crate::feature_modules::discord_coordinator::NotifierWork::Pass {
+                    reports,
+                    omitted_reports,
+                },
+            );
+        }
         let nap = if stats.done > 0 { 30 } else { 120 };
         tracing::info!(
             scanned = stats.scanned,
@@ -674,10 +686,13 @@ async fn daemon_with_store_factory<
     providers_file: Option<PathBuf>,
     factory: F,
 ) -> Result<()> {
-    let _store = factory
+    let store = factory
         .open_for_daemon()
         .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
-    daemon_loop(providers_file).await
+    let lane = store.lane().clone();
+    let (notifier, _join) =
+        crate::feature_modules::discord_coordinator::start_with_lane(Some(lane));
+    daemon_loop(providers_file, Some(notifier)).await
 }
 
 fn build_daemon_dependencies_with_factory<

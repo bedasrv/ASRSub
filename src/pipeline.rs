@@ -24,6 +24,7 @@
 //! how many episodes are queued. Every remote call has a deadline so one hung
 //! free-tier endpoint cannot stall the sweep.
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,7 +34,12 @@ use tokio::sync::Semaphore;
 use crate::bazarr::Bazarr;
 use crate::config::Config;
 use crate::episode::sidecar_exists;
+use crate::feature_modules::discord_text::SafeDisplayText;
 use crate::feature_modules::discord_types::BoundedReports;
+use crate::feature_modules::discord_types::{
+    AggregateDisposition, BoundedTargets, EpisodeKind, EpisodeRunReport, TargetLanguage,
+    TargetRunResult, TargetStatus,
+};
 use crate::feature_modules::process::ToolPaths;
 use crate::glossary::Glossary;
 use crate::jellyfin::Jellyfin;
@@ -168,7 +174,7 @@ impl Pipeline {
     /// episodes are processed concurrently under an `EPISODE_CONCURRENCY`
     /// semaphore. Skipped ids from `consume_actions` filter candidates
     /// before the `MAX_EPS_PER_RUN` cap is applied.
-    async fn run_pass_legacy(&self) -> PassStats {
+    async fn run_pass_legacy(&self) -> (PassStats, BoundedReports) {
         let (skip_ids, retries) = self.consume_actions().await;
         // Discover (Bazarr) and series titles (Sonarr) are independent:
         // fire together, latency is the max, not the sum.
@@ -198,7 +204,12 @@ impl Pipeline {
             .collect();
         stats.processed = caps.len();
         if caps.is_empty() {
-            return stats;
+            return (
+                stats,
+                BoundedReports::from_reports(std::iter::empty())
+                    .expect("empty report collector")
+                    .0,
+            );
         }
         let sem = Arc::new(Semaphore::new(self.cfg.episode_concurrency.max(1)));
         let mut jobs = Vec::with_capacity(caps.len());
@@ -207,17 +218,20 @@ impl Pipeline {
             let series_titles = &series_titles;
             jobs.push(async move {
                 let _p = sem.acquire_owned().await.expect("semaphore closed");
-                (
-                    cand.episode_id,
-                    self.process_one(&cand, series_titles).await,
-                )
+                let result = self.process_one(&cand, series_titles).await;
+                (cand, result)
             });
         }
-        for (eid, r) in futures::future::join_all(jobs).await {
+        let mut reports = Vec::new();
+        for (cand, r) in futures::future::join_all(jobs).await {
+            let eid = cand.episode_id;
             match r {
                 Ok(n) if n > 0 => {
                     stats.done += 1;
                     self.processed_total.fetch_add(1, Ordering::Relaxed);
+                    if let Some(report) = self.committed_report_for_candidate(&cand) {
+                        reports.push(report);
+                    }
                 }
                 Ok(_) => stats.skipped += 1,
                 Err(e) => {
@@ -231,14 +245,13 @@ impl Pipeline {
                 }
             }
         }
-        stats
+        let (reports, _) = BoundedReports::from_reports(reports).expect("bounded report collector");
+        (stats, reports)
     }
 
     pub(crate) async fn run_pass_outcome(&self, _tools: &ToolPaths) -> PassOutcome {
-        let stats = self.run_pass_legacy().await;
-        let (reports, omitted_reports) = BoundedReports::from_reports(std::iter::empty())
-            .expect("empty bounded report collector");
-        PassOutcome::new(stats, reports, omitted_reports)
+        let (stats, reports) = self.run_pass_legacy().await;
+        PassOutcome::new(stats, reports, 0)
     }
 
     pub async fn run_pass(&self) -> PassStats {
@@ -465,6 +478,48 @@ impl Pipeline {
         }
         out.sort_by_key(|c| c.episode_id);
         out
+    }
+
+    fn committed_report_for_candidate(&self, candidate: &Candidate) -> Option<EpisodeRunReport> {
+        let path = candidate.path.as_deref()?;
+        let media = self.cfg.map_path(path);
+        let stem = crate::lang::stem_of(&media);
+        let mut targets = Vec::new();
+        for language in &candidate.missing {
+            let target = crate::lang::canonical_target_sidecar(stem, language);
+            let bytes = std::fs::read(&target).ok()?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let digest: [u8; 32] = hasher.finalize().into();
+            targets.push(
+                TargetRunResult::try_new(
+                    TargetLanguage::parse(language).ok()?,
+                    TargetStatus::Completed { warning: None },
+                    Some(digest),
+                )
+                .ok()?,
+            );
+        }
+        if targets.is_empty() {
+            return None;
+        }
+        let kind = if candidate.is_movie {
+            EpisodeKind::Movie
+        } else {
+            EpisodeKind::Series
+        };
+        let title = SafeDisplayText::sanitize(&candidate.series_title).ok()?;
+        EpisodeRunReport::try_new(
+            kind,
+            candidate.episode_id,
+            title,
+            None,
+            None,
+            BoundedTargets::try_from(targets).ok()?,
+            None,
+            AggregateDisposition::Complete,
+        )
+        .ok()
     }
 }
 

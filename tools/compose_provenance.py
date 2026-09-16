@@ -23,6 +23,7 @@ def render(template: Path, image: str) -> bytes:
     if not re.fullmatch(r"ghcr\.io/bedasrv/asrsub@sha256:[0-9a-f]{64}", image): raise ValueError("image must be an immutable digest")
     out = text.replace("${ASRSUB_IMAGE:?ASRSUB_IMAGE must be an immutable digest}", image)
     out = re.sub(r"\$\{PROVIDER_KEYS_FILE:-[^}]+\}", "/var/lib/asrsub/config/provider_keys.env", out)
+    out = re.sub(r"\$\{WEBHOOK_PORT:-[^}]+\}", "8085", out)
     if "${" in out: raise ValueError("unresolved Compose interpolation")
     return out.encode()
 

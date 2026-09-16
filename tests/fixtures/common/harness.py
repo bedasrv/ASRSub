@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -33,3 +36,29 @@ def reject_forbidden_text(text: str, forbidden: tuple[str, ...] = ()) -> None:
     for value in forbidden:
         if value and value in text:
             raise AssertionError(f"forbidden value in fixture output: {value}")
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def domain_hash(domain: str, value: bytes) -> str:
+    return sha256_bytes(domain.encode("ascii") + b"\0" + value)
+
+
+def atomic_json(path: Path, value: object) -> bytes:
+    data = canonical(value) + b"\n"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    return data
+
+
+@contextmanager
+def disposable_root(prefix: str):
+    with tempfile.TemporaryDirectory(prefix=f"asrsub-{prefix}-") as raw:
+        yield Path(raw)
