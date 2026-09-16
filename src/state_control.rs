@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, clippy::chunks_exact_to_as_chunks)]
 use super::discord_fs::{ProductionStateRoot, ProductionStateStore};
 use super::discord_state_schema::StateSnapshotBytes;
 
