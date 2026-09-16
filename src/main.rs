@@ -296,7 +296,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg.masked())?);
             Ok(())
         }
-        Some(Cmd::AuditChildEnvironments) => crate::feature_modules::child_audit::run(),
+        Some(Cmd::AuditChildEnvironments) => crate::feature_modules::child_audit::run().await,
     }
 }
 
