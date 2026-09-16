@@ -1,0 +1,1 @@
+{"schema":"discord-state-scenarios-v1","scenarios":["empty","one-report","reservation","corrupt","bounded"]}

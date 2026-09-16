@@ -403,6 +403,15 @@ impl StateSnapshot {
             disabled: false,
         }
     }
+    pub(crate) fn new_with_disabled(
+        state_generation: u64,
+        state_hash: [u8; 32],
+        disabled: bool,
+    ) -> Self {
+        let mut snapshot = Self::new(state_generation, state_hash);
+        snapshot.disabled = disabled;
+        snapshot
+    }
     pub(crate) fn state_generation(&self) -> u64 {
         self.state_generation
     }
