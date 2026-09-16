@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""Run ASRSub development commands in a hermetic, private environment.
+
+This wrapper is intentionally small and policy-oriented.  It does not copy
+the caller environment: every variable passed to a child is constructed here
+from fixed harmless values and private directories owned by this invocation.
+The optional signing mode is kept in the same immutable wrapper so signing
+tools cannot accidentally use a different environment policy.
+"""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+SCRATCH_ROOT = Path("/tmp/agent-scratch/asrsub-implementation")
+TARGET_ROOT = SCRATCH_ROOT / "target"
+CARGO_CACHE_ROOT = SCRATCH_ROOT / "cargo-home"
+
+# Names which must never cross this boundary, even if a future invocation is
+# changed to add a harmless inherited value.  The actual environment starts
+# empty; this list is also used by descriptor/audit tests as the policy source.
+FORBIDDEN_ENV_FRAGMENTS = (
+    "ASR",
+    "BAZARR",
+    "DISCORD",
+    "DOCKER",
+    "JELLYFIN",
+    "JIMAKU",
+    "KEY",
+    "PASSWORD",
+    "PIPELINE",
+    "PROVIDER",
+    "PROXY",
+    "SECRET",
+    "SONARR",
+    "TOKEN",
+    "CREDENTIAL",
+    "AWS_",
+    "GH_",
+    "GITHUB_",
+    "NPM_",
+)
+
+
+def _mkdir_private(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _prepare_cargo_cache() -> None:
+    """Copy only public Cargo caches into the private scratch area."""
+    _mkdir_private(CARGO_CACHE_ROOT)
+    marker = CARGO_CACHE_ROOT / ".public-cache-copied"
+    if marker.exists():
+        return
+    source = Path("/home/user/.cargo")
+    for name in ("registry", "git"):
+        src = source / name
+        dst = CARGO_CACHE_ROOT / name
+        if src.is_dir() and not dst.exists():
+            shutil.copytree(src, dst, symlinks=False)
+    marker.write_text("public-cargo-cache-v1\n", encoding="ascii")
+    os.chmod(marker, 0o600)
+
+
+def _validate_pass_fd(fd: int) -> None:
+    if fd not in (3, 4):
+        raise SystemExit("asrsub-env: --pass-fd must be 3 or 4")
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:  # pragma: no cover - exercised by the fixture runner
+        raise SystemExit(f"asrsub-env: invalid pass fd: {exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit("asrsub-env: pass fd is not a regular file")
+    # The wrapper keeps its inherited copy non-inheritable.  The direct child
+    # receives the descriptor explicitly through pass_fds below.
+    os.set_inheritable(fd, False)
+
+
+def _environment(root: Path, pass_fd: int | None) -> dict[str, str]:
+    env = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/home/user/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin",
+        "HOME": str(root / "home"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_STATE_HOME": str(root / "state"),
+        "CARGO_HOME": str(CARGO_CACHE_ROOT),
+        "CARGO_TARGET_DIR": str(TARGET_ROOT),
+        "RUSTUP_HOME": "/home/user/.rustup",
+        "RUSTUP_TOOLCHAIN": "stable",
+        "TMPDIR": str(root / "tmp"),
+    }
+    if pass_fd is not None:
+        # The command itself decides whether fd 3 or fd 4 is meaningful.  No
+        # key path/value is put in the environment.
+        env["ASRSUB_SIGNING_FD"] = str(pass_fd)
+    return env
+
+
+def main(argv: list[str]) -> int:
+    pass_fd: int | None = None
+    if argv[:1] == ["--pass-fd"]:
+        if len(argv) < 3:
+            raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
+        try:
+            pass_fd = int(argv[1])
+        except ValueError as exc:
+            raise SystemExit("asrsub-env: invalid pass fd") from exc
+        _validate_pass_fd(pass_fd)
+        argv = argv[2:]
+    if not argv:
+        raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
+
+    _mkdir_private(SCRATCH_ROOT)
+    _mkdir_private(TARGET_ROOT)
+    _prepare_cargo_cache()
+    root = Path(tempfile.mkdtemp(prefix="run-", dir=SCRATCH_ROOT))
+    try:
+        for name in ("home", "config", "cache", "state", "tmp"):
+            _mkdir_private(root / name)
+        env = _environment(root, pass_fd)
+        # Defensive assertion: no value from the caller can be smuggled into
+        # the child through this map.
+        for key in env:
+            if any(fragment in key.upper() for fragment in FORBIDDEN_ENV_FRAGMENTS):
+                if key not in {"ASRSUB_SIGNING_FD", "CARGO_TARGET_DIR"}:
+                    raise SystemExit(f"asrsub-env: forbidden environment key {key}")
+
+        inherited = pass_fd is not None
+        pass_fds = (pass_fd,) if inherited else ()
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            cwd=os.getcwd(),
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            close_fds=True,
+            pass_fds=pass_fds,
+            start_new_session=False,
+        )
+        if pass_fd is not None:
+            try:
+                os.close(pass_fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+        return proc.wait()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
