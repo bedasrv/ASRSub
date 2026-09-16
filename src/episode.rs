@@ -121,55 +121,124 @@ fn target_result(
         .map_err(|error| anyhow::anyhow!("invalid target result for {lang:?}: {error:?}"))
 }
 
+fn validated_report_title(raw: &str) -> Result<SafeDisplayText> {
+    SafeDisplayText::sanitize(raw)
+        .map_err(|error| anyhow::anyhow!("invalid report title: {error:?}"))
+}
+
 fn digest_bytes(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
 }
 
-fn existing_target_digest(stem: &str, lang: &str) -> Result<[u8; 32]> {
-    let target = crate::lang::replaceable_target_sidecar_paths(stem, lang)
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
-        .context("target sidecar disappeared")?;
-    let bytes = std::fs::read(&target).with_context(|| format!("read target sidecar {target}"))?;
+#[derive(Debug)]
+struct InstalledSidecar {
+    target: std::path::PathBuf,
+    previous: Option<Vec<u8>>,
+    artifact_sha256: [u8; 32],
+}
+
+fn install_sidecar(target: &Path, bytes: &[u8]) -> Result<InstalledSidecar> {
+    let previous = match std::fs::read(target) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("read existing sidecar {target:?}"))
+        }
+    };
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let tmp = Path::new(&format!("{}.direct.tmp", target.display())).to_path_buf();
+    std::fs::write(&tmp, bytes)?;
+    if let Err(error) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(InstalledSidecar {
+        target: target.to_path_buf(),
+        previous,
+        artifact_sha256: digest_bytes(bytes),
+    })
+}
+
+impl InstalledSidecar {
+    fn still_current(&self) -> Result<bool> {
+        match std::fs::read(&self.target) {
+            Ok(bytes) => Ok(digest_bytes(&bytes) == self.artifact_sha256),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Remove or restore only while the target still contains this install.
+    /// A concurrent replacement is left untouched.
+    fn rollback_if_unchanged(&self) -> Result<()> {
+        let current = match std::fs::read(&self.target) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if digest_bytes(&current) != self.artifact_sha256 {
+            return Ok(());
+        }
+        if let Some(previous) = &self.previous {
+            let tmp = Path::new(&format!("{}.rollback.tmp", self.target.display())).to_path_buf();
+            std::fs::write(&tmp, previous)?;
+            let still_current = match std::fs::read(&self.target) {
+                Ok(bytes) => digest_bytes(&bytes) == self.artifact_sha256,
+                Err(_) => false,
+            };
+            if !still_current {
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(());
+            }
+            if let Err(error) = std::fs::rename(&tmp, &self.target) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(error.into());
+            }
+        } else {
+            let still_current = match std::fs::read(&self.target) {
+                Ok(bytes) => digest_bytes(&bytes) == self.artifact_sha256,
+                Err(_) => false,
+            };
+            if still_current {
+                match std::fs::remove_file(&self.target) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn existing_target_digest(target_path: &Path) -> Result<[u8; 32]> {
+    let bytes = std::fs::read(target_path)
+        .with_context(|| format!("read target sidecar {}", target_path.display()))?;
     Ok(digest_bytes(&bytes))
 }
 
-fn target_is_verified(cfg: &crate::config::Config, candidate: &Candidate, lang: &str) -> bool {
+fn target_is_verified(
+    cfg: &crate::config::Config,
+    candidate: &Candidate,
+    lang: &str,
+) -> Option<crate::pipeline::VerifiedTarget> {
     let kind = if candidate.is_movie {
         "movie"
     } else {
         "series"
     };
-    let language = normalize_lang(lang);
-    let registry_ok = state::load_jsonl::<RegistryRow>(&cfg.registry_file)
-        .into_iter()
-        .rev()
-        .any(|row| {
-            row.episode_id == Some(candidate.episode_id)
-                && normalize_lang(row.lang.as_deref().unwrap_or("")) == language
-                && row
-                    .extra
-                    .get("kind")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("series")
-                    == kind
-                && row
-                    .target_path
-                    .as_deref()
-                    .is_some_and(|path| Path::new(path).is_file())
-        });
-    let state_ok = state::load_jsonl::<StateEntry>(&cfg.state_file)
-        .into_iter()
-        .rev()
-        .any(|entry| {
-            entry.episode_id == Some(candidate.episode_id)
-                && normalize_lang(entry.language.as_deref().unwrap_or("")) == language
-                && entry.status.as_deref() == Some("done")
-                && entry.kind.as_deref().unwrap_or("series") == kind
-        });
-    registry_ok && state_ok
+    let key = (kind.to_string(), candidate.episode_id, normalize_lang(lang));
+    crate::pipeline::verified_targets(
+        &state::load_jsonl::<RegistryRow>(&cfg.registry_file),
+        &state::load_jsonl::<StateEntry>(&cfg.state_file),
+    )
+    .remove(&key)
 }
 
 fn target_ledger_rows(
@@ -182,6 +251,7 @@ fn target_ledger_rows(
     let language = normalize_lang(commit.lang);
     let digest = crate::feature_modules::discord_state_codec::hex(&artifact_sha256);
     let target = crate::lang::canonical_target_sidecar(commit.stem, commit.lang);
+    let timestamp = state::utc_now_iso();
 
     let mut registry_extra = std::collections::HashMap::new();
     registry_extra.insert(
@@ -213,7 +283,7 @@ fn target_ledger_rows(
         source_kind: commit.source_kind.map(str::to_string),
         source_path: Some(target.clone()),
         target_path: Some(target),
-        ts: None,
+        ts: Some(timestamp.clone()),
         extra: registry_extra,
     };
 
@@ -231,7 +301,7 @@ fn target_ledger_rows(
         language: Some(language.clone()),
         status: Some("done".to_string()),
         kind: (commit.kind == "movie").then(|| "movie".to_string()),
-        ts: None,
+        ts: Some(timestamp),
         extra: state_extra,
     };
     let identity = LedgerIdentity {
@@ -245,6 +315,20 @@ fn target_ledger_rows(
         serde_json::to_value(registry_row)?,
         serde_json::to_value(state_row)?,
     ))
+}
+
+fn cleanup_failed_install(
+    cfg: &crate::config::Config,
+    candidate: &Candidate,
+    lang: &str,
+    installed: &InstalledSidecar,
+) -> Result<()> {
+    if let Some(verified) = target_is_verified(cfg, candidate, lang) {
+        if verified.artifact_sha256 == installed.artifact_sha256 {
+            return Ok(());
+        }
+    }
+    installed.rollback_if_unchanged()
 }
 
 impl Pipeline {
@@ -297,6 +381,9 @@ impl Pipeline {
                 ep.episode_number.unwrap_or(0),
             )
         };
+        // Validate the report title before ffprobe, ladder, installation, or
+        // ledger work so a bad display value cannot arrive after real outcomes.
+        let report_title = validated_report_title(&series_title)?;
         if !Path::new(&media_path).is_file() {
             anyhow::bail!("media not on disk: {media_path}");
         }
@@ -315,14 +402,25 @@ impl Pipeline {
         let mut target_outcomes = Vec::with_capacity(cand.missing.len());
         let mut works = Vec::with_capacity(cand.missing.len());
         for lang in &cand.missing {
-            if sidecar_exists(&stem, lang) && target_is_verified(&self.cfg, cand, lang) {
+            if let Some(verified) = target_is_verified(&self.cfg, cand, lang) {
                 tracing::info!(episode = cand.episode_id, lang = %lang, "skip: sidecar already exists");
-                match existing_target_digest(&stem, lang) {
-                    Ok(digest) => target_outcomes.push(target_result(
-                        lang,
-                        TargetStatus::Completed { warning: None },
-                        Some(digest),
-                    )?),
+                match existing_target_digest(&verified.target_path) {
+                    Ok(digest) if digest == verified.artifact_sha256 => {
+                        target_outcomes.push(target_result(
+                            lang,
+                            TargetStatus::Completed { warning: None },
+                            Some(digest),
+                        )?)
+                    }
+                    Ok(_) => {
+                        target_outcomes.push(target_result(
+                            lang,
+                            TargetStatus::Failed {
+                                class: FailureClass::Storage,
+                            },
+                            None,
+                        )?);
+                    }
                     Err(error) => {
                         tracing::warn!(
                             episode = cand.episode_id,
@@ -553,8 +651,6 @@ impl Pipeline {
             )
             .await;
 
-        let title = SafeDisplayText::sanitize(&series_title)
-            .map_err(|error| anyhow::anyhow!("invalid report title: {error:?}"))?;
         let report = crate::pipeline::reduce_target_outcomes(
             if cand.is_movie {
                 EpisodeKind::Movie
@@ -562,7 +658,7 @@ impl Pipeline {
                 EpisodeKind::Series
             },
             cand.episode_id,
-            title,
+            report_title,
             season.and_then(|value| u32::try_from(value).ok()),
             (!cand.is_movie && ep_num > 0)
                 .then(|| u32::try_from(ep_num).ok())
@@ -630,10 +726,27 @@ impl Pipeline {
         }
         let srt_bytes =
             srt::write_srt(&merged, self.cfg.ai_marker_cue, self.cfg.ai_marker_cue_ms).into_bytes();
-        let (warning, artifact_sha256) = self
+        let (warning, installed) = self
             .install_and_upload(cand, ctx.media_path, ctx.stem, lang, srt_bytes.clone())
             .await
             .map_err(TargetFailure::storage_error)?;
+        let artifact_sha256 = installed.artifact_sha256;
+        if !installed
+            .still_current()
+            .map_err(TargetFailure::storage_error)?
+        {
+            if let Err(cleanup) = cleanup_failed_install(&self.cfg, cand, lang, &installed) {
+                tracing::warn!(
+                    episode = cand.episode_id,
+                    lang = %lang,
+                    error = %crate::config::mask_for_log(&cleanup.to_string()),
+                    "failed to clean up replaced sidecar"
+                );
+            }
+            return Err(TargetFailure::storage_error(anyhow::anyhow!(
+                "target sidecar changed before ledger commit"
+            )));
+        }
         let registry_commit = RegistryCommit {
             stem: ctx.stem,
             lang,
@@ -646,9 +759,22 @@ impl Pipeline {
             source_stream: w.src_stream,
         };
         let (identity, registry_row, state_row) =
-            target_ledger_rows(&registry_commit, artifact_sha256)
-                .map_err(TargetFailure::storage_error)?;
-        let _witness = publish_target_ledgers(
+            match target_ledger_rows(&registry_commit, artifact_sha256) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    if let Err(cleanup) = cleanup_failed_install(&self.cfg, cand, lang, &installed)
+                    {
+                        tracing::warn!(
+                            episode = cand.episode_id,
+                            lang = %lang,
+                            error = %crate::config::mask_for_log(&cleanup.to_string()),
+                            "failed to clean up unadmitted sidecar"
+                        );
+                    }
+                    return Err(TargetFailure::storage_error(error));
+                }
+            };
+        let _witness = match publish_target_ledgers(
             LedgerPaths {
                 registry: self.cfg.registry_file.clone(),
                 state: self.cfg.state_file.clone(),
@@ -656,7 +782,20 @@ impl Pipeline {
             identity,
             registry_row,
             state_row,
-        )?;
+        ) {
+            Ok(witness) => witness,
+            Err(error) => {
+                if let Err(cleanup) = cleanup_failed_install(&self.cfg, cand, lang, &installed) {
+                    tracing::warn!(
+                        episode = cand.episode_id,
+                        lang = %lang,
+                        error = %crate::config::mask_for_log(&cleanup.to_string()),
+                        "failed to clean up unadmitted sidecar"
+                    );
+                }
+                return Err(error);
+            }
+        };
         target_result(
             lang,
             TargetStatus::Completed { warning },
@@ -672,31 +811,12 @@ impl Pipeline {
         stem: &str,
         lang: &str,
         srt_bytes: Vec<u8>,
-    ) -> Result<(Option<WarningClass>, [u8; 32])> {
+    ) -> Result<(Option<WarningClass>, InstalledSidecar)> {
         let target = crate::lang::canonical_target_sidecar(stem, lang);
-        // Atomic local install first (Bazarr async job may crash and never
-        // land the file; the local copy is authoritative for the registry).
-        if let Some(parent) = Path::new(&target).parent() {
-            if !parent.as_os_str().is_empty() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-        }
-        let tmp = format!("{target}.direct.tmp");
-        tokio::fs::write(&tmp, &srt_bytes).await?;
-        // No-clobber: keep a concurrently landed valid sidecar.
-        if Path::new(&target).exists() {
-            if let Ok(existing) = tokio::fs::read(&target).await {
-                if !existing.is_empty()
-                    && srt::parse_srt(&String::from_utf8_lossy(&existing)).len() >= 10
-                {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    return Ok((None, digest_bytes(&existing)));
-                }
-            }
-            tokio::fs::rename(&tmp, &target).await?;
-        } else {
-            tokio::fs::rename(&tmp, &target).await?;
-        }
+        // Install our generated bytes unconditionally for an unverified target.
+        // A parseable orphan is not a concurrent success; process_one skips
+        // only targets admitted by a verified paired ledger.
+        let installed = install_sidecar(Path::new(&target), &srt_bytes)?;
         // Bazarr upload (204 expected). Retries (3x, 5s/10s backoff) run
         // OUTSIDE the upload permit and ONLY for retryable outcomes
         // (transport error, 429, 5xx): 400/401/404 are permanent and break
@@ -744,7 +864,7 @@ impl Pipeline {
         let _ = media_path;
         Ok((
             (code != Some(204)).then_some(WarningClass::Upload),
-            digest_bytes(&srt_bytes),
+            installed,
         ))
     }
 
@@ -810,6 +930,8 @@ mod tests {
             "language": "id",
             "artifact_sha256": "0101010101010101010101010101010101010101010101010101010101010101"
         });
+        let target = dir.path().join("ep.id.hi.srt");
+        let installed = install_sidecar(&target, b"unadmitted").unwrap();
         let error = publish_target_ledgers(
             LedgerPaths {
                 registry: dir.path().join("registry"),
@@ -827,6 +949,8 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.class, FailureClass::Storage);
+        installed.rollback_if_unchanged().unwrap();
+        assert!(!target.exists());
     }
 
     #[test]
@@ -839,6 +963,38 @@ mod tests {
         std::fs::write(format!("{stem}.jpn.srt"), "x").unwrap();
         assert!(sidecar_exists(&stem, "ja"));
         assert!(sidecar_exists(&stem, "jpn"));
+    }
+
+    #[test]
+    fn invalid_report_title_is_rejected_before_pipeline_stages() {
+        let error = validated_report_title(
+            &"x".repeat(crate::feature_modules::discord_text::MAX_SAFE_TITLE_SCALARS + 1),
+        );
+        assert!(error.is_err());
+    }
+
+    #[test]
+    fn target_ledger_rows_share_one_utc_timestamp() {
+        let commit = RegistryCommit {
+            stem: "/media/ep",
+            lang: "id",
+            source: "asr",
+            source_kind: None,
+            episode_id: Some(7),
+            kind: "series",
+            media_path: "/media/ep.mkv",
+            source_lang: "ja",
+            source_stream: Some(1),
+        };
+        let (_, registry, state) = target_ledger_rows(&commit, [9; 32]).unwrap();
+        let registry: RegistryRow = serde_json::from_value(registry).unwrap();
+        let state: StateEntry = serde_json::from_value(state).unwrap();
+        assert!(registry.ts.is_some());
+        assert!(registry
+            .ts
+            .as_deref()
+            .is_some_and(|timestamp| timestamp.ends_with('Z')));
+        assert_eq!(registry.ts, state.ts);
     }
 
     #[test]
@@ -869,10 +1025,58 @@ mod tests {
     }
 
     #[test]
-    fn reconciles_orphan_sidecar() {
-        let text = "1\n00:00:01,000 --> 00:00:02,000\nhello\n\n";
-        assert_eq!(crate::srt::parse_srt(text).len(), 1);
-        assert!(!text.contains("registry"));
+    fn unverified_parseable_orphan_is_replaced_by_generated_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ep.id.hi.srt");
+        let mut orphan = String::new();
+        for index in 0..10 {
+            orphan.push_str(&format!(
+                "{}\n{} --> {}\nforeign {}\n\n",
+                index + 1,
+                crate::srt::fmt_ts(index * 2_000),
+                crate::srt::fmt_ts(index * 2_000 + 1_000),
+                index
+            ));
+        }
+        assert_eq!(crate::srt::parse_srt(&orphan).len(), 10);
+        std::fs::write(&target, orphan.as_bytes()).unwrap();
+        let generated = b"generated by this run";
+        let installed = install_sidecar(&target, generated).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), generated);
+        assert_eq!(installed.previous.as_deref(), Some(orphan.as_bytes()));
+        assert_eq!(installed.artifact_sha256, digest_bytes(generated));
+        assert_ne!(installed.artifact_sha256, digest_bytes(orphan.as_bytes()));
+    }
+
+    #[test]
+    fn failed_commit_cleanup_restores_unchanged_previous_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ep.id.hi.srt");
+        let previous = b"previous admitted candidate";
+        std::fs::write(&target, previous).unwrap();
+        let installed = install_sidecar(&target, b"generated").unwrap();
+        installed.rollback_if_unchanged().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), previous);
+    }
+
+    #[test]
+    fn failed_commit_cleanup_removes_unadmitted_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ep.id.hi.srt");
+        let installed = install_sidecar(&target, b"generated").unwrap();
+        installed.rollback_if_unchanged().unwrap();
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn failed_commit_cleanup_does_not_clobber_concurrent_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ep.id.hi.srt");
+        let installed = install_sidecar(&target, b"generated").unwrap();
+        std::fs::write(&target, b"concurrent replacement").unwrap();
+        assert!(!installed.still_current().unwrap());
+        installed.rollback_if_unchanged().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"concurrent replacement");
     }
 
     #[test]
@@ -935,14 +1139,14 @@ mod tests {
             state_row: row.clone(),
         })
         .unwrap();
-        let mut conflict = row;
+        let mut conflict = row.clone();
         conflict["source"] = serde_json::json!("different");
         assert_eq!(
             commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
                 paths,
                 identity,
                 registry_row: conflict,
-                state_row: serde_json::json!({})
+                state_row: row.clone(),
             })
             .unwrap_err(),
             CommitLedgerError::Contradiction

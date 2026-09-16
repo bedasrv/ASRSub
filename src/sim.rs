@@ -769,7 +769,7 @@ fi
     let (stats, reports, omitted) = outcome.into_parts();
     assert_eq!(
         (stats.scanned, stats.processed, stats.done, stats.failed),
-        (1, 1, 1, 0)
+        (1, 1, 1, 1)
     );
     assert_eq!(omitted, 0);
     assert_eq!(reports.len(), 1);

@@ -24,10 +24,11 @@
 //! how many episodes are queued. Every remote call has a deadline so one hung
 //! free-tier endpoint cannot stall the sweep.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::bazarr::Bazarr;
@@ -315,14 +316,20 @@ impl Pipeline {
                     let aggregate = report.aggregate();
                     match aggregate {
                         AggregateDisposition::Complete
-                        | AggregateDisposition::CompleteWithWarning
-                        | AggregateDisposition::Partial => {
+                        | AggregateDisposition::CompleteWithWarning => {
                             if has_completed {
                                 stats.done += 1;
                                 self.processed_total.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 stats.failed += 1;
                             }
+                        }
+                        AggregateDisposition::Partial => {
+                            if has_completed {
+                                stats.done += 1;
+                                self.processed_total.fetch_add(1, Ordering::Relaxed);
+                            }
+                            stats.failed += 1;
                         }
                         AggregateDisposition::Failed => stats.failed += 1,
                     }
@@ -458,29 +465,25 @@ impl Pipeline {
     /// series episode and a movie sharing a numeric id never collide.
     pub async fn discover(&self, skip_ids: &std::collections::HashSet<i64>) -> Vec<Candidate> {
         let excluded = state::parse_exclusions(&self.cfg.exclusions_file);
-        let done: std::collections::HashSet<(String, i64, String)> =
-            state::load_jsonl::<StateEntry>(&self.cfg.state_file)
-                .into_iter()
-                .filter(|e| e.status.as_deref() == Some("done"))
-                .filter_map(|e| {
-                    Some((
-                        e.kind.as_deref().unwrap_or("series").to_string(),
-                        e.episode_id?,
-                        normalize_lang(e.language.as_deref()?),
-                    ))
-                })
-                .collect();
+        let state_rows = state::load_jsonl::<StateEntry>(&self.cfg.state_file);
+        let done: std::collections::HashSet<(String, i64, String)> = state_rows
+            .iter()
+            .filter(|e| e.status.as_deref() == Some("done"))
+            .filter_map(|e| {
+                Some((
+                    e.kind.as_deref().unwrap_or("series").to_string(),
+                    e.episode_id?,
+                    normalize_lang(e.language.as_deref()?),
+                ))
+            })
+            .collect();
         let mut out = Vec::new();
-        // Done state only suppresses a language while the sidecar the
-        // registry points at is still on disk. A `done` row whose file is
-        // gone (user deleted it, NAS hiccup) must resurface as missing —
-        // otherwise the subtitle is lost forever with no signal (legacy
-        // parity: wanted/library never expose stale done). No registry row
-        // at all also resurfaces: registry and state are committed in the
-        // same flow, so a missing row means no verified completion.
-        let verified = verified_targets(&state::load_jsonl::<state::RegistryRow>(
-            &self.cfg.registry_file,
-        ));
+        // Done state only suppresses a language while a matching registry row
+        // and the recorded artifact digest still match the sidecar on disk.
+        // A stale or digest-mismatched pair resurfaces as missing, so a
+        // foreign replacement cannot be admitted by a leftover done row.
+        let registry_rows = state::load_jsonl::<state::RegistryRow>(&self.cfg.registry_file);
+        let verified = verified_targets(&registry_rows, &state_rows);
         // Wanted + movies are independent Bazarr calls: fire together,
         // latency is the max, not the sum.
         let (wanted, movies) = tokio::join!(self.bazarr.wanted(), self.bazarr.movies());
@@ -497,7 +500,7 @@ impl Pipeline {
                         .filter(|l| self.cfg.target_langs.contains(l))
                         .filter(|l| {
                             !done.contains(&("series".to_string(), it.episode_id, (*l).clone()))
-                                || !verified.contains(&(
+                                || !verified.contains_key(&(
                                     "series".to_string(),
                                     it.episode_id,
                                     (*l).clone(),
@@ -552,7 +555,7 @@ impl Pipeline {
                 let mut missing = Vec::new();
                 for l in &self.cfg.target_langs {
                     if done.contains(&("movie".to_string(), rid, l.clone()))
-                        && verified.contains(&("movie".to_string(), rid, l.clone()))
+                        && verified.contains_key(&("movie".to_string(), rid, l.clone()))
                     {
                         continue;
                     }
@@ -588,27 +591,99 @@ fn movie_original_lang(m: &serde_json::Value) -> Option<String> {
     crate::lang::original_language(m.get("originalLanguage")?)
 }
 
-/// Registry rows whose recorded target sidecar is still on disk, keyed
-/// `(kind, episode_id, lang)`. Pure over the row list (the `is_file` probe
-/// is the only I/O) for testability. `kind` defaults to `series` — series
-/// rows omit it, movies carry `"kind": "movie"` in `extra`.
-fn verified_targets(
-    rows: &[state::RegistryRow],
-) -> std::collections::HashSet<(String, i64, String)> {
-    rows.iter()
-        .filter_map(|r| {
-            let target = r.target_path.as_deref()?;
-            if !Path::new(target).is_file() {
+/// A target admitted by a matching, digest-verified registry/state pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedTarget {
+    pub(crate) target_path: PathBuf,
+    pub(crate) artifact_sha256: [u8; 32],
+}
+
+pub(crate) type TargetKey = (String, i64, String);
+
+fn parse_digest(value: Option<&serde_json::Value>) -> Option<[u8; 32]> {
+    let text = value?.as_str()?;
+    if text.len() != 64 {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    for (index, pair) in pairs.iter().enumerate() {
+        digest[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(digest)
+}
+
+fn digest_file(path: &Path) -> Option<[u8; 32]> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Some(hasher.finalize().into())
+}
+
+fn registry_kind(row: &state::RegistryRow) -> String {
+    row.extra
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("series")
+        .to_string()
+}
+
+fn state_kind(row: &state::StateEntry) -> String {
+    row.kind.as_deref().unwrap_or("series").to_string()
+}
+
+/// Return only targets whose registry and done-state rows form one exact
+/// identity and whose recorded artifact digest matches the bytes on disk.
+pub(crate) fn verified_targets(
+    registry_rows: &[state::RegistryRow],
+    state_rows: &[state::StateEntry],
+) -> std::collections::HashMap<TargetKey, VerifiedTarget> {
+    let done: Vec<(TargetKey, [u8; 32])> = state_rows
+        .iter()
+        .filter(|row| row.status.as_deref() == Some("done"))
+        .filter_map(|row| {
+            Some((
+                (
+                    state_kind(row),
+                    row.episode_id?,
+                    normalize_lang(row.language.as_deref().unwrap_or("")),
+                ),
+                parse_digest(row.extra.get("artifact_sha256")),
+            ))
+        })
+        .filter_map(|(key, digest)| Some((key, digest?)))
+        .collect();
+
+    registry_rows
+        .iter()
+        .filter_map(|row| {
+            let target_path = PathBuf::from(row.target_path.as_deref()?);
+            if !target_path.is_file() {
+                return None;
+            }
+            let key = (
+                registry_kind(row),
+                row.episode_id?,
+                normalize_lang(row.lang.as_deref().unwrap_or("")),
+            );
+            let artifact_sha256 = parse_digest(row.extra.get("artifact_sha256"))?;
+            if digest_file(&target_path) != Some(artifact_sha256) {
+                return None;
+            }
+            if !done.iter().any(|(state_key, state_digest)| {
+                state_key == &key && state_digest == &artifact_sha256
+            }) {
                 return None;
             }
             Some((
-                r.extra
-                    .get("kind")
-                    .and_then(|k| k.as_str())
-                    .unwrap_or("series")
-                    .to_string(),
-                r.episode_id?,
-                crate::lang::normalize_lang(r.lang.as_deref().unwrap_or("")),
+                key,
+                VerifiedTarget {
+                    target_path,
+                    artifact_sha256,
+                },
             ))
         })
         .collect()
@@ -640,46 +715,111 @@ mod tests {
     }
 
     #[test]
-    fn verified_targets_needs_row_and_file() {
+    fn verified_targets_requires_paired_matching_digests_and_file_bytes() {
+        use sha2::Digest;
+
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("ep.id.hi.srt");
-        std::fs::write(&live, "x").unwrap();
-        let row = |kind: Option<&str>, id: i64, lang: &str, target: &str| state::RegistryRow {
-            stem: None,
-            lang: Some(lang.to_string()),
-            episode_id: Some(id),
-            source: None,
-            source_kind: None,
-            source_path: None,
-            target_path: Some(target.to_string()),
-            ts: None,
-            extra: kind
-                .map(|k| {
-                    [("kind".to_string(), serde_json::Value::String(k.to_string()))]
-                        .into_iter()
-                        .collect()
-                })
-                .unwrap_or_default(),
+        let bytes = b"live artifact";
+        std::fs::write(&live, bytes).unwrap();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(bytes);
+        let digest: [u8; 32] = hasher.finalize().into();
+        let digest_hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let row = |kind: Option<&str>, id: i64, lang: &str, target: &str, hash: Option<&str>| {
+            let mut extra = std::collections::HashMap::new();
+            if let Some(kind) = kind {
+                extra.insert("kind".to_string(), serde_json::json!(kind));
+            }
+            if let Some(hash) = hash {
+                extra.insert("artifact_sha256".to_string(), serde_json::json!(hash));
+            }
+            state::RegistryRow {
+                stem: None,
+                lang: Some(lang.to_string()),
+                episode_id: Some(id),
+                source: None,
+                source_kind: None,
+                source_path: None,
+                target_path: Some(target.to_string()),
+                ts: None,
+                extra,
+            }
         };
-        let rows = vec![
-            // Verified: row + file on disk (alias normalized to canonical).
-            row(None, 7, "ind", live.to_str().unwrap()),
-            // Stale: row exists but the file is gone.
-            row(
+        let state_row = |kind: Option<&str>, id: i64, lang: &str, hash: Option<&str>| {
+            let mut extra = std::collections::HashMap::new();
+            if let Some(hash) = hash {
+                extra.insert("artifact_sha256".to_string(), serde_json::json!(hash));
+            }
+            state::StateEntry {
+                episode_id: Some(id),
+                language: Some(lang.to_string()),
+                status: Some("done".to_string()),
+                kind: kind.map(str::to_string),
+                ts: None,
+                extra,
+            }
+        };
+        let key = ("series".to_string(), 7, "id".to_string());
+        let verified = verified_targets(
+            &[row(
                 None,
                 7,
-                "en",
-                dir.path().join("gone.en.hi.srt").to_str().unwrap(),
-            ),
-            // Movie row without kind defaults to series, not movie.
-            row(None, 100, "id", live.to_str().unwrap()),
-            row(Some("movie"), 100, "id", live.to_str().unwrap()),
-        ];
-        let v = verified_targets(&rows);
-        assert!(v.contains(&("series".to_string(), 7, "id".to_string())));
-        assert!(!v.contains(&("series".to_string(), 7, "en".to_string())));
-        assert!(v.contains(&("series".to_string(), 100, "id".to_string())));
-        assert!(v.contains(&("movie".to_string(), 100, "id".to_string())));
+                "ind",
+                live.to_str().unwrap(),
+                Some(&digest_hex),
+            )],
+            &[state_row(None, 7, "id", Some(&digest_hex))],
+        );
+        assert_eq!(
+            verified.get(&key).map(|target| target.artifact_sha256),
+            Some(digest)
+        );
+
+        // A missing registry digest, a state mismatch, or bytes changed after
+        // publication must all remain unverified.
+        assert!(verified_targets(
+            &[row(None, 7, "id", live.to_str().unwrap(), None)],
+            &[state_row(None, 7, "id", Some(&digest_hex))],
+        )
+        .is_empty());
+        assert!(verified_targets(
+            &[row(
+                None,
+                7,
+                "id",
+                live.to_str().unwrap(),
+                Some(&digest_hex)
+            )],
+            &[state_row(None, 7, "id", None)],
+        )
+        .is_empty());
+        assert!(verified_targets(
+            &[row(
+                None,
+                7,
+                "id",
+                live.to_str().unwrap(),
+                Some(&digest_hex)
+            )],
+            &[state_row(None, 7, "id", Some(&"00".repeat(32)))],
+        )
+        .is_empty());
+        std::fs::write(&live, b"foreign replacement").unwrap();
+        assert!(verified_targets(
+            &[row(
+                None,
+                7,
+                "id",
+                live.to_str().unwrap(),
+                Some(&digest_hex)
+            )],
+            &[state_row(None, 7, "id", Some(&digest_hex))],
+        )
+        .is_empty());
     }
 
     #[test]

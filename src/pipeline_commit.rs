@@ -6,7 +6,7 @@
 //! Strict per-target pipeline ledger commit protocol.
 
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use fd_lock::RwLock;
 use sha2::{Digest, Sha256};
@@ -108,6 +108,7 @@ fn commit_pair(
     registry_row: serde_json::Value,
     state_row: serde_json::Value,
 ) -> Result<CommitWitness, CommitLedgerError> {
+    validate_pair_request(&paths, &identity, &registry_row, &state_row)?;
     let (first, second) = if paths.registry <= paths.state {
         (&paths.registry, &paths.state)
     } else {
@@ -119,8 +120,23 @@ fn commit_pair(
     let mut g2 = RwLock::new(l2);
     let _a = g1.write().map_err(|_| CommitLedgerError::Io)?;
     let _b = g2.write().map_err(|_| CommitLedgerError::Io)?;
-    append_if_absent(&paths.registry, &identity, &registry_row)?;
-    append_if_absent(&paths.state, &identity, &state_row)?;
+
+    let registry_snapshot = snapshot_ledger(&paths.registry)?;
+    let state_snapshot = snapshot_ledger(&paths.state)?;
+    let result = (|| {
+        append_if_absent(&paths.registry, &identity, &registry_row)?;
+        append_if_absent(&paths.state, &identity, &state_row)?;
+        Ok::<(), CommitLedgerError>(())
+    })();
+    if let Err(error) = result {
+        let registry_rollback = restore_ledger(&paths.registry, &registry_snapshot);
+        let state_rollback = restore_ledger(&paths.state, &state_snapshot);
+        if registry_rollback.is_err() || state_rollback.is_err() {
+            return Err(CommitLedgerError::Io);
+        }
+        return Err(error);
+    }
+
     let report_hash = digest(&registry_row);
     let mut h = Sha256::new();
     h.update(b"asrsub-pipeline-v1\0");
@@ -129,6 +145,146 @@ fn commit_pair(
         pipeline_commit_id: format!("asrsub-pipeline-v1-{}", hex(&h.finalize())),
         report_hash,
     })
+}
+
+fn validate_pair_request(
+    paths: &LedgerPaths,
+    identity: &LedgerIdentity,
+    registry_row: &serde_json::Value,
+    state_row: &serde_json::Value,
+) -> Result<(), CommitLedgerError> {
+    if paths_alias(&paths.registry, &paths.state)? {
+        return Err(CommitLedgerError::InvalidInput);
+    }
+    if row_identity(registry_row).as_ref() != Some(identity)
+        || row_identity(state_row).as_ref() != Some(identity)
+    {
+        return Err(CommitLedgerError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn absolute_normalized(path: &Path) -> Result<PathBuf, CommitLedgerError> {
+    let raw = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| CommitLedgerError::InvalidInput)?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized != Path::new("/") {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    Ok(normalized)
+}
+
+fn comparison_path(path: &Path) -> Result<PathBuf, CommitLedgerError> {
+    fn resolve(path: PathBuf, depth: usize) -> Result<PathBuf, CommitLedgerError> {
+        if depth > 16 {
+            return Ok(path);
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("/"));
+        let resolved_parent =
+            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        let name = path.file_name().ok_or(CommitLedgerError::InvalidInput)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                let target =
+                    std::fs::read_link(&path).map_err(|_| CommitLedgerError::InvalidInput)?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    parent.join(target)
+                };
+                return resolve(absolute_normalized(&target)?, depth + 1);
+            }
+        }
+        Ok(resolved_parent.join(name))
+    }
+
+    resolve(absolute_normalized(path)?, 0)
+}
+
+fn paths_alias(left: &Path, right: &Path) -> Result<bool, CommitLedgerError> {
+    if comparison_path(left)? == comparison_path(right)? {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            if left.dev() == right.dev() && left.ino() == right.ino() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[derive(Debug)]
+enum LedgerSnapshot {
+    Missing,
+    File(Vec<u8>),
+    Other,
+}
+
+fn snapshot_ledger(path: &Path) -> Result<LedgerSnapshot, CommitLedgerError> {
+    let link_meta = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LedgerSnapshot::Missing)
+        }
+        Err(_) => return Err(CommitLedgerError::Io),
+    };
+    if link_meta.file_type().is_symlink() {
+        return match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => std::fs::read(path)
+                .map(LedgerSnapshot::File)
+                .map_err(|_| CommitLedgerError::Io),
+            _ => Ok(LedgerSnapshot::Other),
+        };
+    }
+    if link_meta.is_file() {
+        return std::fs::read(path)
+            .map(LedgerSnapshot::File)
+            .map_err(|_| CommitLedgerError::Io);
+    }
+    Ok(LedgerSnapshot::Other)
+}
+
+fn restore_ledger(path: &Path, snapshot: &LedgerSnapshot) -> Result<(), CommitLedgerError> {
+    match snapshot {
+        LedgerSnapshot::Missing => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(CommitLedgerError::Io),
+        },
+        LedgerSnapshot::File(bytes) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| CommitLedgerError::Io)?;
+            }
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(path)
+                .map_err(|_| CommitLedgerError::Io)?;
+            file.write_all(bytes).map_err(|_| CommitLedgerError::Io)?;
+            file.sync_data().map_err(|_| CommitLedgerError::Io)
+        }
+        LedgerSnapshot::Other => Ok(()),
+    }
 }
 fn commit_one(
     path: &Path,
@@ -148,6 +304,18 @@ fn commit_one(
         report_hash,
     })
 }
+fn rows_equal_ignoring_timestamp(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    if let Some(object) = left.as_object_mut() {
+        object.remove("ts");
+    }
+    if let Some(object) = right.as_object_mut() {
+        object.remove("ts");
+    }
+    left == right
+}
+
 fn append_if_absent(
     path: &Path,
     identity: &LedgerIdentity,
@@ -172,7 +340,7 @@ fn append_if_absent(
         }
     }
     if let Some(existing) = found {
-        return if existing == *row {
+        return if existing == *row || rows_equal_ignoring_timestamp(&existing, row) {
             Ok(())
         } else {
             Err(CommitLedgerError::Contradiction)
@@ -203,8 +371,8 @@ fn row_identity(value: &serde_json::Value) -> Option<LedgerIdentity> {
         .get("language")
         .or_else(|| o.get("lang"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
+        .map(crate::lang::normalize_lang)
+        .unwrap_or_default();
     let d = o
         .get("artifact_sha256")
         .and_then(|v| v.as_str())
@@ -277,6 +445,37 @@ mod tests {
         );
     }
     #[test]
+    fn timestamp_only_row_changes_remain_idempotent() {
+        let d = tempfile::tempdir().unwrap();
+        let p = LedgerPaths {
+            registry: d.path().join("r"),
+            state: d.path().join("s"),
+        };
+        let mut first = row();
+        first["ts"] = serde_json::json!("2026-01-01T00:00:00Z");
+        let mut second = row();
+        second["ts"] = serde_json::json!("2026-01-01T00:00:01Z");
+        commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: p.clone(),
+            identity: id(),
+            registry_row: first.clone(),
+            state_row: first,
+        })
+        .unwrap();
+        commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: p.clone(),
+            identity: id(),
+            registry_row: second.clone(),
+            state_row: second,
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(p.registry).unwrap().lines().count(),
+            1
+        );
+    }
+
+    #[test]
     fn paired_ledger_conflict_is_storage() {
         let d = tempfile::tempdir().unwrap();
         let p = LedgerPaths {
@@ -305,6 +504,102 @@ mod tests {
     }
 
     #[test]
+    fn rejects_same_ledger_path_before_acquiring_locks() {
+        let d = tempfile::tempdir().unwrap();
+        let same = d.path().join("ledger");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            tx.send(commit_target_ledgers(
+                LedgerCommitRequest::TargetLedgerCommit {
+                    paths: LedgerPaths {
+                        registry: same.clone(),
+                        state: same,
+                    },
+                    identity: id(),
+                    registry_row: row(),
+                    state_row: row(),
+                },
+            ))
+            .unwrap();
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("same ledger paths must not deadlock");
+        assert_eq!(result.unwrap_err(), CommitLedgerError::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_ledger_alias_before_acquiring_locks() {
+        use std::os::unix::fs::symlink;
+
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real-ledger");
+        std::fs::write(&real, "").unwrap();
+        let alias = d.path().join("alias-ledger");
+        symlink(&real, &alias).unwrap();
+        let result = commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: LedgerPaths {
+                registry: real.clone(),
+                state: alias,
+            },
+            identity: id(),
+            registry_row: row(),
+            state_row: row(),
+        });
+        assert_eq!(result.unwrap_err(), CommitLedgerError::InvalidInput);
+        assert_eq!(std::fs::read_to_string(real).unwrap(), "");
+    }
+
+    #[test]
+    fn rejects_mismatched_row_identity_before_writes() {
+        let d = tempfile::tempdir().unwrap();
+        let registry = d.path().join("registry");
+        let state = d.path().join("state");
+        let bad_state = serde_json::json!({
+            "kind": "series",
+            "episode_id": 7,
+            "language": "id",
+            "artifact_sha256": "0404040404040404040404040404040404040404040404040404040404040404"
+        });
+        let result = commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: LedgerPaths {
+                registry: registry.clone(),
+                state: state.clone(),
+            },
+            identity: id(),
+            registry_row: row(),
+            state_row: bad_state,
+        });
+        assert_eq!(result.unwrap_err(), CommitLedgerError::InvalidInput);
+        assert!(!registry.exists());
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn second_ledger_failure_rolls_back_first_row() {
+        let d = tempfile::tempdir().unwrap();
+        let registry = d.path().join("registry");
+        let state = d.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let result = commit_target_ledgers(LedgerCommitRequest::TargetLedgerCommit {
+            paths: LedgerPaths {
+                registry: registry.clone(),
+                state: state.clone(),
+            },
+            identity: id(),
+            registry_row: row(),
+            state_row: row(),
+        });
+        assert_eq!(result.unwrap_err(), CommitLedgerError::Io);
+        assert!(
+            !registry.exists(),
+            "failed pair left an orphan registry row"
+        );
+        assert!(state.is_dir());
+    }
+
+    #[test]
     fn registry_row_serialization_preserves_identity() {
         let extra = [(
             "artifact_sha256".to_string(),
@@ -314,7 +609,7 @@ mod tests {
         .collect();
         let value = serde_json::to_value(crate::state::RegistryRow {
             stem: Some("/m/ep".to_string()),
-            lang: Some("id".to_string()),
+            lang: Some("ind".to_string()),
             episode_id: Some(7),
             source: Some("asr".to_string()),
             source_kind: None,
