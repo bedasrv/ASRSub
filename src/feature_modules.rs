@@ -23,6 +23,8 @@ pub(crate) mod discord_state_outbox;
 pub(crate) mod discord_state_schema;
 #[path = "discord_text.rs"]
 pub(crate) mod discord_text;
+#[path = "discord_transport.rs"]
+pub(crate) mod discord_transport;
 #[path = "discord_types.rs"]
 pub(crate) mod discord_types;
 #[path = "discord_unicode.rs"]
