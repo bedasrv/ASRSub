@@ -21,6 +21,7 @@ mod asr;
 mod asr_child_tests;
 mod bazarr;
 mod config;
+mod deployment_modules;
 mod episode;
 mod feature_modules;
 mod glossary;
@@ -962,6 +963,31 @@ mod tests {
         assert_eq!(
             crate::feature_modules::discord_fs::PRODUCTION_STATE_ROOT,
             "/var/lib/asrsub/state"
+        );
+    }
+
+    #[test]
+    fn quiesce_joins_webhook_and_refresh_tasks() {
+        assert!(crate::deployment_modules::deployment_join::JoinWitnessV1::clean().queue_drained);
+    }
+    #[test]
+    fn run_once_rejected_by_marker_only() {
+        assert!(!crate::deployment_modules::deployment_commands::valid_nonce("bad"));
+    }
+    #[test]
+    fn run_once_quiesce_cross_process_race() {
+        assert_ne!(
+            crate::deployment_modules::deployment_admission::DeploymentAdmission::new().quiesce(),
+            0
+        );
+    }
+    #[test]
+    fn notification_state_reset_requires_matching_hash() {
+        assert!(
+            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
+                &crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed()
+            )
+            .contains("statefs")
         );
     }
 

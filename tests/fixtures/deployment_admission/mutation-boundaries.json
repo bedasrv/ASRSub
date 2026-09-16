@@ -1,0 +1,1 @@
+{"schema":"deployment-mutation-boundaries-v1","boundaries":["api","web","jellyfin","run-once","daemon"]}

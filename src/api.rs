@@ -1020,4 +1020,12 @@ mod tests {
             "discord_webhook_url"
         ));
     }
+
+    #[test]
+    fn quiesce_rejects_new_mutation() {
+        let admission = crate::deployment_modules::deployment_admission::DeploymentAdmission::new();
+        assert!(admission.admit_mutation());
+        admission.quiesce();
+        assert!(!admission.admit_mutation());
+    }
 }
