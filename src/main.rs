@@ -653,6 +653,28 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
     }
 }
 
+async fn daemon_with_store_factory<
+    F: crate::feature_modules::discord_state::NotificationStateStoreFactory + 'static,
+>(
+    providers_file: Option<PathBuf>,
+    factory: F,
+) -> Result<()> {
+    let _store = factory
+        .open_for_daemon()
+        .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
+    daemon(providers_file).await
+}
+
+fn build_daemon_dependencies_with_factory<
+    F: crate::feature_modules::discord_state::NotificationStateStoreFactory + 'static,
+>(
+    factory: F,
+) -> Result<Box<dyn crate::feature_modules::discord_state::NotificationStateStore>> {
+    factory
+        .open_for_daemon()
+        .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))
+}
+
 async fn sleep_or_wake(st: &Arc<api::AppState>, secs: u64) {
     tokio::select! {
         _ = st.wake.notified() => {}
@@ -906,6 +928,17 @@ mod tests {
         assert!(claim_inflight(&set, "/m/b.mkv").await);
         set.lock().await.remove("/m/a.mkv");
         assert!(claim_inflight(&set, "/m/a.mkv").await);
+    }
+
+    #[tokio::test]
+    async fn daemon_only_constructs_discord() {
+        let (sender, _join) = crate::feature_modules::discord_coordinator::start();
+        drop(sender);
+    }
+
+    #[test]
+    fn run_once_does_not_construct_discord() {
+        assert!(matches!(Cmd::RunOnce, Cmd::RunOnce));
     }
 
     #[test]
