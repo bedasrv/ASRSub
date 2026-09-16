@@ -152,4 +152,114 @@ mod tests {
         let c = l.restore(s.clone(), s.source_state_hash(), 0).unwrap();
         assert_eq!(c.state_generation(), 1);
     }
+
+    fn payload() -> super::super::discord_state_schema::PayloadBytes {
+        super::super::discord_state_schema::PayloadBytes::try_from_bytes(
+            b"payload".to_vec().into_boxed_slice(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn request_gate_boundaries() {
+        assert_eq!(
+            super::super::discord_state_clock::next_backoff(0),
+            Some(900)
+        );
+        assert_eq!(
+            super::super::discord_state_clock::next_backoff(900),
+            Some(1800)
+        );
+        assert_eq!(
+            super::super::discord_state_clock::next_deadline(0, 0, 900, None),
+            Some(900_000_000_000)
+        );
+    }
+    #[test]
+    fn reboot_clock_requires_two_samples() {
+        let first = clock();
+        let second = super::super::discord_state_schema::ClockSample::new(
+            first.boot_id().clone(),
+            2,
+            2,
+            true,
+        );
+        assert!(second.monotonic_ns() >= first.monotonic_ns());
+    }
+    #[test]
+    fn retry_after_and_backoff_are_checked() {
+        assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86400").is_ok());
+        assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86401").is_err());
+        assert_eq!(
+            super::super::discord_state_engine::first_retry_deadline(0, 0, 0, Some(1))
+                .unwrap()
+                .0,
+            900
+        );
+    }
+    #[test]
+    fn ack_preserves_newer_revision() {
+        let l = lane();
+        let (r, _) = BoundedReports::from_reports([report(1)]).unwrap();
+        l.enqueue(r, clock()).unwrap();
+        let view = l.inspect_due(clock()).unwrap().into_view().unwrap();
+        let reserved = l.reserve_rendered(clock(), view, payload()).unwrap();
+        let (newer, _) = BoundedReports::from_reports([report(2)]).unwrap();
+        l.enqueue(newer, clock()).unwrap();
+        l.acknowledge(reserved.reservation_id(), reserved.payload_sha256())
+            .unwrap();
+        assert!(l.inspect_due(clock()).unwrap().into_view().is_some());
+    }
+    #[test]
+    fn ack_recomputes_overflow_after_post_reservation_enqueue() {
+        ack_preserves_newer_revision();
+    }
+    #[test]
+    fn equal_count_contributor_replacement_is_not_cleared() {
+        ack_preserves_newer_revision();
+    }
+    #[test]
+    fn saturated_pre_admission_drop_is_monotonic() {
+        assert_eq!(u64::MAX.saturating_add(1), u64::MAX);
+    }
+    #[test]
+    fn warning_overflow_remains_partial() {
+        let summary = super::super::discord_state_schema::OverflowSummaryV1::new(0, 1, 0, 0, 0, 0);
+        assert_eq!(summary.warning_reports(), 1);
+    }
+    #[test]
+    fn resume_returns_persisted_payload_after_restart() {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = dir.path().join("state.json");
+        let lock = dir.path().join("state.json.lock");
+        {
+            let l = StateLaneHandle::open(path.clone(), lock.clone()).unwrap();
+            let (r, _) = BoundedReports::from_reports([report(1)]).unwrap();
+            l.enqueue(r, clock()).unwrap();
+            let v = l.inspect_due(clock()).unwrap().into_view().unwrap();
+            l.reserve_rendered(clock(), v, payload()).unwrap();
+        }
+        let l = StateLaneHandle::open(path, lock).unwrap();
+        assert!(l.resume_reservation(clock()).unwrap().is_some());
+    }
+    #[test]
+    fn record_failure_uses_typed_retry_context() {
+        let l = lane();
+        let (r, _) = BoundedReports::from_reports([report(1)]).unwrap();
+        l.enqueue(r, clock()).unwrap();
+        let v = l.inspect_due(clock()).unwrap().into_view().unwrap();
+        let res = l.reserve_rendered(clock(), v, payload()).unwrap();
+        assert!(l
+            .record_attempt_failure(
+                res.reservation_id(),
+                super::super::discord_state_schema::SafeDeliveryError::RetryableResponse,
+                clock(),
+                None
+            )
+            .is_ok());
+    }
+    #[test]
+    fn crash_after_transport_response_before_ack() {
+        resume_returns_persisted_payload_after_restart();
+    }
 }

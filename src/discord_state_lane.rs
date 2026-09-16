@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::discord_state_codec;
 use super::discord_state_schema::*;
-use super::discord_types::{BoundedReports, EpisodeKind, EpisodeRunReport};
+use super::discord_types::{BoundedReports, EpisodeRunReport};
 
 #[derive(Clone)]
 pub(crate) struct StateLaneHandle {
@@ -18,6 +18,7 @@ pub(crate) struct StateLaneHandle {
 struct Reservation {
     id: [u8; 32],
     payload: PayloadBytes,
+    captured: Box<[String]>,
 }
 
 struct LaneState {
@@ -54,7 +55,7 @@ impl StateLaneHandle {
             overflow: OverflowSummaryV1::default(),
         };
         if state.path.exists() {
-            if let Err(_) = load_state(&mut state) {
+            if let Err(_error) = load_state(&mut state) {
                 quarantine(&state);
                 state.disabled = true;
                 persist(&mut state)?;
@@ -137,6 +138,15 @@ impl StateLaneHandle {
         state.reservation = Some(Reservation {
             id,
             payload: payload.clone(),
+            captured: state
+                .reports
+                .iter()
+                .filter_map(|report| {
+                    report
+                        .pipeline_commit_id()
+                        .map(|value| value.as_str().to_string())
+                })
+                .collect(),
         });
         let commit = commit(&mut state)?;
         Ok(ReservedDelivery::new(
@@ -177,7 +187,12 @@ impl StateLaneHandle {
             state.reservation = Some(reservation);
             return Err(NotificationStateError::InvalidInput);
         }
-        state.reports.clear();
+        state.reports.retain(|report| {
+            report
+                .pipeline_commit_id()
+                .map(|value| !reservation.captured.iter().any(|id| id == value.as_str()))
+                .unwrap_or(true)
+        });
         commit(&mut state)
     }
 
@@ -323,6 +338,14 @@ fn canonical_state(state: &LaneState) -> Vec<u8> {
         out.push_str(&quoted(&hex(&reservation.id)));
         out.push_str(",\"payload\":");
         out.push_str(&quoted(&hex(reservation.payload.as_bytes())));
+        out.push_str(",\"captured\":[");
+        for (index, id) in reservation.captured.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&quoted(id));
+        }
+        out.push(']');
         out.push('}');
     } else {
         out.push_str("null");
@@ -357,7 +380,7 @@ fn persist(state: &mut LaneState) -> Result<(), NotificationStateError> {
 
 fn parse_state_bytes(
     bytes: &[u8],
-) -> Result<(Vec<EpisodeRunReport>, bool), NotificationStateError> {
+) -> Result<(Vec<EpisodeRunReport>, bool, Option<Reservation>), NotificationStateError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| NotificationStateError::Corrupt)?;
     let object = value.as_object().ok_or(NotificationStateError::Corrupt)?;
@@ -378,7 +401,49 @@ fn parse_state_bytes(
         let bytes = decode_hex(hex_bytes).ok_or(NotificationStateError::Corrupt)?;
         reports.push(discord_state_codec::decode_report(&bytes)?);
     }
-    Ok((reports, disabled))
+    let reservation = match object.get("reservation") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => {
+            let reservation = value.as_object().ok_or(NotificationStateError::Corrupt)?;
+            let id = decode_hex(
+                reservation
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .ok_or(NotificationStateError::Corrupt)?,
+            )
+            .ok_or(NotificationStateError::Corrupt)?;
+            if id.len() != 32 {
+                return Err(NotificationStateError::Corrupt);
+            }
+            let mut id_bytes = [0; 32];
+            id_bytes.copy_from_slice(&id);
+            let payload = decode_hex(
+                reservation
+                    .get("payload")
+                    .and_then(|v| v.as_str())
+                    .ok_or(NotificationStateError::Corrupt)?,
+            )
+            .ok_or(NotificationStateError::Corrupt)?;
+            let payload = PayloadBytes::try_from_bytes(payload.into_boxed_slice())?;
+            let captured = reservation
+                .get("captured")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice()
+                })
+                .unwrap_or_else(|| Vec::<String>::new().into_boxed_slice());
+            Some(Reservation {
+                id: id_bytes,
+                payload,
+                captured,
+            })
+        }
+    };
+    Ok((reports, disabled, reservation))
 }
 
 fn decode_hex(value: &str) -> Option<Vec<u8>> {
@@ -400,9 +465,10 @@ fn load_state(state: &mut LaneState) -> Result<(), NotificationStateError> {
         .get("state_generation")
         .and_then(|v| v.as_u64())
         .ok_or(NotificationStateError::Corrupt)?;
-    let (reports, disabled) = parse_state_bytes(&bytes)?;
+    let (reports, disabled, reservation) = parse_state_bytes(&bytes)?;
     state.reports = reports;
     state.disabled = disabled;
+    state.reservation = reservation;
     Ok(())
 }
 

@@ -162,7 +162,7 @@ pub(crate) fn decode_report(bytes: &[u8]) -> Result<EpisodeRunReport, Notificati
         serde_json::from_slice(bytes).map_err(|_| NotificationStateError::Corrupt)?;
     let object = value.as_object().ok_or(NotificationStateError::Corrupt)?;
     let get = |key: &str| object.get(key).ok_or(NotificationStateError::Corrupt);
-    if object.len() != 8 || get("schema")?.as_str() != Some("report-v1") {
+    if object.len() != 9 || get("schema")?.as_str() != Some("report-v1") {
         return Err(NotificationStateError::Corrupt);
     }
     let kind = match get("kind")?.as_str() {
