@@ -1,6 +1,7 @@
 {
   "schema": "file-budget-v1",
   "entries": [
+    {"path":".github/workflows/ci.yml","owner_task":"exact-commit-corrective-revision","max_lines":100,"max_delta_from_baseline":32,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"Cargo.toml","owner_task":"core-task-2","max_lines":300,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"Cargo.lock","owner_task":"core-task-2","max_lines":5000,"max_delta_from_baseline":512,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"README.md","owner_task":"core-task-1","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
@@ -53,9 +54,9 @@
     {"path":"src/process.rs","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/main.rs","src/asr.rs","src/ladder.rs","src/pipeline.rs","src/episode.rs","src/sim.rs"],"max_direct_production_importers":6,"waiver":"none"},
     {"path":"src/pipeline_commit.rs","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/episode.rs","src/pipeline.rs"],"max_direct_production_importers":2,"waiver":"none"},
     {"path":"tools/asrsub-env","owner_task":"core-pre-task","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tools/signer_argv_policy.json","owner_task":"core-pre-task","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/signer_argv_policy.json","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/check_file_budgets.py","owner_task":"core-pre-task","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tests/fixtures/platform/file-budgets.json","owner_task":"core-pre-task","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/platform/file-budgets.json","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/platform/kernel.json","owner_task":"hardening-task-1","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/platform/filesystem.json","owner_task":"hardening-task-1","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/platform/docker-endpoint.json","owner_task":"hardening-task-1","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
@@ -117,7 +118,22 @@
     {"path":"src/egress.rs","owner_task":"hardening-task-8","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/deployment_commands.rs","src/discord_transport.rs"],"max_direct_production_importers":2,"waiver":"none"},
     {"path":"tests/fixtures/egress/resolver_snapshot.json","owner_task":"hardening-task-8","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/egress/policy.json","owner_task":"hardening-task-8","max_lines":250,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
-    {"path":"tests/fixtures/egress/run_fixture.py","owner_task":"hardening-task-8","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
+    {"path":"tests/fixtures/egress/run_fixture.py","owner_task":"hardening-task-8","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"scripts/asrsub-health-probe","owner_task":"exact-commit-corrective-revision","max_lines":200,"max_delta_from_baseline":128,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"systemd/asrsub-runtime.service","owner_task":"exact-commit-corrective-revision","max_lines":50,"max_delta_from_baseline":8,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/systemd/run_fixture.py","owner_task":"exact-commit-corrective-revision","max_lines":100,"max_delta_from_baseline":16,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/fixtures/systemd/etc/systemd/system/asrsub-runtime.service","owner_task":"exact-commit-corrective-revision","max_lines":50,"max_delta_from_baseline":8,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/test_production_adapters.py","owner_task":"exact-commit-corrective-revision","max_lines":1200,"max_delta_from_baseline":96,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/test_production_adapter_corrections.py","owner_task":"exact-commit-corrective-revision","max_lines":600,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/test_rollout_receipt_contract.py","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":160,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/test_final_bundle_contract.py","owner_task":"exact-commit-corrective-revision","max_lines":200,"max_delta_from_baseline":128,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/create_approval.py","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":256,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/deploy_docker.py","owner_task":"exact-commit-corrective-revision","max_lines":600,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/install_runtime_bundle.py","owner_task":"exact-commit-corrective-revision","max_lines":1100,"max_delta_from_baseline":512,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/package_bundle.py","owner_task":"exact-commit-corrective-revision","max_lines":400,"max_delta_from_baseline":384,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/production_adapter_common.py","owner_task":"exact-commit-corrective-revision","max_lines":600,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/production_entrypoint.py","owner_task":"exact-commit-corrective-revision","max_lines":800,"max_delta_from_baseline":384,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/record_rollout.py","owner_task":"exact-commit-corrective-revision","max_lines":1100,"max_delta_from_baseline":384,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"}
   ],
   "shared_paths": [
     {"path":"src/main.rs","modifiers":["core-task-2","core-task-9","hardening-task-2","hardening-task-3","hardening-task-6"]},
@@ -145,6 +161,7 @@
     {"path":"docker-compose.yml","before":"hardening-task-4","after":"hardening-task-7"}
   ],
   "task_files": [
+    {"task":"exact-commit-corrective-revision","path":".github/workflows/ci.yml","role":"modify"},
     {"task":"core-pre-task","path":"tests/fixtures/platform/file-budgets.json","role":"create"},
     {"task":"core-pre-task","path":"tools/signer_argv_policy.json","role":"create"},
     {"task":"core-pre-task","path":"tools/asrsub-env","role":"create"},
@@ -155,6 +172,23 @@
     {"task":"core-task-2","path":"src/discord_state_schema.rs","role":"create"},
     {"task":"core-task-2","path":"src/discord_state_codec.rs","role":"create"},
     {"task":"core-task-2","path":"src/process.rs","role":"create"},
-    {"task":"core-task-2","path":"src/pipeline_commit.rs","role":"create"}
+    {"task":"core-task-2","path":"src/pipeline_commit.rs","role":"create"},
+    {"task":"exact-commit-corrective-revision","path":"scripts/asrsub-health-probe","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"systemd/asrsub-runtime.service","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/fixtures/systemd/run_fixture.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/fixtures/systemd/etc/systemd/system/asrsub-runtime.service","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/fixtures/platform/file-budgets.json","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/test_production_adapters.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/test_production_adapter_corrections.py","role":"create"},
+    {"task":"exact-commit-corrective-revision","path":"tests/test_rollout_receipt_contract.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tests/test_final_bundle_contract.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/create_approval.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/deploy_docker.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/install_runtime_bundle.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/package_bundle.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/production_adapter_common.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/production_entrypoint.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/record_rollout.py","role":"modify"},
+    {"task":"exact-commit-corrective-revision","path":"tools/signer_argv_policy.json","role":"modify"}
   ]
 }

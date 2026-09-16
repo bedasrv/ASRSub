@@ -25,8 +25,10 @@ jobs:
         with:
           python-version: "3.13"
       - run: python3 -m unittest discover -s tests -p "test_*.py"
+      - run: python3 -m py_compile tools/*.py tests/test_*.py
       - run: bash -n build.sh
-      - run: bash -n scripts/deploy_smoke.sh
+      - run: bash -n scripts/asrsub-health-probe scripts/deploy_smoke.sh
+      - run: python3 tools/check_file_budgets.py --structural-only --repo-root . --manifest tests/fixtures/platform/file-budgets.json
       - run: ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:ci docker compose config -q
 
   docker:

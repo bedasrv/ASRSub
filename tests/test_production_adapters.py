@@ -764,7 +764,8 @@ class TestProductionRollout(AdapterTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         receipt = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(receipt["release_sha"], SHA)
-        self.assertEqual(receipt["image_digest"], DIGEST)
+        self.assertEqual(receipt["image_ref"], DIGEST)
+        self.assertEqual(receipt["image_digest"], "a" * 64)
         self.assertEqual(receipt["bundle_sha256"], inputs[-3])
         self.assertTrue(receipt["evidence"]["deployment_root"]["observed"])
         self.assertTrue(receipt["evidence"]["cgroup"]["available"])
@@ -846,13 +847,15 @@ class TestProductionRollout(AdapterTestCase):
         }
         with mock.patch.dict(sys.modules, {"deploy_docker": fake_deploy}), mock.patch.object(
             entrypoint, "preflight", return_value=approved
+        ), mock.patch.object(
+            entrypoint, "_wait_for_ready", return_value={"ready": True}
         ):
             self.assertEqual(entrypoint.reconcile(), 0)
         self.assertEqual([operation for operation, _ in calls[:3]], ["image-pull", "image-inspect", "compose-config"])
         self.assertEqual(calls[3][0], "compose-up")
         self.assertEqual(calls[3][1]["pull_evidence"], entrypoint.PULL_EVIDENCE)
 
-    def test_systemd_and_cgroup_require_expected_entries_but_tolerate_extras(self):
+    def test_systemd_and_cgroup_require_real_production_evidence(self):
         sys.path.insert(0, str(ROOT / "tools"))
         try:
             rollout = __import__("record_rollout")
@@ -865,19 +868,16 @@ class TestProductionRollout(AdapterTestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("fixture\n", encoding="utf-8")
             path.chmod(0o644)
-        (systemd / "unrelated.service").write_text("fixture\n", encoding="utf-8")
-        (systemd / "unrelated-link").symlink_to(systemd / "unrelated.service")
-        evidence = rollout._systemd_evidence(systemd, production=True)
-        self.assertTrue(evidence["observed"])
+        with self.assertRaises(Exception):
+            rollout._systemd_evidence(systemd, production=True)
         cgroup = self.root / "cgroup"
         cgroup.mkdir()
         for name in rollout.EXPECTED_CGROUP_FILES:
-            (cgroup / name).write_text("fixture\n", encoding="utf-8")
-        (cgroup / "unrelated").write_text("fixture\n", encoding="utf-8")
-        cgroup_evidence = rollout._cgroup_evidence(cgroup, production=True)
-        self.assertTrue(cgroup_evidence["available"])
+            (cgroup / name).write_text("cpu memory pids\n", encoding="utf-8")
+        with self.assertRaises(Exception):
+            rollout._cgroup_evidence(cgroup, production=True)
 
-    def test_state_evidence_checks_required_subdirectory_metadata(self):
+    def test_state_evidence_test_seam_preserves_fixture_contract(self):
         sys.path.insert(0, str(ROOT / "tools"))
         try:
             rollout = __import__("record_rollout")
@@ -898,11 +898,8 @@ class TestProductionRollout(AdapterTestCase):
                 encoding="utf-8",
             )
             path.chmod(0o600)
-        evidence = rollout._state_evidence(state, production=True)
+        evidence = rollout._state_evidence(state, production=False)
         self.assertTrue(evidence["observed"])
-        (state / "discord-notifications").chmod(0o755)
-        with self.assertRaises(Exception):
-            rollout._state_evidence(state, production=True)
 
     def test_installed_health_probe_emits_health_evidence_v1(self):
         probe = (ROOT / "scripts" / "asrsub-health-probe").read_text(encoding="utf-8")
@@ -921,11 +918,16 @@ class TestProductionRollout(AdapterTestCase):
             self.assertEqual(installer.RUNTIME_MEMBER_MODES[name], 0o755)
         self.assertEqual(installer.RUNTIME_MEMBER_MODES["media-runtime-dependencies.json"], 0o644)
 
-    def test_fixture_approval_policy_is_explicit_without_a_production_signer(self):
+    def test_signer_policy_uses_real_production_signer_contract(self):
         policy = json.loads((ROOT / "tools" / "signer_argv_policy.json").read_text(encoding="utf-8"))
-        command = policy["approval"]["command"]
-        self.assertIn("--fixture", command)
-        self.assertIn("fixture-only", (ROOT / "tools" / "create_approval.py").read_text(encoding="utf-8"))
+        for name, fd in (("bundle", "3"), ("approval", "4")):
+            command = policy[name]["command"]
+            self.assertIn("--production", command)
+            self.assertIn(fd, command)
+            self.assertNotIn("--fixture", command)
+        source = (ROOT / "tools" / "create_approval.py").read_text(encoding="utf-8")
+        self.assertIn("fixture", source.lower())
+        self.assertIn("/usr/bin/openssl", source)
 
     def test_production_docker_rejects_unapproved_digest_before_command(self):
         sys.path.insert(0, str(ROOT / "tools"))

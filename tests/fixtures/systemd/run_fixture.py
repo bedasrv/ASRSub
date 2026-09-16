@@ -29,6 +29,7 @@ def rollback():
     inventory=json.loads((ROOT/"runtime-bundle-inventory.json").read_text())
     assert inventory["cgroup"].endswith("asrsub-children")
     assert "Delegate=yes" in (ROOT/"etc/systemd/system/asrsub-runtime.service").read_text()
+    assert "RemainAfterExit=yes" in (ROOT/"etc/systemd/system/asrsub-runtime.service").read_text()
 def main():
  p=argparse.ArgumentParser();p.add_argument("selector");a=p.parse_args();run_selector(a.selector,{"test_recovery_precedes_runtime":recovery,"test_provisional_bundle_contains_units_and_dropin":bundle,"test_rollback_requires_post_restore_cgroup_projection":rollback})
 if __name__=="__main__":main()

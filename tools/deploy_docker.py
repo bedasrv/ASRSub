@@ -215,6 +215,8 @@ def _read_approved_image(path: Path, expected_digest: str, *, release_sha: str |
     value = read_json(require_absolute(path, name="approved image"), name="approved image")
     if not isinstance(value, dict) or value.get("schema") != "approved-image-v1":
         raise AdapterError("approved image has an unsupported schema")
+    if value.get("fixture_only") is True:
+        raise AdapterError("fixture approved image is not a production authorization")
     if value.get("image_ref") != expected_digest:
         raise AdapterError("approved image does not match the requested digest")
     expected_bare = expected_digest.rsplit(":", 1)[-1]
@@ -237,6 +239,21 @@ def _read_approval_binding(*, digest: str, release_sha: str, compose_sha256: str
         raise AdapterError("approved deployment transaction does not bind the rendered Compose")
     if value.get("approved_docker_socket") != "default" or value.get("approved_state_root") != "/var/lib/asrsub/state":
         raise AdapterError("approved deployment transaction host binding is not approved")
+
+
+def _production_preflight(*, digest: str, release_sha: str) -> dict[str, Any]:
+    """Require the same signed fixed-path authorization as the entrypoint."""
+    try:
+        from production_entrypoint import preflight  # type: ignore
+
+        approved = preflight()
+    except (AdapterError, ImportError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("production Docker operation requires a successful signed preflight") from exc
+    if not isinstance(approved, dict):
+        raise AdapterError("production preflight returned an invalid authorization")
+    if approved.get("image_digest") != digest or approved.get("release_sha") != release_sha:
+        raise AdapterError("production preflight authorization does not match the requested operation")
+    return approved
 
 
 def _read_image_evidence(path: Path, *, digest: str, release_sha: str) -> None:
@@ -319,6 +336,7 @@ def run_adapter(
         if digest is None:
             raise AdapterError(f"production {operation} requires --digest")
         digest = require_image_digest(digest)
+        _production_preflight(digest=digest, release_sha=release_sha)
         approved_path = approved_image or APPROVED_IMAGE_PATH
         if require_absolute(approved_path, name="approved image") != APPROVED_IMAGE_PATH:
             raise AdapterError("production approved image must use the fixed evidence path")

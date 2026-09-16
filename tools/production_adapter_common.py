@@ -164,6 +164,16 @@ def ensure_existing_directory(path: Path, *, name: str) -> Path:
     return path
 
 
+def ensure_directory_metadata(path: Path, *, mode: int, uid: int | None, gid: int | None, name: str) -> Path:
+    """Validate an existing directory without creating or following it."""
+    path = require_absolute(path, name=name)
+    ensure_no_symlink(path, name=name, allow_missing=False)
+    st = _check_metadata(path, mode=mode, uid=uid, gid=gid, name=name)
+    if not stat.S_ISDIR(st.st_mode):
+        raise AdapterError(f"{name} is not a directory: {path}")
+    return path
+
+
 def ensure_regular_file(path: Path, *, mode: int, uid: int | None, gid: int | None, name: str) -> Path:
     path = require_absolute(path, name=name)
     ensure_no_symlink(path, name=name, allow_missing=False)

@@ -20,6 +20,7 @@ from production_adapter_common import (
     canonical_json,
     default_owner,
     ensure_directory,
+    ensure_directory_metadata,
     ensure_existing_directory,
     ensure_no_symlink,
     ensure_parent_directory,
@@ -262,11 +263,18 @@ def _validate_bundle_tree(
 
 
 
-def _validate_systemd_contract(root: Path, members: list[dict[str, Any]] | None = None, *, uid: int | None = None, gid: int | None = None) -> None:
+def _validate_systemd_contract(
+    root: Path,
+    members: list[dict[str, Any]] | None = None,
+    *,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> None:
     root = require_absolute(root, name="systemd root")
-    ensure_no_symlink(root, name="systemd root", allow_missing=False)
-    if not root.is_dir():
-        raise AdapterError("systemd root is not a directory")
+    if uid is not None and gid is not None:
+        ensure_directory_metadata(root, mode=0o755, uid=uid, gid=gid, name="systemd root")
+    else:
+        ensure_existing_directory(root, name="systemd root")
     required = EXPECTED_SYSTEMD_MEMBERS if members is None else {
         item["path"] for item in members if item.get("install_root") == "systemd"
     }
@@ -275,6 +283,14 @@ def _validate_systemd_contract(root: Path, members: list[dict[str, Any]] | None 
     for relative in sorted(required):
         target = root / relative.removeprefix("systemd/")
         ensure_no_symlink(target, name="systemd contract", allow_missing=False)
+        if target.parent != root and uid is not None and gid is not None:
+            ensure_directory_metadata(
+                target.parent,
+                mode=0o755,
+                uid=uid,
+                gid=gid,
+                name=f"systemd directory for {relative}",
+            )
         try:
             st = os.lstat(target)
         except OSError as exc:
@@ -480,16 +496,48 @@ def _stage_bundle(
         _fsync_directory(systemd_stage)
 
 
-def _install_systemd_stage(stage: Path, root: Path, members: list[dict[str, Any]], *, uid: int, gid: int) -> None:
+def _rollback_systemd_install(
+    installed: list[tuple[Path, Path | None]],
+    created_directories: list[Path] | None = None,
+) -> None:
+    for target, backup in reversed(installed):
+        try:
+            if os.path.lexists(target):
+                target.unlink()
+            if backup is not None and os.path.lexists(backup):
+                os.replace(backup, target)
+                _fsync_directory(target.parent)
+        except OSError:
+            # The caller reports the original failure.  A missing rollback is
+            # still fail-closed because no receipt is emitted.
+            pass
+    for directory in reversed(created_directories or []):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
+def _install_systemd_stage(
+    stage: Path,
+    root: Path,
+    members: list[dict[str, Any]],
+    *,
+    uid: int,
+    gid: int,
+) -> tuple[list[tuple[Path, Path | None]], list[Path]]:
     root = ensure_existing_directory(root, name="systemd root")
     systemd_members = [item for item in members if item.get("install_root") == "systemd"]
     if {item["path"] for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
         raise AdapterError("signed systemd inventory is incomplete")
     installed: list[tuple[Path, Path | None]] = []
+    created_directories: list[Path] = []
     try:
         for item in sorted(systemd_members, key=lambda value: value["target"]):
             source = stage / item["target"]
             target = root / item["target"]
+            if not target.parent.exists():
+                created_directories.append(target.parent)
             ensure_directory(target.parent, mode=0o755, uid=uid, gid=gid, name="systemd target directory")
             ensure_no_symlink(target, name="systemd target", allow_missing=True)
             backup: Path | None = None
@@ -504,21 +552,20 @@ def _install_systemd_stage(stage: Path, root: Path, members: list[dict[str, Any]
             os.chown(target, uid, gid)
             _fsync_directory(target.parent)
         _validate_installed_systemd(root, members, uid=uid, gid=gid)
-        for _, backup in installed:
-            if backup is not None and backup.exists():
-                backup.unlink()
-        shutil.rmtree(stage, ignore_errors=True)
         _fsync_directory(root)
+        return installed, created_directories
     except Exception:
-        for target, backup in reversed(installed):
-            try:
-                if target.exists():
-                    target.unlink()
-                if backup is not None and backup.exists():
-                    os.replace(backup, target)
-            except OSError:
-                pass
+        _rollback_systemd_install(installed, created_directories)
         raise
+
+
+def _finalize_systemd_install(installed: list[tuple[Path, Path | None]]) -> None:
+    for _, backup in installed:
+        if backup is not None and os.path.lexists(backup):
+            backup.unlink()
+    parents = {target.parent for target, _ in installed}
+    for parent in parents:
+        _fsync_directory(parent)
 
 
 def _target_files(target: Path) -> tuple[set[str], set[str]]:
@@ -562,7 +609,15 @@ def _validate_target(target: Path, members: list[dict[str, Any]], *, target_mode
             raise AdapterError(f"installed runtime hash mismatch: {relative}")
 
 
-def _commit_stage(stage: Path, target: Path, *, target_mode: int, uid: int, gid: int, members: list[dict[str, Any]]) -> None:
+def _commit_stage(
+    stage: Path,
+    target: Path,
+    *,
+    target_mode: int,
+    uid: int,
+    gid: int,
+    members: list[dict[str, Any]],
+) -> tuple[bool, Path | None]:
     parent = ensure_parent_directory(target, name="bundle target")
     ensure_no_symlink(target, name="bundle target", allow_missing=True)
     target_exists = os.path.lexists(target)
@@ -573,11 +628,11 @@ def _commit_stage(stage: Path, target: Path, *, target_mode: int, uid: int, gid:
         if stat.S_IMODE(target_stat.st_mode) != target_mode or target_stat.st_uid != uid or target_stat.st_gid != gid:
             raise AdapterError("bundle target metadata does not match the contract")
         _target_files(target)  # reject symlinks and special entries before moving it
-    backup = parent / f".{target.name}.backup-{os.getpid()}"
-    if backup.exists() or backup.is_symlink():
-        raise AdapterError("bundle rollback path is occupied")
+        backup = parent / f".{target.name}.backup-{os.getpid()}"
+        if os.path.lexists(backup):
+            raise AdapterError("bundle rollback path is occupied")
     try:
-        if target_exists:
+        if target_exists and backup is not None:
             os.replace(target, backup)
             _fsync_directory(parent)
         os.replace(stage, target)
@@ -586,17 +641,21 @@ def _commit_stage(stage: Path, target: Path, *, target_mode: int, uid: int, gid:
         _fsync_directory(target)
         _fsync_directory(parent)
         _validate_target(target, members, target_mode=target_mode, uid=uid, gid=gid)
-        if backup is not None and backup.exists():
-            shutil.rmtree(backup)
-            _fsync_directory(parent)
+        return target_exists, backup
     except Exception:
         try:
-            if target.exists() and (backup is not None and backup != target):
-                failed = parent / f".{target.name}.failed-{os.getpid()}-{stage.name}"
-                if not failed.exists():
-                    os.replace(target, failed)
-                    shutil.rmtree(failed, ignore_errors=True)
-            if backup is not None and backup.exists() and not target.exists():
+            if os.path.lexists(target):
+                if backup is not None and backup != target:
+                    failed = parent / f".{target.name}.failed-{os.getpid()}-{stage.name}"
+                    if not os.path.lexists(failed):
+                        os.replace(target, failed)
+                        shutil.rmtree(failed, ignore_errors=True)
+                elif backup is None:
+                    if target.is_dir() and not target.is_symlink():
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        target.unlink(missing_ok=True)
+            if backup is not None and os.path.lexists(backup) and not os.path.lexists(target):
                 os.replace(backup, target)
                 _fsync_directory(parent)
         except OSError:
@@ -604,142 +663,37 @@ def _commit_stage(stage: Path, target: Path, *, target_mode: int, uid: int, gid:
         raise
 
 
-def _production_legacy(args: argparse.Namespace, *, test_seam: bool) -> int:
-    required = {
-        "bundle root": args.bundle_root,
-        "bundle manifest": args.manifest,
-        "authenticated approval": args.approval,
-        "release SHA": args.release_sha,
-        "target root": args.target_root,
-        "output": args.output,
-    }
-    for label, value in required.items():
-        if value is None:
-            raise AdapterError(f"{'test-seam' if test_seam else 'production'} mode requires {label}")
-    if args.dry_run and not test_seam:
-        raise AdapterError("dry-run is non-production and cannot be used for production evidence")
-    if not test_seam and args.verify_command is not None and require_absolute(args.verify_command, name="verification command") != PRODUCTION_OPENSSL:
-        raise AdapterError("production verification command must use the fixed /usr/bin/openssl")
-    release_sha = require_hex(args.release_sha, name="release SHA", length=40)
-    bundle_root_arg = require_absolute(args.bundle_root, name="bundle root")
-    target = require_absolute(args.target_root, name="bundle target")
-    manifest_path = require_absolute(args.manifest, name="bundle manifest")
-    output_path = require_absolute(args.output, name="install receipt output")
-    if not test_seam:
-        if bundle_root_arg != PRODUCTION_BUNDLE_ROOT:
-            raise AdapterError("production bundle root must use the fixed approved path")
-        if manifest_path != PRODUCTION_BUNDLE_MANIFEST:
-            raise AdapterError("production bundle manifest must use the fixed approved path")
-        if require_absolute(args.approval, name="authenticated approval") != PRODUCTION_APPROVAL:
-            raise AdapterError("production approval must use the fixed approved path")
-        if target != PRODUCTION_TARGET_ROOT:
-            raise AdapterError("production bundle target must use the fixed runtime path")
-        if output_path != PRODUCTION_INSTALL_RECEIPT:
-            raise AdapterError("production install receipt must use the fixed evidence path")
-        if require_absolute(args.systemd_root, name="systemd root") != PRODUCTION_SYSTEMD_ROOT:
-            raise AdapterError("production systemd root must use the fixed approved path")
-        _validate_systemd_contract(args.systemd_root)
-    bundle_root = ensure_existing_directory(bundle_root_arg, name="bundle root")
-    if target == bundle_root:
-        raise AdapterError("bundle target must differ from bundle root")
-    uid, gid = (default_owner() if test_seam else (1000, 1000))
-    target_mode = args.target_mode
-    if target_mode != 0o755 or target_mode & ~0o777:
-        raise AdapterError("bundle target mode must be exactly 0755")
-    manifest, members, manifest_hash = _load_manifest(bundle_root, manifest_path, release_sha)
-    if not test_seam and {item["path"] for item in members} != EXPECTED_RUNTIME_MEMBERS:
-        raise AdapterError("runtime bundle manifest does not match the closed inventory")
-    _validate_bundle_tree(bundle_root, manifest_path, members, exact_inventory=not test_seam)
+def _rollback_runtime(target: Path, state: tuple[bool, Path | None] | None) -> None:
+    if state is None:
+        return
+    target_existed, backup = state
+    parent = target.parent
+    try:
+        if not target_existed:
+            if os.path.lexists(target):
+                shutil.rmtree(target, ignore_errors=True)
+            _fsync_directory(parent)
+            return
+        if os.path.lexists(target):
+            failed = parent / f".{target.name}.failed-{os.getpid()}"
+            if os.path.lexists(failed):
+                shutil.rmtree(failed, ignore_errors=True)
+            os.replace(target, failed)
+            shutil.rmtree(failed, ignore_errors=True)
+        if backup is not None and os.path.lexists(backup):
+            os.replace(backup, target)
+            _fsync_directory(parent)
+    except OSError:
+        pass
 
-    if not test_seam:
-        if args.verify_command is not None and require_absolute(args.verify_command, name="verification command") != PRODUCTION_OPENSSL:
-            raise AdapterError("production verification command must use the fixed /usr/bin/openssl")
-        verifier = PRODUCTION_OPENSSL
-        image_digest = _bare_digest(args.image_digest)
-        compose_sha256 = require_hex(args.compose_sha256, name="rendered Compose SHA256", length=64)
-        compose_template_sha256 = require_hex(args.compose_template_sha256, name="Compose template SHA256", length=64)
-        state_root = "/var/lib/asrsub/state"
-        generation = args.generation
-        if generation is not None and generation <= 0:
-            raise AdapterError("approval generation must be positive")
-        approval = _read_approval(args.approval)
-        _validate_approval(
-            approval,
-            release_sha=release_sha,
-            manifest_hash=manifest_hash,
-            image_digest=image_digest,
-            compose_sha256=compose_sha256,
-            compose_template_sha256=compose_template_sha256,
-            state_root=state_root,
-            generation=generation,
-            production=True,
-        )
-        approval_signature = _require_fixed_path(args.approval_signature or DEFAULT_APPROVAL_SIGNATURE, DEFAULT_APPROVAL_SIGNATURE, name="approval signature")
-        approval_key = _require_fixed_path(args.approval_public_key or DEFAULT_APPROVAL_PUBLIC_KEY, DEFAULT_APPROVAL_PUBLIC_KEY, name="approval trust anchor")
-        bundle_signature = _require_fixed_path(args.bundle_signature or DEFAULT_BUNDLE_SIGNATURE, DEFAULT_BUNDLE_SIGNATURE, name="bundle signature")
-        bundle_key = _require_fixed_path(args.bundle_public_key or DEFAULT_BUNDLE_PUBLIC_KEY, DEFAULT_BUNDLE_PUBLIC_KEY, name="bundle trust anchor")
-        _verify_detached(verifier=verifier, signature=bundle_signature, public_key=bundle_key, data=manifest_path, label="bundle", test_seam=False)
-        _verify_detached(verifier=verifier, signature=approval_signature, public_key=approval_key, data=args.approval, label="approval", test_seam=False)
-        approval_receipt = {
-            "verified": True,
-            "schema": approval["schema"],
-            "generation": approval["generation"],
-            "release_sha": release_sha,
-            "bundle_sha256": manifest_hash,
-            "image_digest": image_digest,
-            "compose_sha256": compose_sha256,
-            "compose_template_sha256": compose_template_sha256,
-            "approved_docker_socket": "default",
-            "approved_state_root": state_root,
-            "signature_algorithm": "openssl-dgst-sha256",
-        }
-    else:
-        verifier = args.verify_command
-        if verifier is None:
-            raise AdapterError("test-seam mode requires --verify-command")
-        verifier = require_absolute(verifier, name="verification command")
-        ensure_no_symlink(verifier, name="verification command", allow_missing=False)
-        if not verifier.is_file() or not os.access(verifier, os.X_OK):
-            raise AdapterError("verification command must be an executable regular file")
-        # Fixture/test-seam approval remains intentionally non-production.
-        _read_approval(args.approval)
-        verification = run_argv(
-            [verifier, "--bundle-root", bundle_root, "--manifest", manifest_path, "--approval", args.approval, "--release-sha", release_sha],
-            cwd=bundle_root,
-            secret_values=environment_secret_values(),
-        )
-        approval_receipt = {"verified": False, "test_seam": True, "verification_returncode": verification["returncode"]}
 
-    target_identity = None
-    if not args.dry_run:
-        parent = ensure_parent_directory(target, name="bundle target")
-        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=parent))
-        try:
-            os.chmod(stage, target_mode)
-            os.chown(stage, uid, gid)
-            _stage_bundle(bundle_root, members, stage, uid=uid, gid=gid)
-            _commit_stage(stage, target, target_mode=target_mode, uid=uid, gid=gid, members=members)
-        except Exception:
-            shutil.rmtree(stage, ignore_errors=True)
-            raise
-        _validate_target(target, members, target_mode=target_mode, uid=uid, gid=gid)
-        target_identity = filesystem_identity(target, name="bundle target")
-
-    receipt = {
-        "schema": "runtime-bundle-install-dry-run-receipt-v1" if args.dry_run else "runtime-bundle-install-receipt-v1",
-        "release_sha": release_sha,
-        "manifest_sha256": manifest_hash,
-        "members": members,
-        "approval": approval_receipt,
-        "target_root": os.fspath(target),
-        "target_identity": target_identity,
-        "dry_run": bool(args.dry_run),
-        "evidence_eligible": False if args.dry_run or test_seam else True,
-    }
-    output = output_path
-    ensure_parent_directory(output, name="install receipt output")
-    atomic_write_json(output, receipt, mode=0o600, uid=uid, gid=gid, name="install receipt")
-    return 0
+def _finalize_runtime(state: tuple[bool, Path | None] | None, parent: Path) -> None:
+    if state is None:
+        return
+    _, backup = state
+    if backup is not None and os.path.lexists(backup):
+        shutil.rmtree(backup)
+        _fsync_directory(parent)
 
 
 def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
@@ -788,6 +742,14 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     manifest, members, manifest_hash = _load_manifest(bundle_root, manifest_path, release_sha)
     runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
     systemd_members = [item for item in members if item.get("install_root") == "systemd"]
+    if systemd_members:
+        ensure_directory_metadata(
+            systemd_root,
+            mode=0o755,
+            uid=systemd_uid,
+            gid=systemd_gid,
+            name="systemd root",
+        )
     if not test_seam:
         if {item["target"] for item in runtime_members} != EXPECTED_INSTALLED_RUNTIME_MEMBERS:
             raise AdapterError("runtime bundle manifest does not match the closed inventory")
@@ -863,39 +825,75 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         parent = ensure_parent_directory(target, name="bundle target")
         stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=parent))
         systemd_stage: Path | None = None
-        if systemd_members:
-            systemd_stage = Path(tempfile.mkdtemp(prefix=".asrsub-systemd-stage-", dir=systemd_root))
-            os.chmod(systemd_stage, 0o755)
-            os.chown(systemd_stage, systemd_uid, systemd_gid)
+        runtime_state: tuple[bool, Path | None] | None = None
+        systemd_installed: list[tuple[Path, Path | None]] = []
+        systemd_created_directories: list[Path] = []
         try:
             os.chmod(stage, target_mode)
             os.chown(stage, uid, gid)
             _stage_bundle(
                 bundle_root,
-                members,
+                runtime_members,
                 stage,
                 uid=uid,
                 gid=gid,
-                systemd_stage=systemd_stage,
+                systemd_stage=None,
                 systemd_uid=systemd_uid,
                 systemd_gid=systemd_gid,
             )
-            _commit_stage(stage, target, target_mode=target_mode, uid=uid, gid=gid, members=runtime_members)
+            if systemd_members:
+                systemd_stage = Path(tempfile.mkdtemp(prefix=".asrsub-systemd-stage-", dir=systemd_root))
+                os.chmod(systemd_stage, 0o755)
+                os.chown(systemd_stage, systemd_uid, systemd_gid)
+                _stage_bundle(
+                    bundle_root,
+                    systemd_members,
+                    stage,
+                    uid=uid,
+                    gid=gid,
+                    systemd_stage=systemd_stage,
+                    systemd_uid=systemd_uid,
+                    systemd_gid=systemd_gid,
+                )
+            runtime_state = _commit_stage(
+                stage,
+                target,
+                target_mode=target_mode,
+                uid=uid,
+                gid=gid,
+                members=runtime_members,
+            )
             if systemd_stage is not None:
-                _install_systemd_stage(systemd_stage, systemd_root, members, uid=systemd_uid, gid=systemd_gid)
-                systemd_stage = None
+                systemd_installed, systemd_created_directories = _install_systemd_stage(
+                    systemd_stage,
+                    systemd_root,
+                    members,
+                    uid=systemd_uid,
+                    gid=systemd_gid,
+                )
+            _validate_target(target, runtime_members, target_mode=target_mode, uid=uid, gid=gid)
+            if systemd_members:
+                _validate_installed_systemd(systemd_root, members, uid=systemd_uid, gid=systemd_gid)
+            target_identity = filesystem_identity(target, name="bundle target")
+            _finalize_systemd_install(systemd_installed)
+            systemd_installed = []
+            systemd_created_directories = []
+            _finalize_runtime(runtime_state, parent)
+            runtime_state = None
         except Exception:
+            _rollback_systemd_install(systemd_installed, systemd_created_directories)
+            _rollback_runtime(target, runtime_state)
             shutil.rmtree(stage, ignore_errors=True)
             if systemd_stage is not None:
                 shutil.rmtree(systemd_stage, ignore_errors=True)
             raise
-        _validate_target(target, runtime_members, target_mode=target_mode, uid=uid, gid=gid)
-        if systemd_members:
-            _validate_installed_systemd(systemd_root, members, uid=systemd_uid, gid=systemd_gid)
-        target_identity = filesystem_identity(target, name="bundle target")
+        shutil.rmtree(stage, ignore_errors=True)
+        if systemd_stage is not None:
+            shutil.rmtree(systemd_stage, ignore_errors=True)
 
     receipt = {
         "schema": "runtime-bundle-install-dry-run-receipt-v1" if args.dry_run else "runtime-bundle-install-receipt-v1",
+        "record_authority": "non-authoritative-install-record-v1",
         "release_sha": release_sha,
         "manifest_sha256": manifest_hash,
         "members": members,

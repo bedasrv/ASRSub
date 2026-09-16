@@ -12,14 +12,18 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from production_adapter_common import (
     AdapterError,
     canonical_json,
+    ensure_directory_metadata,
     ensure_no_symlink,
+    ensure_regular_file,
     environment_secret_values,
+    filesystem_identity,
     read_json,
     redact_text,
     production_command_environment,
@@ -54,6 +58,31 @@ APPROVAL_SIGNATURE = TRUST_ROOT / "approval.sig"
 APPROVAL_PUBLIC_KEY = TRUST_ROOT / "approval-key.pub"
 BUNDLE_SIGNATURE = TRUST_ROOT / "bundle-manifest.sig"
 BUNDLE_PUBLIC_KEY = TRUST_ROOT / "bundle-signing-key.pub"
+PRODUCTION_UID = 1000
+PRODUCTION_GID = 1000
+SYSTEMD_UID = 0
+SYSTEMD_GID = 0
+TRUST_UID = 0
+TRUST_GID = 0
+RUNTIME_ROOT_MODE = 0o755
+STATE_ROOT_MODE = 0o700
+DEPLOY_STATE_ROOT_MODE = 0o700
+EVIDENCE_ROOT_MODE = 0o700
+SYSTEMD_ROOT_MODE = 0o755
+SYSTEMD_DIRECTORY_MODE = 0o755
+TRUST_ROOT_MODE = 0o700
+TRUST_FILE_MODES = {
+    "approval.sig": 0o600,
+    "approval-key.pub": 0o644,
+    "bundle-manifest.sig": 0o600,
+    "bundle-signing-key.pub": 0o644,
+}
+INSTALL_RECEIPT_AUTHORITY = "non-authoritative-install-record-v1"
+HEALTH_PROBE = RUNTIME_ROOT / "asrsub-health-probe"
+HEALTH_EVIDENCE = EVIDENCE_ROOT / "health.json"
+HEALTH_PROBE_TIMEOUT = 10.0
+HEALTH_PROBE_ATTEMPTS = 6
+HEALTH_PROBE_DELAY = 1.0
 
 # The nine operational members are kept closed.  Adapter support and the
 # rendered Compose file are additional signed runtime members, not checkout
@@ -137,6 +166,80 @@ _REQUIRED_ARTIFACTS = (
 
 def _blocked(label: str) -> AdapterError:
     return AdapterError(f"production preflight blocked: missing or unsafe {label}")
+
+
+def _validate_host_metadata() -> None:
+    ensure_directory_metadata(
+        RUNTIME_ROOT,
+        mode=RUNTIME_ROOT_MODE,
+        uid=PRODUCTION_UID,
+        gid=PRODUCTION_GID,
+        name="runtime root metadata",
+    )
+    ensure_directory_metadata(
+        STATE_ROOT,
+        mode=STATE_ROOT_MODE,
+        uid=PRODUCTION_UID,
+        gid=PRODUCTION_GID,
+        name="state root metadata",
+    )
+    ensure_directory_metadata(
+        DEPLOY_STATE_ROOT,
+        mode=DEPLOY_STATE_ROOT_MODE,
+        uid=PRODUCTION_UID,
+        gid=PRODUCTION_GID,
+        name="deployment state metadata",
+    )
+    ensure_directory_metadata(
+        EVIDENCE_ROOT,
+        mode=EVIDENCE_ROOT_MODE,
+        uid=PRODUCTION_UID,
+        gid=PRODUCTION_GID,
+        name="deployment evidence metadata",
+    )
+    ensure_directory_metadata(
+        SYSTEMD_ROOT,
+        mode=SYSTEMD_ROOT_MODE,
+        uid=SYSTEMD_UID,
+        gid=SYSTEMD_GID,
+        name="systemd root metadata",
+    )
+    ensure_directory_metadata(
+        TRUST_ROOT,
+        mode=TRUST_ROOT_MODE,
+        uid=TRUST_UID,
+        gid=TRUST_GID,
+        name="trust directory metadata",
+    )
+    ensure_regular_file(DOCKER, mode=0o755, uid=0, gid=0, name="Docker executable metadata")
+    ensure_regular_file(OPENSSL, mode=0o755, uid=0, gid=0, name="OpenSSL executable metadata")
+    protected_files = {
+        APPROVAL: 0o600,
+        BUNDLE_MANIFEST: 0o600,
+        APPROVED_IMAGE: 0o600,
+        INSTALL_RECEIPT: 0o600,
+    }
+    for path, mode in protected_files.items():
+        ensure_regular_file(path, mode=mode, uid=PRODUCTION_UID, gid=PRODUCTION_GID, name=f"{path.name} metadata")
+    trust_names = {entry.name for entry in TRUST_ROOT.iterdir()}
+    if trust_names != set(TRUST_FILE_MODES):
+        raise AdapterError("trust directory inventory is not closed")
+    for name, mode in TRUST_FILE_MODES.items():
+        ensure_regular_file(
+            TRUST_ROOT / name,
+            mode=mode,
+            uid=TRUST_UID,
+            gid=TRUST_GID,
+            name=f"trust artifact {name} metadata",
+        )
+    dropin = SYSTEMD_ROOT / "docker.service.d"
+    ensure_directory_metadata(
+        dropin,
+        mode=SYSTEMD_DIRECTORY_MODE,
+        uid=SYSTEMD_UID,
+        gid=SYSTEMD_GID,
+        name="systemd drop-in directory metadata",
+    )
 
 
 def _require_artifact(label: str, path: Path, directory: bool) -> None:
@@ -255,6 +358,8 @@ def _approved_transaction(manifest_hash: str, compose_sha256: str) -> dict[str, 
         raise _blocked("authenticated approval schema")
     if not isinstance(image, dict) or image.get("schema") != "approved-image-v1":
         raise _blocked("approved image schema")
+    if image.get("fixture_only") is True:
+        raise _blocked("fixture approved image")
     release_sha = approval.get("release_sha")
     if not isinstance(release_sha, str):
         raise _blocked("approval release binding")
@@ -282,13 +387,20 @@ def _approved_transaction(manifest_hash: str, compose_sha256: str) -> dict[str, 
 
 
 def _validate_installed_members(normalized: list[dict[str, Any]], receipt: dict[str, Any]) -> None:
-    if receipt.get("schema") != "runtime-bundle-install-receipt-v1" or receipt.get("dry_run") is not False or receipt.get("evidence_eligible") is not True:
+    if not isinstance(receipt, dict):
         raise _blocked("production install receipt")
-    receipt_approval = receipt.get("approval")
-    if not isinstance(receipt_approval, dict) or receipt_approval.get("verified") is not True:
-        raise _blocked("authenticated install receipt approval")
-    if receipt.get("target_root") != os.fspath(RUNTIME_ROOT) or receipt.get("systemd_root") != os.fspath(SYSTEMD_ROOT) or receipt.get("release_sha") != receipt_approval.get("release_sha"):
+    if (
+        receipt.get("schema") != "runtime-bundle-install-receipt-v1"
+        or receipt.get("dry_run") is not False
+        or receipt.get("evidence_eligible") is not True
+        or receipt.get("record_authority") != INSTALL_RECEIPT_AUTHORITY
+    ):
+        raise _blocked("production install receipt")
+    if receipt.get("target_root") != os.fspath(RUNTIME_ROOT) or receipt.get("systemd_root") != os.fspath(SYSTEMD_ROOT):
         raise _blocked("install receipt target binding")
+    receipt_approval = receipt.get("approval")
+    if receipt_approval is not None and not isinstance(receipt_approval, dict):
+        raise _blocked("install receipt record")
     receipt_members = receipt.get("members")
     if not isinstance(receipt_members, list):
         raise _blocked("install receipt members")
@@ -311,6 +423,14 @@ def _validate_installed_members(normalized: list[dict[str, Any]], receipt: dict[
     if len(observed_receipt) != len(receipt_members) or observed_receipt != expected:
         raise _blocked("install receipt manifest binding")
 
+    try:
+        current_identity = filesystem_identity(RUNTIME_ROOT, name="installed runtime root")
+    except AdapterError as exc:
+        raise _blocked("installed runtime root identity") from exc
+    receipt_identity = receipt.get("target_identity")
+    if not isinstance(receipt_identity, dict) or receipt_identity != current_identity:
+        raise _blocked("install receipt target identity")
+
     runtime_expected = {item["target"] for item in normalized if item["install_root"] == "runtime"}
     runtime_actual: set[str] = set()
     runtime_directories: set[str] = set()
@@ -332,15 +452,24 @@ def _validate_installed_members(normalized: list[dict[str, Any]], receipt: dict[
     for item in normalized:
         if item["install_root"] == "runtime":
             target = RUNTIME_ROOT / item["target"]
+            owner = (PRODUCTION_UID, PRODUCTION_GID)
         else:
             target = SYSTEMD_ROOT / item["target"]
-        _require_artifact(f"installed {item['path']}", target, False)
-        try:
-            mode = stat.S_IMODE(os.lstat(target).st_mode)
-        except OSError as exc:
-            raise _blocked(f"installed {item['path']} metadata") from exc
-        if mode != item["mode"]:
-            raise _blocked(f"installed {item['path']} mode")
+            owner = (SYSTEMD_UID, SYSTEMD_GID)
+            ensure_directory_metadata(
+                target.parent,
+                mode=SYSTEMD_DIRECTORY_MODE,
+                uid=SYSTEMD_UID,
+                gid=SYSTEMD_GID,
+                name=f"installed systemd directory for {item['path']}",
+            )
+        ensure_regular_file(
+            target,
+            mode=item["mode"],
+            uid=owner[0],
+            gid=owner[1],
+            name=f"installed {item['path']}",
+        )
         if sha256_file(target, name=f"installed {item['path']}") != item["sha256"]:
             raise _blocked(f"installed {item['path']} hash")
 
@@ -348,6 +477,7 @@ def _validate_installed_members(normalized: list[dict[str, Any]], receipt: dict[
 def preflight() -> dict[str, Any]:
     for label, path, directory in _REQUIRED_ARTIFACTS:
         _require_artifact(label, path, directory)
+    _validate_host_metadata()
     manifest, members, manifest_hash = _read_manifest()
     compose_sha256 = sha256_file(COMPOSE_FILE, name="rendered Compose")
     if manifest.get("compose_sha256") not in (None, compose_sha256):
@@ -356,21 +486,75 @@ def preflight() -> dict[str, Any]:
     _verify_detached(signature=APPROVAL_SIGNATURE, public_key=APPROVAL_PUBLIC_KEY, data=APPROVAL, label="approval")
     approved = _approved_transaction(manifest_hash, compose_sha256)
     receipt = read_json(INSTALL_RECEIPT, name="install receipt")
-    if not isinstance(receipt, dict) or receipt.get("release_sha") != approved["release_sha"] or receipt.get("manifest_sha256") != manifest_hash:
-        raise _blocked("install receipt identity")
-    receipt_approval = receipt.get("approval")
-    if not isinstance(receipt_approval, dict) or any(
-        receipt_approval.get(key) != expected
-        for key, expected in (
-            ("release_sha", approved["release_sha"]),
-            ("bundle_sha256", manifest_hash),
-            ("image_digest", approved["image_digest"].rsplit(":", 1)[-1]),
-            ("compose_sha256", approved["compose_sha256"]),
-        )
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("release_sha") != approved["release_sha"]
+        or receipt.get("manifest_sha256") != manifest_hash
     ):
-        raise _blocked("install receipt approval binding")
+        raise _blocked("install receipt identity")
     _validate_installed_members(members, receipt)
     return approved
+
+
+def _wait_for_ready(
+    *,
+    probe: Path = HEALTH_PROBE,
+    output: Path = HEALTH_EVIDENCE,
+    runner=run_argv,
+    sleep=time.sleep,
+    attempts: int = HEALTH_PROBE_ATTEMPTS,
+    delay: float = HEALTH_PROBE_DELAY,
+) -> dict[str, Any]:
+    if attempts <= 0 or attempts > 12 or delay < 0:
+        raise AdapterError("health readiness bounds are invalid")
+    production_runner = runner is run_argv
+    if production_runner:
+        if probe != HEALTH_PROBE or output != HEALTH_EVIDENCE:
+            raise _blocked("health probe path")
+        ensure_regular_file(probe, mode=0o755, uid=PRODUCTION_UID, gid=PRODUCTION_GID, name="installed health probe")
+        cwd = RUNTIME_ROOT
+        env = production_command_environment()
+    else:
+        cwd = None
+        env = None
+    last_error: AdapterError | None = None
+    for index in range(attempts):
+        ensure_no_symlink(output, name="health evidence", allow_missing=True)
+        if output.exists():
+            try:
+                output.unlink()
+            except OSError as exc:
+                raise _blocked("stale health evidence") from exc
+        try:
+            runner(
+                [probe, "--output", output],
+                cwd=cwd,
+                timeout=HEALTH_PROBE_TIMEOUT,
+                secret_values=environment_secret_values(),
+                env=env,
+            )
+        except AdapterError as exc:
+            last_error = exc
+        try:
+            value = read_json(output, name="health evidence")
+        except AdapterError as exc:
+            last_error = exc
+            value = None
+        if (
+            isinstance(value, dict)
+            and value.get("schema") == "health-evidence-v1"
+            and value.get("endpoint") == "/ready"
+            and value.get("status") == 200
+            and value.get("returncode") == 0
+            and value.get("ready") is True
+        ):
+            return {"schema": value["schema"], "endpoint": "/ready", "status": 200, "returncode": 0, "ready": True}
+        if index + 1 < attempts:
+            sleep(delay)
+    detail = "readiness probe did not observe /ready"
+    if last_error is not None:
+        detail = f"{detail}: {redact_text(str(last_error))}"
+    raise AdapterError(detail)
 
 
 def reconcile() -> int:
@@ -420,6 +604,7 @@ def reconcile() -> int:
         pull_evidence=PULL_EVIDENCE,
         release_sha=approved["release_sha"],
     )
+    _wait_for_ready()
     return 0
 
 
