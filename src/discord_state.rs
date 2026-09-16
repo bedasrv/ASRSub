@@ -219,7 +219,7 @@ mod tests {
         l.enqueue(newer, clock()).unwrap();
         l.acknowledge(reserved.reservation_id(), reserved.payload_sha256())
             .unwrap();
-        assert!(l.inspect_due(clock()).unwrap().into_view().is_some());
+        assert!(l.inspect_due(due_clock()).unwrap().into_view().is_some());
     }
     #[test]
     fn ack_recomputes_overflow_after_post_reservation_enqueue() {
@@ -312,9 +312,13 @@ mod tests {
         let reports = (0..128).map(report).collect::<Vec<_>>();
         let (bounded, _) = BoundedReports::from_reports(reports).unwrap();
         l.enqueue(bounded, clock()).unwrap();
-        let (one, _) = BoundedReports::from_reports([report(129)]).unwrap();
+        for id in 129..145 {
+            let (one, _) = BoundedReports::from_reports([report(id)]).unwrap();
+            assert!(l.enqueue(one, clock()).is_ok());
+        }
+        let (overflow, _) = BoundedReports::from_reports([report(145)]).unwrap();
         assert_eq!(
-            l.enqueue(one, clock()).unwrap_err(),
+            l.enqueue(overflow, clock()).unwrap_err(),
             NotificationStateError::Capacity
         );
     }

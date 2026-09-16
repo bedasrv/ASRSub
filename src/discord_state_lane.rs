@@ -2,7 +2,8 @@
     dead_code,
     clippy::chunks_exact_to_as_chunks,
     clippy::manual_is_multiple_of,
-    clippy::suspicious_open_options
+    clippy::suspicious_open_options,
+    clippy::type_complexity
 )]
 //! The sole serialized notification-state operation lane.
 
