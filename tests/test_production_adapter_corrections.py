@@ -62,6 +62,7 @@ class ProductionCorrectionTest(unittest.TestCase):
             json.dumps(
                 {
                     "schema": "approval-v1",
+                    "signing_mode": "production",
                     "release_sha": SHA,
                     "image_digest": "a" * 64,
                     "approved_docker_socket": "default",
@@ -120,13 +121,13 @@ class ProductionCorrectionTest(unittest.TestCase):
                     "mode": f"{mode:04o}",
                 }
             )
-        manifest = {"schema": "runtime-bundle-manifest-v1", "release_sha": SHA, "members": members}
+        manifest = {"schema": "runtime-bundle-manifest-v1", "signing_mode": "test-seam", "release_sha": SHA, "members": members}
         manifest_path = bundle / "manifest.json"
         manifest_path.write_bytes(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
         approval = self.root / "approval.json"
-        approval.write_text('{"schema":"approval-v1"}\n', encoding="utf-8")
+        approval.write_text('{"schema":"approval-v1","signing_mode":"test-seam"}\n', encoding="utf-8")
         verifier = self.root / "verifier"
         verifier.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         verifier.chmod(0o755)
@@ -448,6 +449,7 @@ class ProductionCorrectionTest(unittest.TestCase):
         self.assertTrue((bundle / "compose.yaml").is_file())
         manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
         self.assertEqual(manifest_value["schema"], "runtime-bundle-manifest-v1")
+        self.assertEqual(manifest_value["signing_mode"], "test-seam")
         self.assertEqual(
             {item["path"] for item in manifest_value["members"]},
             set(self.installer.EXPECTED_INSTALLED_RUNTIME_MEMBERS) | set(self.installer.EXPECTED_SYSTEMD_MEMBERS),
@@ -463,6 +465,7 @@ class ProductionCorrectionTest(unittest.TestCase):
             json.dumps(
                 {
                     "schema": "approval-v1",
+                    "signing_mode": "test-seam",
                     "generation": 1,
                     "release_sha": SHA,
                     "bundle_sha256": "b" * 64,
@@ -505,6 +508,7 @@ class ProductionCorrectionTest(unittest.TestCase):
         finally:
             os.close(key_fd)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(approval_out.read_text(encoding="utf-8"))["signing_mode"], "test-seam")
         verify = subprocess.run(
             ["/usr/bin/openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(approval_sig), str(approval_out)],
             capture_output=True,

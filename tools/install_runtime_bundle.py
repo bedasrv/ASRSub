@@ -144,12 +144,20 @@ def _parse_mode_value(value: Any) -> int:
     return mode
 
 
-def _load_manifest(bundle_root: Path, manifest_path: Path, release_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
+def _load_manifest(
+    bundle_root: Path,
+    manifest_path: Path,
+    release_sha: str,
+    *,
+    expected_signing_mode: str = "production",
+) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     manifest_path = require_absolute(manifest_path, name="bundle manifest")
     ensure_no_symlink(manifest_path, name="bundle manifest", allow_missing=False)
     manifest = read_json(manifest_path, name="bundle manifest")
     if not isinstance(manifest, dict) or manifest.get("schema") not in _ALLOWED_MANIFEST_SCHEMAS:
         raise AdapterError("bundle manifest has an unsupported schema")
+    if manifest.get("signing_mode") != expected_signing_mode:
+        raise AdapterError(f"bundle manifest signing mode must be {expected_signing_mode}")
     if manifest.get("release_sha") != release_sha:
         raise AdapterError("bundle manifest release SHA does not match the caller")
     members = manifest.get("members")
@@ -314,10 +322,12 @@ def _validate_installed_systemd(root: Path, members: list[dict[str, Any]], *, ui
             raise AdapterError(f"installed systemd member hash mismatch: {relative}")
 
 
-def _read_approval(path: Path) -> dict[str, Any]:
+def _read_approval(path: Path, *, expected_signing_mode: str = "production") -> dict[str, Any]:
     value = read_json(require_absolute(path, name="authenticated approval"), name="authenticated approval")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
         raise AdapterError("authenticated approval has an unsupported schema")
+    if value.get("signing_mode") != expected_signing_mode:
+        raise AdapterError(f"authenticated approval signing mode must be {expected_signing_mode}")
     return value
 
 
@@ -339,6 +349,9 @@ def _validate_approval(
     generation: int | None,
     production: bool,
 ) -> None:
+    expected_signing_mode = "production" if production else "test-seam"
+    if approval.get("signing_mode") != expected_signing_mode:
+        raise AdapterError(f"authenticated approval signing mode must be {expected_signing_mode}")
     if approval.get("release_sha") != release_sha:
         raise AdapterError("authenticated approval release SHA does not match the caller")
     if approval.get("bundle_sha256") != manifest_hash:
@@ -363,6 +376,7 @@ def _validate_approval(
     if production and set(approval).difference(
         {
             "schema",
+            "signing_mode",
             "generation",
             "release_sha",
             "bundle_sha256",
@@ -739,7 +753,12 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     target_mode = args.target_mode
     if target_mode != 0o755 or target_mode & ~0o777:
         raise AdapterError("bundle target mode must be exactly 0755")
-    manifest, members, manifest_hash = _load_manifest(bundle_root, manifest_path, release_sha)
+    manifest, members, manifest_hash = _load_manifest(
+        bundle_root,
+        manifest_path,
+        release_sha,
+        expected_signing_mode="test-seam" if test_seam else "production",
+    )
     runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
     systemd_members = [item for item in members if item.get("install_root") == "systemd"]
     if systemd_members:
@@ -772,7 +791,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         generation = args.generation
         if generation is not None and generation <= 0:
             raise AdapterError("approval generation must be positive")
-        approval = _read_approval(args.approval)
+        approval = _read_approval(args.approval, expected_signing_mode="production")
         _validate_approval(
             approval,
             release_sha=release_sha,
@@ -812,7 +831,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         if not verifier.is_file() or not os.access(verifier, os.X_OK):
             raise AdapterError("verification command must be an executable regular file")
         # Fixture/test-seam approval remains intentionally non-production.
-        _read_approval(args.approval)
+        _read_approval(args.approval, expected_signing_mode="test-seam")
         verification = run_argv(
             [verifier, "--bundle-root", bundle_root, "--manifest", manifest_path, "--approval", args.approval, "--release-sha", release_sha],
             cwd=bundle_root,

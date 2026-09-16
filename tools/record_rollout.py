@@ -302,10 +302,18 @@ def _docker_evidence(path: Path, *, release_sha: str, image_digest: str, product
     return summary
 
 
-def _manifest_value(path: Path, *, expected_hash: str, release_sha: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _manifest_value(
+    path: Path,
+    *,
+    expected_hash: str,
+    release_sha: str,
+    signing_mode: str = "production",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     value = read_json(require_absolute(path, name="bundle manifest"), name="bundle manifest")
     if not isinstance(value, dict) or value.get("schema") not in {"runtime-bundle-manifest-v1", "bundle-manifest-v1"}:
         raise AdapterError("bundle manifest schema is invalid")
+    if value.get("signing_mode") != signing_mode:
+        raise AdapterError(f"bundle manifest signing mode is not {signing_mode}")
     if value.get("release_sha") != release_sha:
         raise AdapterError("bundle manifest release SHA does not match")
     if hashlib.sha256(canonical_json(value)).hexdigest() != expected_hash:
@@ -415,7 +423,12 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             raise AdapterError("installed runtime member ownership is not approved")
     signed_runtime_members = runtime_members
     if production and args.bundle_manifest is not None:
-        _, signed_manifest_members = _manifest_value(args.bundle_manifest, expected_hash=expected_hash, release_sha=release_sha)
+        _, signed_manifest_members = _manifest_value(
+            args.bundle_manifest,
+            expected_hash=expected_hash,
+            release_sha=release_sha,
+            signing_mode="production",
+        )
         signed_runtime_members = [item for item in signed_manifest_members if item.get("install_root", "runtime") == "runtime"]
     expected_by_path = {item.get("target", item.get("path")): item for item in signed_runtime_members}
     for entry in tree["entries"]:
@@ -430,7 +443,12 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
         if expected.get("sha256") != entry["sha256"] or expected_mode != entry["mode"]:
             raise AdapterError(f"installed runtime member is not bound to the receipt: {entry['path']}")
     if args.bundle_manifest is not None:
-        _, manifest_members = _manifest_value(args.bundle_manifest, expected_hash=expected_hash, release_sha=release_sha)
+        _, manifest_members = _manifest_value(
+            args.bundle_manifest,
+            expected_hash=expected_hash,
+            release_sha=release_sha,
+            signing_mode="production" if production else "test-seam",
+        )
 
         def member_key(item: dict[str, Any]) -> tuple[str, str, int, str]:
             mode = item.get("mode")
@@ -721,6 +739,8 @@ def _approval_evidence(path: Path, *, release_sha: str, image_digest: str, bundl
     value = read_json(require_absolute(path, name="rollout approval"), name="rollout approval")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
         raise AdapterError("rollout approval has an unsupported schema")
+    if value.get("signing_mode") != "production":
+        raise AdapterError("rollout approval signing mode is not production")
     if value.get("release_sha") != release_sha or value.get("bundle_sha256") != bundle_sha:
         raise AdapterError("rollout approval release or bundle binding does not match")
     if value.get("image_digest") != image_digest.rsplit(":", 1)[-1]:
@@ -730,7 +750,7 @@ def _approval_evidence(path: Path, *, release_sha: str, image_digest: str, bundl
     generation = value.get("generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation <= 0:
         raise AdapterError("rollout approval generation is invalid")
-    return {"schema": "approval-v1", "generation": value.get("generation"), "release_sha": release_sha, "bundle_sha256": bundle_sha, "image_ref": image_digest, "image_digest": image_digest.rsplit(":", 1)[-1], "approved_docker_socket": "default", "approved_state_root": os.fspath(PRODUCTION_STATE_ROOT)}
+    return {"schema": "approval-v1", "signing_mode": "production", "generation": value.get("generation"), "release_sha": release_sha, "bundle_sha256": bundle_sha, "image_ref": image_digest, "image_digest": image_digest.rsplit(":", 1)[-1], "approved_docker_socket": "default", "approved_state_root": os.fspath(PRODUCTION_STATE_ROOT)}
 
 
 def _trust_evidence() -> dict[str, Any]:

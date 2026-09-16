@@ -304,6 +304,8 @@ def _read_manifest() -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     manifest = read_json(BUNDLE_MANIFEST, name="bundle manifest")
     if not isinstance(manifest, dict) or manifest.get("schema") not in {"runtime-bundle-manifest-v1", "bundle-manifest-v1"}:
         raise _blocked("bundle manifest schema")
+    if manifest.get("signing_mode") != "production":
+        raise _blocked("bundle manifest signing mode")
     members = manifest.get("members")
     if not isinstance(members, list) or not members:
         raise _blocked("bundle manifest members")
@@ -356,6 +358,8 @@ def _approved_transaction(manifest_hash: str, compose_sha256: str) -> dict[str, 
     image = read_json(APPROVED_IMAGE, name="approved image")
     if not isinstance(approval, dict) or approval.get("schema") != "approval-v1":
         raise _blocked("authenticated approval schema")
+    if approval.get("signing_mode") != "production":
+        raise _blocked("authenticated approval signing mode")
     if not isinstance(image, dict) or image.get("schema") != "approved-image-v1":
         raise _blocked("approved image schema")
     if image.get("fixture_only") is True:

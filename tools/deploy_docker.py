@@ -233,6 +233,8 @@ def _read_approval_binding(*, digest: str, release_sha: str, compose_sha256: str
     value = read_json(APPROVAL_PATH, name="approved deployment transaction")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
         raise AdapterError("approved deployment transaction has an unsupported schema")
+    if value.get("signing_mode") != "production":
+        raise AdapterError("approved deployment transaction signing mode is not production")
     if value.get("release_sha") != release_sha or value.get("image_digest") != digest.rsplit(":", 1)[-1]:
         raise AdapterError("approved deployment transaction does not bind the requested image")
     if compose_sha256 is not None and value.get("compose_sha256") != compose_sha256:

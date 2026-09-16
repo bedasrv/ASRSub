@@ -77,6 +77,7 @@ print(json.dumps({
         }
         manifest = {
             "schema": "runtime-bundle-manifest-v1",
+            "signing_mode": "test-seam",
             "release_sha": SHA,
             "members": [member],
         }
@@ -84,7 +85,7 @@ print(json.dumps({
         manifest_path.write_bytes(canonical(manifest) + b"\n")
         approval = self.root / "approval.json"
         approval.write_text(
-            json.dumps({"schema": "approval-v1", "release_sha": SHA}), encoding="utf-8"
+            json.dumps({"schema": "approval-v1", "signing_mode": "test-seam", "release_sha": SHA}), encoding="utf-8"
         )
         verifier = self.write_executable(
             "verify.py",
@@ -683,11 +684,11 @@ class TestProductionBundleInstall(AdapterTestCase):
                     "mode": f"{mode:04o}",
                 }
             )
-        manifest = {"schema": "runtime-bundle-manifest-v1", "release_sha": SHA, "members": manifest_members}
+        manifest = {"schema": "runtime-bundle-manifest-v1", "signing_mode": "test-seam", "release_sha": SHA, "members": manifest_members}
         manifest_path = bundle / "manifest.json"
         manifest_path.write_bytes(canonical(manifest) + b"\n")
         approval = self.root / "approval.json"
-        approval.write_text('{"schema":"approval-v1"}\n', encoding="utf-8")
+        approval.write_text('{"schema":"approval-v1","signing_mode":"test-seam"}\n', encoding="utf-8")
         verifier = self.write_executable("systemd-verifier.py", "#!/usr/bin/env python3\nprint('fixture verifier')\n")
         target = self.root / "installed"
         systemd = self.root / "systemd"

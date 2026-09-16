@@ -1,10 +1,13 @@
 {
   "schema": "signer-argv-policy-v2",
   "version": 2,
+  "working_directory": "repository-root",
+  "cwd": ".",
   "bundle": {
     "launcher": "tools/asrsub-env",
     "target_fd": 3,
     "command": [
+      "/usr/bin/python3",
       "tools/asrsub-env",
       "--pass-fd",
       "3",
@@ -30,6 +33,7 @@
     "launcher": "tools/asrsub-env",
     "target_fd": 4,
     "command": [
+      "/usr/bin/python3",
       "tools/asrsub-env",
       "--pass-fd",
       "4",
@@ -42,6 +46,7 @@
       "release/approval.json",
       "--approval-signature",
       "release/approval.sig",
+      "--release-sha-from-git",
       "--approval-key-fd",
       "4"
     ]

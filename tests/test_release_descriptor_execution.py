@@ -119,9 +119,36 @@ class TestEnvironmentWrapper(unittest.TestCase):
             cwd=REPO, env=env, capture_output=True, text=True, check=True,
         )
         lines = result.stdout.splitlines()
-        self.assertTrue(lines[0].startswith("/tmp/agent-scratch/asrsub-implementation/target"))
+        self.assertRegex(lines[0], r"^/tmp/agent-scratch/asrsub-env-[^/]+/target")
         self.assertEqual(lines[1], "")
         self.assertNotIn("fixture-value", result.stderr)
+
+    def test_each_invocation_has_private_nonshared_target_and_cache(self):
+        values = []
+        for _ in range(2):
+            result = subprocess.run(
+                [
+                    str(REPO / "tools/asrsub-env"),
+                    "/usr/bin/python3",
+                    "-c",
+                    "import os; print(os.environ['CARGO_TARGET_DIR']); print(os.environ['CARGO_HOME'])",
+                ],
+                cwd=REPO,
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            target, cargo_home = result.stdout.splitlines()
+            values.append((Path(target), Path(cargo_home)))
+        self.assertNotEqual(values[0][0], values[1][0])
+        self.assertNotEqual(values[0][1], values[1][1])
+        for target, cargo_home in values:
+            self.assertFalse(target.exists())
+            self.assertFalse(cargo_home.exists())
+
+    def test_signer_wrapper_pins_its_interpreter(self):
+        self.assertTrue((REPO / "tools/asrsub-env").read_text(encoding="utf-8").startswith("#!/usr/bin/python3\n"))
 
     def test_wrapper_is_executable(self):
         self.assertTrue(os.access(REPO / "tools/asrsub-env", os.X_OK))

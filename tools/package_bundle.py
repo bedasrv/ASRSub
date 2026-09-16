@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Build and sign a closed ASRSub runtime bundle.
 
 Fixture mode only emits the disposable approved-image projection.  Production
@@ -70,17 +70,18 @@ def canonical(value: Any) -> bytes:
 
 
 def absolute(path: Path, *, name: str) -> Path:
+    path = Path(os.fspath(path))
     if any(part == ".." for part in path.parts):
         raise ValueError(f"{name} must not contain path traversal")
     if path.is_absolute():
         return path
-    root = Path.cwd().resolve()
+    root = Path.cwd()
     try:
-        resolved = (root / path).resolve(strict=False)
-        resolved.relative_to(root)
+        candidate = root / path
+        candidate.relative_to(root)
     except (OSError, ValueError) as exc:
         raise ValueError(f"{name} must stay within the current working directory") from exc
-    return resolved
+    return candidate
 
 
 def release_sha(value: str) -> str:
@@ -119,6 +120,40 @@ def release_sha_from_git(cwd: Path | None = None) -> str:
         raise ValueError("git HEAD is not a full lowercase 40-character SHA") from exc
 
 
+def _git_repository_root(cwd: Path | None = None) -> Path:
+    workdir = Path.cwd() if cwd is None else cwd
+    try:
+        completed = subprocess.run(
+            [os.fspath(GIT), "rev-parse", "--show-toplevel"],
+            cwd=workdir,
+            capture_output=True,
+            check=False,
+            shell=False,
+            text=True,
+            env={
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "LANG": "C",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError("production signer must run from the repository root") from exc
+    raw = completed.stdout
+    if completed.returncode != 0 or raw.count("\n") != 1 or not raw.endswith("\n"):
+        raise ValueError("production signer must run from the repository root")
+    try:
+        repository = Path(raw[:-1]).resolve(strict=True)
+        current = workdir.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("production signer must run from the repository root") from exc
+    if current != repository:
+        raise ValueError("production signer must run from the repository root")
+    return repository
+
+
 def _regular(path: Path, *, name: str, mode: int | None = None) -> None:
     try:
         st = os.lstat(path)
@@ -130,52 +165,174 @@ def _regular(path: Path, *, name: str, mode: int | None = None) -> None:
         raise ValueError(f"{name} mode must be {mode:04o}")
 
 
-def _tree(root: Path, expected: set[str], *, name: str) -> None:
-    actual: set[str] = set()
-    for current, directories, files in os.walk(root, followlinks=False):
-        current_path = Path(current)
-        for directory in directories:
-            path = current_path / directory
-            if path.is_symlink() or not path.is_dir():
-                raise ValueError(f"{name} contains an unsafe directory")
-        for filename in files:
-            path = current_path / filename
-            relative = path.relative_to(root).as_posix()
-            _regular(path, name=f"{name} member {relative}")
-            actual.add(relative)
-    if actual != expected:
-        raise ValueError(f"{name} inventory mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _check_directory_fd(fd: int, *, name: str) -> None:
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        raise ValueError(f"cannot inspect {name}") from exc
+    if not stat.S_ISDIR(st.st_mode):
+        raise ValueError(f"{name} contains a non-directory path component")
+    mode = stat.S_IMODE(st.st_mode)
+    if (mode & 0o002 and not mode & stat.S_ISVTX) or st.st_mode & (stat.S_ISUID | stat.S_ISGID):
+        raise ValueError(f"{name} has an unsafe directory mode")
+
+
+def _open_directory(path: Path, *, name: str) -> int:
+    """Open every directory component without following a replacement link."""
+    path = absolute(path, name=name)
+    try:
+        current = os.open(os.path.sep, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError(f"cannot open {name}") from exc
+    try:
+        for part in path.parts:
+            if part == path.anchor:
+                continue
+            try:
+                child = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=current)
+            except OSError as exc:
+                raise ValueError(f"cannot open {name} path component") from exc
+            try:
+                _check_directory_fd(child, name=name)
+            except Exception:
+                os.close(child)
+                raise
+            os.close(current)
+            current = child
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _capture_regular_fd(fd: int, *, name: str, mode: int) -> bytes:
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        raise ValueError(f"cannot inspect {name}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{name} is not a regular file")
+    if stat.S_IMODE(st.st_mode) != mode:
+        raise ValueError(f"{name} mode must be {mode:04o}")
+    data = bytearray()
+    try:
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(fd)
+    except OSError as exc:
+        raise ValueError(f"cannot capture {name}") from exc
+    if after.st_dev != st.st_dev or after.st_ino != st.st_ino or after.st_size != len(data):
+        raise ValueError(f"{name} changed while it was captured")
+    return bytes(data)
+
+
+def _capture_tree(root: Path, expected: set[str], modes: dict[str, int], *, name: str) -> dict[str, bytes]:
+    """Capture the entire fixed input tree through directory-relative FDs."""
+    root_fd = _open_directory(root, name=name)
+    captured: dict[str, bytes] = {}
+    directories: set[str] = set()
+
+    def visit(directory_fd: int, prefix: str = "") -> None:
+        try:
+            entries = list(os.scandir(directory_fd))
+        except OSError as exc:
+            raise ValueError(f"cannot enumerate {name}") from exc
+        for entry in entries:
+            relative = f"{prefix}/{entry.name}" if prefix else entry.name
+            try:
+                if entry.is_symlink():
+                    raise ValueError(f"{name} contains an unsafe directory or file")
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=directory_fd)
+                    try:
+                        _check_directory_fd(child, name=name)
+                        directories.add(relative)
+                        visit(child, relative)
+                    finally:
+                        os.close(child)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise ValueError(f"{name} contains an unsupported entry")
+                if relative not in expected:
+                    raise ValueError(f"{name} inventory mismatch: unexpected={relative}")
+                mode = modes[relative]
+                file_fd = os.open(entry.name, os.O_RDONLY | O_NOFOLLOW, dir_fd=directory_fd)
+                try:
+                    captured[relative] = _capture_regular_fd(file_fd, name=f"{name} member {relative}", mode=mode)
+                finally:
+                    os.close(file_fd)
+            except OSError as exc:
+                raise ValueError(f"cannot capture {name} member {relative}") from exc
+
+    try:
+        visit(root_fd)
+    finally:
+        os.close(root_fd)
+    expected_directories = {
+        "/".join(parts[:index])
+        for value in expected
+        for parts in [value.split("/")]
+        for index in range(1, len(parts))
+    }
+    if set(captured) != expected or directories != expected_directories:
+        raise ValueError(
+            f"{name} inventory mismatch: missing={sorted(expected - set(captured))}, "
+            f"extra={sorted(set(captured) - expected)}, "
+            f"unexpected_directories={sorted(directories - expected_directories)}"
+        )
+    return captured
 
 
 def _manifest(runtime_source: Path, systemd_source: Path, release: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    _tree(runtime_source, set(RUNTIME_MEMBERS), name="runtime release input")
-    _tree(systemd_source, {path.removeprefix("systemd/") for path in SYSTEMD_MEMBERS}, name="systemd release input")
+    captured = {
+        "runtime": _capture_tree(runtime_source, set(RUNTIME_MEMBERS), MEMBER_MODES, name="runtime release input"),
+        "systemd": _capture_tree(
+            systemd_source,
+            {path.removeprefix("systemd/") for path in SYSTEMD_MEMBERS},
+            {path.removeprefix("systemd/"): 0o644 for path in SYSTEMD_MEMBERS},
+            name="systemd release input",
+        ),
+    }
+    return _manifest_from_captured(captured, release, signing_mode="production")
+
+
+def _manifest_from_captured(
+    captured: dict[str, dict[str, bytes]],
+    release: str,
+    *,
+    signing_mode: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     members: list[dict[str, Any]] = []
     for relative in sorted(RUNTIME_MEMBERS):
-        source = runtime_source / relative
-        _regular(source, name=f"runtime member {relative}", mode=MEMBER_MODES[relative])
+        data = captured["runtime"][relative]
         members.append({
             "path": relative,
             "install_root": "runtime",
-            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(data).hexdigest(),
             "mode": f"{MEMBER_MODES[relative]:04o}",
         })
     for path in sorted(SYSTEMD_MEMBERS):
         relative = path.removeprefix("systemd/")
-        source = systemd_source / relative
-        _regular(source, name=f"systemd member {path}", mode=0o644)
+        data = captured["systemd"][relative]
         members.append({
             "path": path,
             "install_root": "systemd",
-            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "sha256": hashlib.sha256(data).hexdigest(),
             "mode": "0644",
         })
-    compose = runtime_source / "compose.yaml"
     value = {
         "schema": "runtime-bundle-manifest-v1",
+        "signing_mode": signing_mode,
         "release_sha": release,
         "members": members,
-        "compose_sha256": hashlib.sha256(compose.read_bytes()).hexdigest(),
+        "compose_sha256": hashlib.sha256(captured["runtime"]["compose.yaml"]).hexdigest(),
     }
     return value, members
 
@@ -209,19 +366,123 @@ def _sign_detached(data: Path, signature: Path, key_fd: int) -> None:
             pass
         raise ValueError("fixed OpenSSL signing rejected the supplied key")
     os.chmod(signature, 0o600)
+    _fsync_file(signature, name="bundle signature stage")
 
 
-def _copy_tree(runtime_source: Path, systemd_source: Path, output: Path, members: list[dict[str, Any]]) -> None:
+def _fsync_file(path: Path, *, name: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"{name} is not a regular file")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError(f"cannot fsync {name}") from exc
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("cannot fsync publication directory") from exc
+
+
+def _write_private_file(path: Path, data: bytes, *, mode: int, name: str, create: bool = True) -> None:
+    fd = -1
+    try:
+        flags = os.O_WRONLY | O_NOFOLLOW
+        flags |= os.O_CREAT | os.O_EXCL if create else os.O_TRUNC
+        fd = os.open(path, flags, mode)
+        os.fchmod(fd, mode)
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        os.fsync(fd)
+    except OSError as exc:
+        raise ValueError(f"cannot write {name}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _new_private_stage_file(parent: Path, *, prefix: str) -> Path:
+    try:
+        fd, raw = tempfile.mkstemp(prefix=prefix, dir=parent)
+        os.fchmod(fd, 0o600)
+        os.close(fd)
+    except OSError as exc:
+        raise ValueError("cannot create private signer stage") from exc
+    return Path(raw)
+
+
+def _copy_tree(captured: dict[str, dict[str, bytes]], output: Path, members: list[dict[str, Any]]) -> None:
     for item in members:
-        source_root = runtime_source if item["install_root"] == "runtime" else systemd_source
         relative = item["path"] if item["install_root"] == "runtime" else item["path"].removeprefix("systemd/")
-        source = source_root / relative
+        data = captured[item["install_root"]][relative]
         destination = output / item["path"]
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
-        os.chmod(destination, int(item["mode"], 8))
-        if hashlib.sha256(destination.read_bytes()).hexdigest() != item["sha256"]:
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _write_private_file(destination, data, mode=int(item["mode"], 8), name=f"bundle member {item['path']}")
+        _fsync_directory(destination.parent)
+        if hashlib.sha256(data).hexdigest() != item["sha256"]:
             raise ValueError(f"copied bundle member hash mismatch: {item['path']}")
+
+
+def _remove_private_path(path: Path) -> None:
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    try:
+        if stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+            shutil.rmtree(path)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, Path]:
+    _git_repository_root()
+    expected = {
+        "runtime source root": Path("release/runtime"),
+        "systemd source root": Path("release/systemd"),
+        "bundle output root": Path("release/asrsub-runtime-bundle"),
+        "manifest output": Path("release/bundle-manifest.json"),
+        "signature output": Path("release/bundle-manifest.sig"),
+    }
+    values = {
+        "runtime source root": args.runtime_source_root,
+        "systemd source root": args.systemd_source_root,
+        "bundle output root": args.output_root,
+        "manifest output": args.manifest_output or expected["manifest output"],
+        "signature output": args.signature_output or expected["signature output"],
+    }
+    for name, value in values.items():
+        if value is None or Path(value) != expected[name] or Path(value).is_absolute():
+            raise ValueError(f"production {name} must use the fixed relative release path")
+    return tuple(absolute(values[name], name=name) for name in expected)  # type: ignore[return-value]
+
+
+def _ensure_empty_publication_path(path: Path, *, name: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_fd = _open_directory(path.parent, name=f"{name} parent")
+    os.close(parent_fd)
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ValueError(f"cannot inspect {name}") from exc
+    raise ValueError(f"{name} must not already exist")
 
 
 def package_bundle(args: argparse.Namespace, *, test_seam: bool) -> int:
@@ -231,44 +492,72 @@ def package_bundle(args: argparse.Namespace, *, test_seam: bool) -> int:
         raise ValueError("bundle mode requires exactly one of --release-sha or --release-sha-from-git")
     if args.key_fd is None:
         raise ValueError("bundle mode requires a real signing key through --key-fd")
-    runtime_source = absolute(args.runtime_source_root, name="runtime source root")
-    systemd_source = absolute(args.systemd_source_root, name="systemd source root")
-    output_root = absolute(args.output_root, name="bundle output root")
+    if test_seam:
+        runtime_source = absolute(args.runtime_source_root, name="runtime source root")
+        systemd_source = absolute(args.systemd_source_root, name="systemd source root")
+        output_root = absolute(args.output_root, name="bundle output root")
+        manifest_output = absolute(args.manifest_output or output_root.parent / "bundle-manifest.json", name="manifest output")
+        signature_output = absolute(args.signature_output or output_root.parent / "bundle-manifest.sig", name="signature output")
+    else:
+        if args.release_sha_from_git and "RELEASE_SHA" in os.environ:
+            raise ValueError("ambient RELEASE_SHA is not accepted in production bundle mode")
+        runtime_source, systemd_source, output_root, manifest_output, signature_output = _validate_production_layout(args)
     if not runtime_source.is_dir() or not systemd_source.is_dir():
         raise ValueError("required release input directory is absent")
+    _ensure_empty_publication_path(output_root, name="bundle output root")
+    _ensure_empty_publication_path(manifest_output, name="manifest output")
+    _ensure_empty_publication_path(signature_output, name="signature output")
+    if len({output_root, manifest_output, signature_output}) != 3:
+        raise ValueError("bundle publication paths must be distinct")
     release = release_sha_from_git() if args.release_sha_from_git else release_sha(args.release_sha)
-    if output_root.exists() or output_root.is_symlink():
-        raise ValueError("bundle output root must not already exist")
-    manifest_output = absolute(args.manifest_output or output_root.parent / "bundle-manifest.json", name="manifest output")
-    signature_output = absolute(args.signature_output or output_root.parent / "bundle-manifest.sig", name="signature output")
-    if manifest_output.exists() or signature_output.exists():
-        raise ValueError("manifest and signature outputs must not already exist")
-    manifest, members = _manifest(runtime_source, systemd_source, release)
+    captured = {
+        "runtime": _capture_tree(runtime_source, set(RUNTIME_MEMBERS), MEMBER_MODES, name="runtime release input"),
+        "systemd": _capture_tree(
+            systemd_source,
+            {path.removeprefix("systemd/") for path in SYSTEMD_MEMBERS},
+            {path.removeprefix("systemd/"): 0o644 for path in SYSTEMD_MEMBERS},
+            name="systemd release input",
+        ),
+    }
+    manifest, members = _manifest_from_captured(captured, release, signing_mode="test-seam" if test_seam else "production")
     parent = output_root.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.stage-", dir=parent))
-    manifest_stage = parent / f".{manifest_output.name}.stage-{os.getpid()}"
-    signature_stage = parent / f".{signature_output.name}.stage-{os.getpid()}"
-    output_created = False
+    manifest_parent = manifest_output.parent
+    signature_parent = signature_output.parent
+    for publication_parent in {parent, manifest_parent, signature_parent}:
+        publication_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        parent_fd = _open_directory(publication_parent, name="bundle publication parent")
+        os.close(parent_fd)
+    stage: Path | None = None
+    manifest_stage: Path | None = None
+    signature_stage: Path | None = None
     try:
-        _copy_tree(runtime_source, systemd_source, stage, members)
-        manifest_stage.write_bytes(canonical(manifest) + b"\n")
-        os.chmod(manifest_stage, 0o600)
+        stage = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.stage-", dir=parent))
+        os.chmod(stage, 0o700)
+        manifest_stage = _new_private_stage_file(manifest_parent, prefix=f".{manifest_output.name}.stage-")
+        signature_stage = _new_private_stage_file(signature_parent, prefix=f".{signature_output.name}.stage-")
+        _copy_tree(captured, stage, members)
+        _write_private_file(manifest_stage, canonical(manifest) + b"\n", mode=0o600, name="bundle manifest stage", create=False)
         _sign_detached(manifest_stage, signature_stage, args.key_fd)
+        _fsync_directory(stage)
         os.replace(stage, output_root)
-        output_created = True
+        _fsync_directory(parent)
         os.replace(manifest_stage, manifest_output)
+        _fsync_directory(manifest_parent)
         os.replace(signature_stage, signature_output)
+        _fsync_file(manifest_output, name="bundle manifest")
+        _fsync_file(signature_output, name="bundle signature")
+        _fsync_directory(signature_parent)
+        for publication_parent in {parent, manifest_parent, signature_parent}:
+            _fsync_directory(publication_parent)
     except Exception:
-        if output_created:
-            shutil.rmtree(output_root, ignore_errors=True)
-        else:
-            shutil.rmtree(stage, ignore_errors=True)
-        for path in (manifest_stage, signature_stage):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        for path in (output_root, manifest_output, signature_output, stage, manifest_stage, signature_stage):
+            if path is not None:
+                _remove_private_path(path)
+        try:
+            for publication_parent in {parent, manifest_parent, signature_parent}:
+                _fsync_directory(publication_parent)
+        except ValueError:
+            pass
         raise
     return 0
 

@@ -182,6 +182,23 @@ locally, and **never pushes**. It never runs `docker compose down`,
 - Single `orchestrator` service: the daemon serves the dashboard at `/` and the API at `/api2/*`; there is no separate dashboard replica (a read-only state mount used to restart-loop with `EROFS`).
 - Release descriptor contains only `ASRSUB_IMAGE` / `GIT_SHA` / `BUILD_TIME` — no secrets.
 
+## External signer boundary
+
+`tools/signer_argv_policy.json` is a non-secret, repository-side contract for
+the external release signer. Its two commands must be executed from the
+repository root, with `/usr/bin/python3` invoking `tools/asrsub-env`, and with
+the private key supplied only through the listed inherited file descriptor.
+The bundle and approval commands retain the relative `release/` layout and
+write production-mode artifacts only after their own validation. The wrapper
+creates a private per-invocation target/cache root; it does not receive the
+caller environment or copy Cargo state for signer commands.
+
+This repository does not launch those signer commands, hand off a production
+private key, or claim production signing evidence. The release workflow is
+image-only and contains no signing-key handoff. Key opening, release inputs,
+external signer execution, trust-anchor installation, and target evidence
+remain external deployment prerequisites.
+
 ## Deploy (systemd-owned, explicit, immutable)
 
 Production deployment is owned by systemd and the checked-in fixed-path
