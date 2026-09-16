@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::discord_types::{BoundedReports, EpisodeKind};
 use sha2::Digest;
 

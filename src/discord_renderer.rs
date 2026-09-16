@@ -1,10 +1,10 @@
+#![allow(dead_code)]
 //! Deterministic, bounded Discord digest rendering.
 
 use super::discord_state_codec::encode_string;
 use super::discord_state_schema::{DeliveryView, OverflowSummaryV1, PayloadBytes};
 use super::discord_types::{
-    AggregateDisposition, EpisodeKind, EpisodeRunReport, FailureClass, ItemFailure, TargetStatus,
-    WarningClass,
+    EpisodeKind, EpisodeRunReport, FailureClass, ItemFailure, TargetStatus, WarningClass,
 };
 
 const MAX_ROW_SCALARS: usize = 160;
@@ -325,20 +325,20 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
     if omitted_attention > 0 {
         let marker = format!("+{omitted_attention} more attention episodes");
         if let Some(last) = attention_rows.last_mut() {
-            last.push_str(" ");
+            last.push(' ');
             last.push_str(&marker);
         } else if let Some(last) = attention.last_mut() {
-            last.push_str(" ");
+            last.push(' ');
             last.push_str(&marker);
         }
     }
     if omitted_completed > 0 {
         let marker = format!("+{omitted_completed} more completed episodes");
         if let Some(last) = completed_rows.last_mut() {
-            last.push_str(" ");
+            last.push(' ');
             last.push_str(&marker);
         } else if let Some(last) = completed.last_mut() {
-            last.push_str(" ");
+            last.push(' ');
             last.push_str(&marker);
         }
     }
@@ -397,7 +397,9 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
 mod tests {
     use super::super::discord_state_schema::OverflowSummaryV1;
     use super::super::discord_text::SafeDisplayText;
-    use super::super::discord_types::{BoundedTargets, TargetLanguage, TargetRunResult};
+    use super::super::discord_types::{
+        AggregateDisposition, BoundedTargets, TargetLanguage, TargetRunResult,
+    };
     use super::*;
 
     fn report(status: TargetStatus, title: &str) -> EpisodeRunReport {

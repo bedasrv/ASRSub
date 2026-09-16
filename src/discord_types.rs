@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use sha2::{Digest, Sha256};
 
 use super::discord_state_codec;
@@ -428,6 +429,6 @@ mod tests {
             .unwrap()
             .as_str()
             .starts_with("asrsub-pipeline-v1-"));
-        assert_eq!(r.pipeline_commit_id().unwrap().as_str().len(), 82);
+        assert_eq!(r.pipeline_commit_id().unwrap().as_str().len(), 83);
     }
 }

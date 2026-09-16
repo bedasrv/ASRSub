@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Notification state store capability boundary.
 
 use std::path::PathBuf;

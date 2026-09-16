@@ -1,3 +1,4 @@
+#![allow(dead_code, clippy::chunks_exact_to_as_chunks)]
 //! The single canonical JSON and domain-hash implementation used by core
 //! report/state identities.
 

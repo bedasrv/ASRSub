@@ -1,3 +1,9 @@
+#![allow(
+    dead_code,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::manual_is_multiple_of,
+    clippy::suspicious_open_options
+)]
 //! The sole serialized notification-state operation lane.
 
 use std::path::PathBuf;

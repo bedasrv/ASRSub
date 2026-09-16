@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Stable media-child capability boundary.  Core uses a small local executor;
 //! hardening replaces its internals without changing these caller-facing
 //! types.

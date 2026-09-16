@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Checked cadence calculations used by the state engine.
 
 pub(crate) const ATTEMPT_WINDOW_NS: u64 = 900 * 1_000_000_000;

@@ -1,5 +1,7 @@
+#![allow(dead_code)]
 //! Dedicated outbound Discord transport.
 
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

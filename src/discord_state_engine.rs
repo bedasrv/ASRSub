@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Pure transition-kernel façade.  The lane owns serialization and invokes
 //! these bounded helpers; no filesystem capability lives here.
 

@@ -12,6 +12,8 @@
 //! All inference is remote (`asrsub_providers.json`); this binary links no
 //! ML weights and needs no GPU — only ffmpeg/ffprobe + network.
 
+#![allow(dead_code)]
+
 mod actions;
 mod api;
 mod asr;

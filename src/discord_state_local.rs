@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Local capability adapter for notification state.
 
 use std::path::Path;

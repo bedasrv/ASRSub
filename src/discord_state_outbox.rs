@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Pure bounded outbox helpers.
 
 use super::discord_types::EpisodeRunReport;

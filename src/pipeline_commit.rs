@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    clippy::chunks_exact_to_as_chunks,
+    clippy::suspicious_open_options
+)]
 //! Strict per-target pipeline ledger commit protocol.
 
 use std::io::{BufRead, Write};

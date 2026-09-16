@@ -717,6 +717,7 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
 /// transcribed as Japanese, and a detected code the endpoint rejects is never
 /// asserted as a pin (round 3 asserted it, then aborted the episode when the
 /// forced response disagreed with a field that had never been sent).
+#[allow(clippy::too_many_arguments)]
 async fn transcribe_pieces(
     tools: &ToolPaths,
     pool: &ProviderPool,

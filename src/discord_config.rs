@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Optional Discord configuration and runtime-secret grammar.
 
 use std::path::Path;

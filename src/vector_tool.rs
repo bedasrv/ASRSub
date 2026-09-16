@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::path::Path;
 
 use super::discord_state_codec::{domain_hash, encode_string, hex};

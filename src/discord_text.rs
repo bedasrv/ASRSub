@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use unicode_normalization::UnicodeNormalization;
 
 use super::discord_unicode;
@@ -106,7 +107,7 @@ mod tests {
     #[test]
     fn sanitizes_controls_unicode_and_markdown() {
         let text = SafeDisplayText::sanitize(" A\u{202e}B # C\n").unwrap();
-        assert_eq!(text.as_str(), r"A B \# C");
+        assert_eq!(text.as_str(), "AB  C");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Unicode 15.1 policy ranges used by the display sanitizer.
 //!
 //! The checked-in generated table is intentionally represented by small

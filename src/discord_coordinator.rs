@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Bounded notifier admission and lifecycle supervisor.
 
 use tokio::sync::mpsc;

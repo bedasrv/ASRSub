@@ -739,3 +739,34 @@ fi
         2
     );
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn core_acceptance_manifest_lists_named_tests() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/core_acceptance/acceptance-manifest.json"
+        ))
+        .expect("core acceptance manifest JSON");
+        let names = manifest["tests"].as_array().expect("tests array");
+        let source = concat!(
+            include_str!("main.rs"),
+            include_str!("api.rs"),
+            include_str!("pipeline.rs"),
+            include_str!("episode.rs"),
+            include_str!("sim.rs"),
+            include_str!("discord_renderer.rs"),
+            include_str!("discord_state.rs"),
+            include_str!("discord_transport.rs"),
+            include_str!("../tests/pipeline_rs.rs")
+        );
+        for name in names {
+            let name = name.as_str().expect("named acceptance test");
+            let symbol = name.rsplit("::").next().unwrap_or(name);
+            assert!(
+                source.contains(&format!("fn {symbol}")),
+                "missing acceptance selector {name}"
+            );
+        }
+    }
+}
