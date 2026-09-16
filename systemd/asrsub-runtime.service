@@ -1,0 +1,19 @@
+[Unit]
+Description=ASRSub systemd-owned runtime
+Requires=asrsub-recovery.service docker.service
+BindsTo=docker.service
+PartOf=docker.service
+After=local-fs.target asrsub-recovery.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/asrsub/asrsub-runtime --reconcile
+Restart=on-failure
+RestartPreventExitStatus=75
+RestartSec=5s
+StartLimitIntervalSec=300s
+StartLimitBurst=3
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+{"schema":"runtime-bundle-inventory-v1","members":["asrsub","asrsub-state","asrsub-record-rollout","asrsub-generate-media-runtime-manifest","asrsub-recover","asrsub-runtime","asrsub-health-probe","asrsub-provision-statefs","media-runtime-dependencies.json"],"cgroup":"/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children"}

@@ -125,3 +125,15 @@ class TestEnvironmentWrapper(unittest.TestCase):
 
     def test_wrapper_is_executable(self):
         self.assertTrue(os.access(REPO / "tools/asrsub-env", os.X_OK))
+
+
+class TestSystemdContract(unittest.TestCase):
+    def test_systemd_units_verify(self):
+        recovery = (REPO / "systemd/asrsub-recovery.service").read_text()
+        runtime = (REPO / "systemd/asrsub-runtime.service").read_text()
+        self.assertIn("Before=docker.service", recovery)
+        self.assertIn("Requires=asrsub-recovery.service docker.service", runtime)
+
+    def test_runtime_scripts_install_with_protected_hashes(self):
+        for path in ("scripts/asrsub-health-probe", "scripts/asrsub-recover", "scripts/asrsub-runtime", "tools/provision_statefs.py", "tools/install_runtime_bundle.py"):
+            self.assertTrue((REPO / path).is_file(), path)

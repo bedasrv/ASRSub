@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::discord_state::{NotificationStateStore, NotificationStateStoreFactory};
 use super::discord_state_lane::StateLaneHandle;
 use super::discord_state_local::LocalStateStore;
-use super::discord_state_schema::{NotificationStateError, StateSnapshot};
+use super::discord_state_schema::NotificationStateError;
 
 pub(crate) const PRODUCTION_STATE_ROOT: &str = "/var/lib/asrsub/state";
 

@@ -1,0 +1,5 @@
+[Unit]
+Description=fixture docker
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/asrsub/asrsub-recover --preflight

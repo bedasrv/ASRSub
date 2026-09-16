@@ -1,0 +1,12 @@
+[Unit]
+Description=ASRSub deployment recovery preflight
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/asrsub/asrsub-recover --preflight
+
+[Install]
+WantedBy=multi-user.target
