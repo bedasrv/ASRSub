@@ -440,6 +440,69 @@ exit 0
         );
     }
 
+    // A translation failure is a typed target failure. It must not install a
+    // blank sidecar, upload it, or admit a ledger row for the target.
+    let failing_pool = crate::providers::ProviderPool::new(
+        crate::providers::ProvidersFile {
+            llm_translation_models: vec![],
+            whisper_stt: Some(crate::providers::WhisperProvider {
+                endpoint: format!("{base}/audio/transcriptions"),
+                model: "stub".into(),
+                key_env: String::new(),
+                api_key: "x".into(),
+            }),
+            whisper_stt_fallbacks: vec![],
+        },
+        http.clone(),
+    );
+    let failing_pipe = crate::pipeline::Pipeline::new_with_tools(
+        _cfg.clone(),
+        failing_pool,
+        http.clone(),
+        pipe.tools.clone(),
+    );
+    let failing_candidate = crate::pipeline::Candidate {
+        episode_id: 8,
+        series_id: Some(11),
+        series_title: "TestShow".into(),
+        path: None,
+        missing: vec!["fr".into()],
+        is_movie: false,
+        original_lang: None,
+    };
+    let series_titles = HashMap::from([(
+        11,
+        crate::sonarr::SeriesInfo {
+            title: "TestShow".into(),
+            original_language: None,
+        },
+    )]);
+    let outcome = failing_pipe
+        .process_one(&failing_candidate, &series_titles)
+        .await
+        .unwrap();
+    let report = match outcome {
+        crate::feature_modules::discord_types::EpisodeRunResult::Report(report) => report,
+        other => panic!("unexpected translation-failure outcome: {other:?}"),
+    };
+    let target = report
+        .targets()
+        .as_slice()
+        .iter()
+        .find(|target| target.language().as_str() == "fr")
+        .expect("translation failure target");
+    assert!(matches!(
+        target.status(),
+        crate::feature_modules::discord_types::TargetStatus::Failed {
+            class: crate::feature_modules::discord_types::FailureClass::Translation
+        }
+    ));
+    assert!(!Path::new(&format!("{stem_s}.fr.hi.srt")).exists());
+    assert!(!registry_rows(&failing_pipe.cfg.registry_file)
+        .iter()
+        .any(|row| row.episode_id == Some(8) && row.lang.as_deref() == Some("fr")));
+    assert!(!stubs.uploads.lock().await.iter().any(|lang| lang == "fr"));
+
     // ---- Phase B: ladder path (adequate ja sidecar, zero new ASR) ----
     std::fs::remove_file(&pipe.cfg.state_file).ok();
     std::fs::remove_file(&pipe.cfg.registry_file).ok();
@@ -448,9 +511,14 @@ exit 0
     }
     stubs.uploads.lock().await.clear();
     std::fs::write(format!("{stem_s}.ja.srt"), ladder_ja_fixture()).unwrap();
+    let whisper_before_ladder = *stubs.whisper_hits.lock().await;
     let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
-    assert_eq!(*stubs.whisper_hits.lock().await, 1, "ladder must skip ASR");
+    assert_eq!(
+        *stubs.whisper_hits.lock().await,
+        whisper_before_ladder,
+        "ladder must skip ASR"
+    );
     assert!(*stubs.llm_hits.lock().await > 0);
     let reg = registry_rows(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);

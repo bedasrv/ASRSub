@@ -24,6 +24,57 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LlmTimeouts {
+    pub(crate) connect: Duration,
+    pub(crate) read: Duration,
+    pub(crate) request: Duration,
+    pub(crate) translation: Duration,
+}
+
+impl LlmTimeouts {
+    fn from_env() -> Self {
+        let request = env_duration(
+            "LLM_TIMEOUT_S",
+            Duration::from_secs(300),
+            Duration::from_secs(30),
+            Duration::from_secs(900),
+        );
+        let connect = env_duration(
+            "LLM_CONNECT_TIMEOUT_S",
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+            request,
+        );
+        let read = env_duration(
+            "LLM_READ_TIMEOUT_S",
+            Duration::from_secs(120),
+            Duration::from_secs(1),
+            request,
+        );
+        let translation = env_duration(
+            "TRANSLATION_TIMEOUT_S",
+            Duration::from_secs(900),
+            Duration::from_secs(30),
+            Duration::from_secs(3600),
+        );
+        Self {
+            connect,
+            read,
+            request,
+            translation,
+        }
+    }
+}
+
+fn env_duration(key: &str, default: Duration, min: Duration, max: Duration) -> Duration {
+    let seconds = crate::config::env_str(key)
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default);
+    seconds.clamp(min, max)
+}
+
 /// Honored provider-file keys per entry: `endpoint`, `model`, `key_env`,
 /// `api_key`, `probe_latency_s`, `thinking_param_accepted` (+ the
 /// `whisper_stt` / `whisper_stt_fallbacks` / `llm_translation_models`
@@ -206,11 +257,20 @@ struct PoolInner {
     health: Vec<EndpointHealth>,
     whisper: Vec<WhisperProvider>,
     whisper_health: Vec<EndpointHealth>,
+    llm_timeouts: LlmTimeouts,
     http: reqwest::Client,
 }
 
 impl ProviderPool {
     pub fn new(file: ProvidersFile, http: reqwest::Client) -> Self {
+        Self::new_with_timeouts(file, http, LlmTimeouts::from_env())
+    }
+
+    pub(crate) fn new_with_timeouts(
+        file: ProvidersFile,
+        http: reqwest::Client,
+        llm_timeouts: LlmTimeouts,
+    ) -> Self {
         let per_endpoint = crate::config::env_str("LLM_PER_ENDPOINT_CONCURRENCY")
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
@@ -237,6 +297,7 @@ impl ProviderPool {
                 health,
                 whisper,
                 whisper_health,
+                llm_timeouts,
                 http,
             }),
         }
@@ -274,6 +335,18 @@ impl ProviderPool {
 
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http
+    }
+
+    pub(crate) fn llm_timeouts(&self) -> LlmTimeouts {
+        self.inner.llm_timeouts
+    }
+
+    pub(crate) fn llm_models(&self) -> Vec<String> {
+        self.inner
+            .providers
+            .iter()
+            .map(|provider| provider.model.clone())
+            .collect()
     }
 
     fn now_ms() -> u64 {
@@ -381,10 +454,7 @@ impl ProviderPool {
     /// Deadline for one LLM attempt: bounded so a hung free-tier endpoint
     /// cannot stall the whole library sweep.
     pub fn llm_timeout() -> Duration {
-        let s: u64 = crate::config::env_str("LLM_TIMEOUT_S")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        Duration::from_secs(s.clamp(30, 900))
+        LlmTimeouts::from_env().request
     }
 
     pub fn whisper_timeout() -> Duration {

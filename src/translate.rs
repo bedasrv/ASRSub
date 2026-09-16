@@ -8,7 +8,7 @@
 //! wrong-script rejection, CJK-echo probe, count-mismatch retry, per-line
 //! fallback, merge-aware tail completion.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::lang::normalize_lang;
@@ -84,57 +84,102 @@ async fn post_chat_once(
     thinking: bool,
     messages: &[ChatMsg],
 ) -> Result<Option<String>> {
-    let _permit = pool.acquire(idx).await;
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-    });
-    if thinking {
-        body["thinking"] = serde_json::json!({"type": "enabled", "effort": "max"});
-    }
-    let fut = pool
-        .http()
-        .post(endpoint)
-        .header("Authorization", format!("Bearer {key}"))
-        .json(&body)
-        .timeout(ProviderPool::llm_timeout())
-        .send();
-    let resp = match tokio::time::timeout(ProviderPool::llm_timeout(), fut).await {
-        Err(_) => {
-            // Outer timeout (hung endpoint): trip the breaker like any other
-            // failure so it leaves the rotation instead of stalling chunks.
-            pool.record_failure(idx);
-            anyhow::bail!("llm timeout");
+    let timeouts = pool.llm_timeouts();
+    let request = async {
+        let _permit = pool.acquire(idx).await;
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "temperature": 0.3,
+        });
+        if thinking {
+            body["thinking"] = serde_json::json!({"type": "enabled", "effort": "max"});
         }
-        Ok(Err(e)) => {
+        let fut = pool
+            .http()
+            .post(endpoint)
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&body)
+            .timeout(timeouts.request)
+            .send();
+        let resp = match tokio::time::timeout(timeouts.connect.min(timeouts.request), fut).await {
+            Err(_) => {
+                pool.record_failure(idx);
+                anyhow::bail!(
+                    "llm connect/headers timeout after {} ms",
+                    timeouts.connect.as_millis()
+                );
+            }
+            Ok(Err(e)) => {
+                pool.record_failure(idx);
+                anyhow::bail!("llm {}", safe_reqwest_reason(&e));
+            }
+            Ok(Ok(r)) => r,
+        };
+        let code = resp.status().as_u16();
+        if code == 404 {
             pool.record_failure(idx);
-            return Err(e.into());
+            return Ok(None);
         }
-        Ok(Ok(r)) => r,
+        if code == 429 || code >= 500 {
+            pool.record_failure(idx);
+            anyhow::bail!("llm HTTP {code} (retryable, defer)");
+        }
+        if code != 200 {
+            pool.record_failure(idx);
+            anyhow::bail!("llm HTTP {code}");
+        }
+        let parsed: ChatResp =
+            match tokio::time::timeout(timeouts.read.min(timeouts.request), resp.json()).await {
+                Err(_) => {
+                    pool.record_failure(idx);
+                    anyhow::bail!(
+                        "llm response-body timeout after {} ms",
+                        timeouts.read.as_millis()
+                    );
+                }
+                Ok(Err(e)) => {
+                    pool.record_failure(idx);
+                    anyhow::bail!("llm {}", safe_reqwest_reason(&e));
+                }
+                Ok(Ok(parsed)) => parsed,
+            };
+        let content = parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content);
+        let Some(content) = content else {
+            pool.record_failure(idx);
+            anyhow::bail!("llm response missing content");
+        };
+        pool.record_success(idx);
+        Ok(Some(content))
     };
-    let code = resp.status().as_u16();
-    if code == 404 {
-        pool.record_failure(idx);
-        return Ok(None);
+    match tokio::time::timeout(timeouts.request, request).await {
+        Err(_) => {
+            pool.record_failure(idx);
+            anyhow::bail!(
+                "llm overall request timeout after {} ms",
+                timeouts.request.as_millis()
+            );
+        }
+        Ok(result) => result,
     }
-    if code == 429 || code >= 500 {
-        let _ = resp.text().await;
-        pool.record_failure(idx);
-        anyhow::bail!("llm HTTP {code} (retryable, defer)");
+}
+
+fn safe_reqwest_reason(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timeout"
+    } else if error.is_connect() {
+        "connect failure"
+    } else if error.is_body() {
+        "request/response body failure"
+    } else if error.is_decode() {
+        "response decode failure"
+    } else {
+        "transport failure"
     }
-    if code != 200 {
-        let body = resp.text().await.unwrap_or_default();
-        pool.record_failure(idx);
-        anyhow::bail!("llm HTTP {code}: {}", crate::srt::snippet(&body));
-    }
-    let parsed: ChatResp = resp.json().await?;
-    pool.record_success(idx);
-    Ok(parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content))
 }
 
 /// Try providers in order until one yields content.
@@ -142,9 +187,11 @@ async fn chat_across_providers(
     pool: &ProviderPool,
     messages: &[ChatMsg],
 ) -> Result<Option<String>> {
+    let mut failures = Vec::new();
     for (idx, p) in pool.ordered() {
         let key = p.api_key();
         if key.is_empty() {
+            failures.push(format!("model {}: no API key", p.model));
             continue;
         }
         match post_chat_once(
@@ -159,18 +206,37 @@ async fn chat_across_providers(
         .await
         {
             Ok(Some(content)) => return Ok(Some(content)),
-            Ok(None) => continue, // 404 -> next model
+            Ok(None) => {
+                failures.push(format!("model {}: HTTP 404", p.model));
+                continue;
+            }
             Err(e) => {
-                tracing::debug!(
-                    provider = %p.model,
-                    error = %crate::config::mask_for_log(&e.to_string()),
-                    "llm attempt failed, next provider"
-                );
+                let reason = crate::config::mask_for_log(&e.to_string()).into_owned();
+                if reason.contains("timeout") {
+                    tracing::warn!(
+                        model = %p.model,
+                        reason = %reason,
+                        "llm attempt timed out, trying next provider"
+                    );
+                } else {
+                    tracing::debug!(
+                        model = %p.model,
+                        reason = %reason,
+                        "llm attempt failed, trying next provider"
+                    );
+                }
+                failures.push(format!("model {}: {reason}", p.model));
                 continue;
             }
         }
     }
-    Ok(None)
+    if failures.is_empty() {
+        anyhow::bail!("translation failed: no providers configured");
+    }
+    anyhow::bail!(
+        "translation failed: all providers exhausted ({})",
+        failures.join("; ")
+    )
 }
 
 fn echo_hit(text: &str) -> bool {
@@ -198,7 +264,7 @@ async fn attempt_chunk(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let target_name = lang_name(target_lang).to_string();
     let source_name = if source_lang == "ja" {
         "Japanese"
@@ -224,7 +290,9 @@ async fn attempt_chunk(
         },
     ];
     for _ in 0..2 {
-        let raw = chat_across_providers(pool, &messages).await.ok()??;
+        let raw = chat_across_providers(pool, &messages)
+            .await?
+            .context("translation response missing")?;
         if let Some(parsed) = extract_json_array(&raw) {
             // Placeholder lines are exempt from both guards (see
             // is_placeholder): they are CJK by design.
@@ -237,7 +305,7 @@ async fn attempt_chunk(
                     .take(11.min(parsed.len()))
                     .any(|t| !is_placeholder(t, placeholders) && echo_hit(t));
             if parsed.len() == chunk.len() && script_ok && echo_ok {
-                return Some(parsed);
+                return Ok(Some(parsed));
             }
         }
         messages.push(ChatMsg {
@@ -253,7 +321,7 @@ async fn attempt_chunk(
             ),
         });
     }
-    None
+    Ok(None)
 }
 
 async fn translate_single_line(
@@ -263,7 +331,7 @@ async fn translate_single_line(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> String {
+) -> Result<String> {
     match attempt_chunk(
         pool,
         &[line.to_string()],
@@ -274,10 +342,10 @@ async fn translate_single_line(
     )
     .await
     {
-        Some(mut v) if !v.is_empty() => {
-            v.remove(0).trim_start_matches('>').trim_start().to_string()
+        Ok(Some(mut v)) if !v.is_empty() => {
+            Ok(v.remove(0).trim_start_matches('>').trim_start().to_string())
         }
-        _ => String::new(),
+        _ => anyhow::bail!("translation failed: provider returned no valid line"),
     }
 }
 
@@ -300,6 +368,27 @@ pub struct TranslateJob<'a> {
 /// tolerated via tail completion + bounded per-line fallback so output length
 /// always equals input length.
 pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
+    let language = normalize_lang(job.target_lang);
+    let deadline = pool.llm_timeouts().translation;
+    let models = pool.llm_models();
+    match tokio::time::timeout(deadline, translate_lines_inner(pool, job)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                language = %language,
+                models = ?models,
+                timeout_ms = deadline.as_millis(),
+                "translation episode-language deadline exceeded"
+            );
+            anyhow::bail!(
+                "translation failed for {language}: episode-language deadline exceeded after {} ms",
+                deadline.as_millis()
+            );
+        }
+    }
+}
+
+async fn translate_lines_inner(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
     let target_lang = normalize_lang(job.target_lang);
     let mut lines = sanitize_lines(job.lines, 10);
     if !job.skip_guard {
@@ -325,7 +414,7 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
         );
         jobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
-            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await;
+            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await?;
             Ok::<_, anyhow::Error>((ci, chunk, out))
         });
     }
@@ -349,7 +438,7 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
             );
             fb_jobs.push(async move {
                 let _p = fb_sem.acquire_owned().await.expect("semaphore closed");
-                let text = translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await;
+                let text = translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await?;
                 Ok::<_, anyhow::Error>((idx, text))
             });
         }
@@ -555,10 +644,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_failure_emits_empty_lines() {
-        // Legacy parity (dry_tests per_line_fallback): with no usable
-        // provider, every line — chunk and per-line fallback — resolves to
-        // empty text, and output length still equals input length.
+    async fn persistent_failure_returns_error_instead_of_blank_success() {
+        // A missing/exhausted provider must fail the target. Returning a
+        // same-length Vec of empty strings would admit a blank subtitle as a
+        // successful translation.
         let pool = ProviderPool::new(
             crate::providers::ProvidersFile {
                 llm_translation_models: vec![],
@@ -567,7 +656,7 @@ mod tests {
             },
             reqwest::Client::new(),
         );
-        let out = translate_lines(
+        let error = translate_lines(
             &pool,
             TranslateJob {
                 lines: vec!["first line".to_string(), "second line".to_string()],
@@ -581,7 +670,365 @@ mod tests {
             },
         )
         .await
+        .expect_err("exhausted providers must fail translation");
+        assert!(
+            error.to_string().contains("translation failed"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_response_is_cancelled_and_fails_translation() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let pool = ProviderPool::new_with_timeouts(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/chat/completions"),
+                    model: "stalled-model".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key".to_string(),
+                    probe_latency_s: 1.0,
+                    thinking_param_accepted: false,
+                }],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+            crate::providers::LlmTimeouts {
+                connect: std::time::Duration::from_millis(20),
+                read: std::time::Duration::from_millis(20),
+                request: std::time::Duration::from_millis(50),
+                translation: std::time::Duration::from_millis(200),
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            translate_lines(
+                &pool,
+                TranslateJob {
+                    lines: vec!["first line".to_string()],
+                    target_lang: "id",
+                    source_lang: "English",
+                    knowledge: "",
+                    chunk_size: 1,
+                    fanout: 1,
+                    skip_guard: true,
+                    placeholders: &[],
+                },
+            ),
+        )
+        .await
+        .expect("stalled response must be cancelled by translation deadline")
+        .expect_err("stalled response must fail translation");
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(
+            result.to_string().contains("connect/headers timeout"),
+            "unexpected timeout error: {result:#}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn episode_language_deadline_cancels_inflight_provider_work() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{\"choices\":[",
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+
+        let pool = ProviderPool::new_with_timeouts(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/chat/completions"),
+                    model: "deadline-model".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key".to_string(),
+                    probe_latency_s: 1.0,
+                    thinking_param_accepted: false,
+                }],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+            crate::providers::LlmTimeouts {
+                connect: std::time::Duration::from_secs(1),
+                read: std::time::Duration::from_secs(1),
+                request: std::time::Duration::from_secs(1),
+                translation: std::time::Duration::from_millis(30),
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            translate_lines(
+                &pool,
+                TranslateJob {
+                    lines: vec!["first line".to_string()],
+                    target_lang: "id",
+                    source_lang: "English",
+                    knowledge: "",
+                    chunk_size: 1,
+                    fanout: 1,
+                    skip_guard: true,
+                    placeholders: &[],
+                },
+            ),
+        )
+        .await
+        .expect("episode-language deadline must cancel the stalled request")
+        .expect_err("episode-language deadline must return a translation error");
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(
+            error
+                .to_string()
+                .contains("episode-language deadline exceeded"),
+            "unexpected deadline error: {error:#}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn timed_out_provider_fails_over_to_next_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let Ok(size) = stream.read(&mut request).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&request[..size]);
+                    if request.starts_with("POST /first ") {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{\"choices\":[",
+                            )
+                            .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        return;
+                    }
+                    let body = br#"{"choices":[{"message":{"content":"[\"Halo dunia\"]"}}]}"#;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                });
+            }
+        });
+
+        let pool = ProviderPool::new_with_timeouts(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![
+                    crate::providers::LlmProvider {
+                        endpoint: format!("http://{address}/first"),
+                        model: "timed-out-model".to_string(),
+                        key_env: String::new(),
+                        api_key: "test-key-1".to_string(),
+                        probe_latency_s: 1.0,
+                        thinking_param_accepted: false,
+                    },
+                    crate::providers::LlmProvider {
+                        endpoint: format!("http://{address}/second"),
+                        model: "backup-model".to_string(),
+                        key_env: String::new(),
+                        api_key: "test-key-2".to_string(),
+                        probe_latency_s: 2.0,
+                        thinking_param_accepted: false,
+                    },
+                ],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+            crate::providers::LlmTimeouts {
+                connect: std::time::Duration::from_millis(20),
+                read: std::time::Duration::from_millis(20),
+                request: std::time::Duration::from_millis(50),
+                translation: std::time::Duration::from_millis(300),
+            },
+        );
+        let result = translate_lines(
+            &pool,
+            TranslateJob {
+                lines: vec!["first line".to_string()],
+                target_lang: "id",
+                source_lang: "English",
+                knowledge: "",
+                chunk_size: 1,
+                fanout: 1,
+                skip_guard: true,
+                placeholders: &[],
+            },
+        )
+        .await
         .unwrap();
-        assert_eq!(out, vec!["", ""]);
+        assert_eq!(result, vec!["Halo dunia"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn review_lines_returns_without_waiting_on_a_stalled_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1024\r\n\r\n{\"choices\":[",
+                )
+                .await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let pool = ProviderPool::new_with_timeouts(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/chat/completions"),
+                    model: "review-model".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key".to_string(),
+                    probe_latency_s: 1.0,
+                    thinking_param_accepted: false,
+                }],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+            crate::providers::LlmTimeouts {
+                connect: std::time::Duration::from_millis(20),
+                read: std::time::Duration::from_millis(20),
+                request: std::time::Duration::from_millis(50),
+                translation: std::time::Duration::from_millis(200),
+            },
+        );
+        let started = tokio::time::Instant::now();
+        let result = review_lines(
+            &pool,
+            &["こんにちは".to_string()],
+            &["hello".to_string()],
+            1,
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(result, vec!["hello"]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn exhausted_providers_return_a_safe_translation_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request).await;
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                });
+            }
+        });
+
+        let pool = ProviderPool::new_with_timeouts(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![
+                    crate::providers::LlmProvider {
+                        endpoint: format!("http://{address}/chat"),
+                        model: "gone-a".to_string(),
+                        key_env: String::new(),
+                        api_key: "test-key-a".to_string(),
+                        probe_latency_s: 1.0,
+                        thinking_param_accepted: false,
+                    },
+                    crate::providers::LlmProvider {
+                        endpoint: format!("http://{address}/chat"),
+                        model: "gone-b".to_string(),
+                        key_env: String::new(),
+                        api_key: "test-key-b".to_string(),
+                        probe_latency_s: 2.0,
+                        thinking_param_accepted: false,
+                    },
+                ],
+                whisper_stt: None,
+                whisper_stt_fallbacks: vec![],
+            },
+            reqwest::Client::new(),
+            crate::providers::LlmTimeouts {
+                connect: std::time::Duration::from_millis(20),
+                read: std::time::Duration::from_millis(20),
+                request: std::time::Duration::from_millis(50),
+                translation: std::time::Duration::from_millis(200),
+            },
+        );
+        let error = translate_lines(
+            &pool,
+            TranslateJob {
+                lines: vec!["first line".to_string()],
+                target_lang: "id",
+                source_lang: "English",
+                knowledge: "",
+                chunk_size: 1,
+                fanout: 1,
+                skip_guard: true,
+                placeholders: &[],
+            },
+        )
+        .await
+        .expect_err("all providers returning 404 must fail translation");
+        let text = error.to_string();
+        assert!(text.contains("translation failed"), "{text}");
+        assert!(text.contains("gone-a"), "{text}");
+        assert!(text.contains("gone-b"), "{text}");
+        assert!(text.contains("HTTP 404"), "{text}");
+        assert!(!text.contains("test-key"), "credentials leaked: {text}");
+        server.abort();
     }
 }

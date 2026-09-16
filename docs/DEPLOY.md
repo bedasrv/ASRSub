@@ -43,6 +43,7 @@ knobs are read straight from the process environment by their consumers
 is parsed into the config map, never exported into the process environment.
 Put these in the container environment (the compose `environment:` block or
 the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
+`LLM_CONNECT_TIMEOUT_S`, `LLM_READ_TIMEOUT_S`, `TRANSLATION_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
 `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
 `ANILIST_BASE_URL`, `RUST_LOG` (verbosity, `EnvFilter` syntax).
