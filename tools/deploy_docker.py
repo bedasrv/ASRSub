@@ -30,11 +30,18 @@ from production_adapter_common import (
 
 
 DOCKER = Path("/usr/bin/docker")
-PROJECT_DIRECTORY = Path("/opt/mediastack/asrsub")
+PROJECT_DIRECTORY = Path("/usr/local/libexec/asrsub")
 COMPOSE_FILE = PROJECT_DIRECTORY / "compose.yaml"
 DEPLOY_EVIDENCE_ROOT = Path("/var/lib/asrsub/deploy-state/evidence")
+APPROVAL_PATH = Path("/var/lib/asrsub/deploy-state/approval.json")
 APPROVED_IMAGE_PATH = Path("/var/lib/asrsub/deploy-state/approved-image.json")
 IMAGE_INSPECT_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "image-inspect.json"
+IMAGE_PULL_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "image-pull.json"
+COMPOSE_CONFIG_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "compose-config.json"
+COMPOSE_UP_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "compose-up.json"
+COMPOSE_START_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "compose-start.json"
+COMPOSE_STOP_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "compose-stop.json"
+COMPOSE_PS_EVIDENCE_PATH = DEPLOY_EVIDENCE_ROOT / "compose-ps.json"
 
 _OPERATION_ALIASES = {
     "digest": "image-inspect",
@@ -220,7 +227,19 @@ def _read_approved_image(path: Path, expected_digest: str, *, release_sha: str |
     return {"schema": value["schema"], "image_ref": value["image_ref"], "image_digest": value["image_digest"], "platform": value["platform"]}
 
 
-def _read_image_evidence(path: Path, *, digest: str) -> None:
+def _read_approval_binding(*, digest: str, release_sha: str, compose_sha256: str | None = None) -> None:
+    value = read_json(APPROVAL_PATH, name="approved deployment transaction")
+    if not isinstance(value, dict) or value.get("schema") != "approval-v1":
+        raise AdapterError("approved deployment transaction has an unsupported schema")
+    if value.get("release_sha") != release_sha or value.get("image_digest") != digest.rsplit(":", 1)[-1]:
+        raise AdapterError("approved deployment transaction does not bind the requested image")
+    if compose_sha256 is not None and value.get("compose_sha256") != compose_sha256:
+        raise AdapterError("approved deployment transaction does not bind the rendered Compose")
+    if value.get("approved_docker_socket") != "default" or value.get("approved_state_root") != "/var/lib/asrsub/state":
+        raise AdapterError("approved deployment transaction host binding is not approved")
+
+
+def _read_image_evidence(path: Path, *, digest: str, release_sha: str) -> None:
     value = read_json(require_absolute(path, name="image inspect evidence"), name="image inspect evidence")
     if not isinstance(value, dict) or value.get("schema") != "docker-operation-evidence-v1":
         raise AdapterError("image inspect evidence has an unsupported schema")
@@ -228,6 +247,8 @@ def _read_image_evidence(path: Path, *, digest: str) -> None:
         raise AdapterError("image inspect evidence is not a successful inspect")
     if value.get("requested_digest") != digest or value.get("image_digest") != digest:
         raise AdapterError("image inspect evidence digest is not bound")
+    if value.get("release_sha") != release_sha:
+        raise AdapterError("image inspect evidence release is not bound")
     argv = value.get("argv")
     expected = docker_argv("image-inspect", digest=digest, production=True)
     if argv != expected:
@@ -235,6 +256,20 @@ def _read_image_evidence(path: Path, *, digest: str) -> None:
     observed = value.get("observed")
     if not isinstance(observed, dict) or not _digest_in_observed(observed, digest):
         raise AdapterError("image inspect evidence does not prove the approved digest")
+
+
+def _read_pull_evidence(path: Path, *, digest: str, release_sha: str) -> None:
+    value = read_json(require_absolute(path, name="image pull evidence"), name="image pull evidence")
+    if not isinstance(value, dict) or value.get("schema") != "docker-operation-evidence-v1":
+        raise AdapterError("image pull evidence has an unsupported schema")
+    if value.get("operation") != "image-pull" or value.get("returncode") != 0:
+        raise AdapterError("image pull evidence is not a successful pull")
+    if value.get("requested_digest") != digest or value.get("release_sha") != release_sha:
+        raise AdapterError("image pull evidence identity is not bound")
+    if value.get("argv") != docker_argv("image-pull", digest=digest, production=True):
+        raise AdapterError("image pull evidence command is not the fixed command")
+    if any(key in value for key in ("observed", "stdout", "stderr")):
+        raise AdapterError("image pull evidence contains unbound output")
 
 
 def _validate_rendered_compose(path: Path, expected_hash: str) -> str:
@@ -256,6 +291,7 @@ def run_adapter(
     compose_sha256: str | None = None,
     approved_image: Path | None = None,
     image_evidence: Path | None = None,
+    pull_evidence: Path | None = None,
     release_sha: str | None = None,
 ) -> dict[str, Any]:
     operation = canonical_operation(operation)
@@ -264,31 +300,56 @@ def run_adapter(
     reject_ambient_docker_environment(production=production, env=source_env)
     secret_values = environment_secret_values(source_env)
     output = require_absolute(output, name="Docker evidence output")
-    if production and output.parent != DEPLOY_EVIDENCE_ROOT:
-        raise AdapterError("production Docker evidence output must use the fixed evidence root")
-    if operation in {"image-inspect", "image-pull"}:
+    checked_compose: Path | None = None
+    if production:
+        expected_output = {
+            "image-inspect": IMAGE_INSPECT_EVIDENCE_PATH,
+            "image-pull": IMAGE_PULL_EVIDENCE_PATH,
+            "compose-config": COMPOSE_CONFIG_EVIDENCE_PATH,
+            "compose-up": COMPOSE_UP_EVIDENCE_PATH,
+            "compose-start": COMPOSE_START_EVIDENCE_PATH,
+            "compose-stop": COMPOSE_STOP_EVIDENCE_PATH,
+            "compose-ps": COMPOSE_PS_EVIDENCE_PATH,
+        }.get(operation)
+        if expected_output is not None and output != expected_output:
+            raise AdapterError("production Docker evidence output must use its fixed path")
+        if release_sha is None:
+            raise AdapterError(f"production {operation} requires the approved release SHA")
+        release_sha = require_hex(release_sha, name="release SHA", length=40)
+        if digest is None:
+            raise AdapterError(f"production {operation} requires --digest")
+        digest = require_image_digest(digest)
+        approved_path = approved_image or APPROVED_IMAGE_PATH
+        if require_absolute(approved_path, name="approved image") != APPROVED_IMAGE_PATH:
+            raise AdapterError("production approved image must use the fixed evidence path")
+        _read_approved_image(APPROVED_IMAGE_PATH, digest, release_sha=release_sha)
+        _read_approval_binding(digest=digest, release_sha=release_sha)
+    elif operation in {"image-inspect", "image-pull"}:
         if digest is None:
             raise AdapterError(f"{operation} requires --digest")
         require_image_digest(digest)
-    elif production and operation in {"compose-up", "compose-start", "compose-stop", "compose-ps"}:
-        if digest is None:
-            raise AdapterError(f"{operation} requires --digest")
-        require_image_digest(digest)
+
     if operation in _COMPOSE_OPERATIONS:
         checked_compose = _validate_compose_file(compose_file, production=production)
+        if production:
+            if compose_sha256 is None:
+                raise AdapterError(f"production {operation} requires the approved rendered Compose hash")
+            compose_sha256 = require_hex(compose_sha256, name="rendered Compose SHA256", length=64)
+            _read_approval_binding(digest=digest or "", release_sha=release_sha or "", compose_sha256=compose_sha256)
+            _validate_rendered_compose(checked_compose, compose_sha256)
+
     if production and operation == "compose-up":
-        if compose_sha256 is None:
-            raise AdapterError("compose-up requires the approved rendered Compose hash")
-        if approved_image is None:
-            raise AdapterError("compose-up requires the approved image identity")
         if image_evidence is None:
             raise AdapterError("compose-up requires a successful image inspect record")
-        if release_sha is None:
-            raise AdapterError("compose-up requires the approved release SHA")
-        if require_absolute(approved_image or Path("/nonexistent"), name="approved image") != APPROVED_IMAGE_PATH:
-            raise AdapterError("production approved image must use the fixed evidence path")
-        if require_absolute(image_evidence or Path("/nonexistent"), name="image inspect evidence") != IMAGE_INSPECT_EVIDENCE_PATH:
+        if pull_evidence is None:
+            raise AdapterError("compose-up requires a successful image pull record")
+        if require_absolute(image_evidence, name="image inspect evidence") != IMAGE_INSPECT_EVIDENCE_PATH:
             raise AdapterError("production image inspect evidence must use the fixed evidence path")
+        if require_absolute(pull_evidence, name="image pull evidence") != IMAGE_PULL_EVIDENCE_PATH:
+            raise AdapterError("production image pull evidence must use the fixed evidence path")
+        _read_image_evidence(IMAGE_INSPECT_EVIDENCE_PATH, digest=digest or "", release_sha=release_sha or "")
+        _read_pull_evidence(IMAGE_PULL_EVIDENCE_PATH, digest=digest or "", release_sha=release_sha or "")
+
     argv = docker_argv(
         operation,
         digest=digest,
@@ -297,15 +358,6 @@ def run_adapter(
         production=production,
         test_seam=test_seam,
     )
-    if production and executable != DOCKER:
-        raise AdapterError("custom Docker executable is allowed only in the explicit test seam")
-    checked_compose = None
-    if operation in _COMPOSE_OPERATIONS:
-        checked_compose = _validate_compose_file(compose_file, production=production)
-        if production and operation == "compose-up":
-            _validate_rendered_compose(checked_compose, compose_sha256 or "")
-            _read_approved_image(approved_image or Path("/nonexistent"), digest or "", release_sha=release_sha)
-            _read_image_evidence(image_evidence or Path("/nonexistent"), digest=digest or "")
     env = None if test_seam else production_command_environment()
     command = run_argv(
         argv,
@@ -381,6 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compose-sha256", "--rendered-compose-sha256", dest="compose_sha256")
     parser.add_argument("--approved-image", type=Path)
     parser.add_argument("--image-evidence", type=Path)
+    parser.add_argument("--pull-evidence", type=Path)
     parser.add_argument("--release-sha")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--docker-executable", "--docker-path", "--fake-executable", dest="docker_executable", type=Path)
@@ -404,6 +457,7 @@ def main(argv: list[str] | None = None) -> int:
             compose_sha256=args.compose_sha256,
             approved_image=args.approved_image,
             image_evidence=args.image_evidence,
+            pull_evidence=args.pull_evidence,
             release_sha=args.release_sha,
         )
         return 0

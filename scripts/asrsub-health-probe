@@ -1,3 +1,51 @@
 #!/bin/sh
 set -eu
-exec /usr/bin/curl --fail --silent --show-error http://127.0.0.1:8085/ready
+
+# The installed probe is the only production health-evidence producer.  It
+# writes the fixed rollout path and never accepts an alternate path unless the
+# explicit local test seam is selected.
+fixed_output=/var/lib/asrsub/deploy-state/evidence/health.json
+output=$fixed_output
+test_seam=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output)
+            [ "$#" -ge 2 ] || { printf '%s\n' 'health probe: --output requires a path' >&2; exit 2; }
+            output=$2
+            shift 2
+            ;;
+        --test-seam)
+            test_seam=1
+            shift
+            ;;
+        *)
+            printf '%s\n' 'health probe: unsupported argument' >&2
+            exit 2
+            ;;
+    esac
+done
+if [ "$test_seam" -eq 0 ] && [ "$output" != "$fixed_output" ]; then
+    printf '%s\n' 'health probe: production output path is fixed' >&2
+    exit 2
+fi
+
+parent=${output%/*}
+[ "$parent" != "$output" ] && [ -d "$parent" ] || {
+    printf '%s\n' 'health probe: output parent is unavailable' >&2
+    exit 2
+}
+temporary="$output.$$"
+status=$(/usr/bin/curl --fail --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8085/ready || true)
+if [ "$status" = "200" ]; then
+    returncode=0
+    ready=true
+else
+    returncode=1
+    ready=false
+fi
+printf '{"schema":"health-evidence-v1","endpoint":"/ready","status":%s,"returncode":%s,"ready":%s}\n' "$status" "$returncode" "$ready" > "$temporary"
+chmod 0600 "$temporary"
+mv -f "$temporary" "$output"
+if [ "$returncode" -ne 0 ]; then
+    exit "$returncode"
+fi

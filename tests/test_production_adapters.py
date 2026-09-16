@@ -5,8 +5,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -650,6 +652,79 @@ class TestProductionBundleInstall(AdapterTestCase):
         self.assertIn("fixed", (result.stdout + result.stderr).lower())
         self.assertFalse((self.root / "installed").exists())
 
+    def test_test_seam_installs_signed_systemd_members_separately(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            installer = __import__("install_runtime_bundle")
+        finally:
+            sys.path.pop(0)
+        bundle = self.root / "full-bundle"
+        bundle.mkdir()
+        manifest_members = []
+        for name in sorted(installer.EXPECTED_INSTALLED_RUNTIME_MEMBERS):
+            path = bundle / name
+            path.write_bytes(("runtime-member:" + name + "\n").encode())
+            mode = installer.RUNTIME_MEMBER_MODES[name]
+            path.chmod(mode)
+            manifest_members.append(
+                {"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "mode": f"{mode:04o}"}
+            )
+        for name in sorted(installer.EXPECTED_SYSTEMD_MEMBERS):
+            path = bundle / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("systemd-member:" + name + "\n").encode())
+            mode = installer.SYSTEMD_MEMBER_MODES[name]
+            path.chmod(mode)
+            manifest_members.append(
+                {
+                    "path": name,
+                    "install_root": "systemd",
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "mode": f"{mode:04o}",
+                }
+            )
+        manifest = {"schema": "runtime-bundle-manifest-v1", "release_sha": SHA, "members": manifest_members}
+        manifest_path = bundle / "manifest.json"
+        manifest_path.write_bytes(canonical(manifest) + b"\n")
+        approval = self.root / "approval.json"
+        approval.write_text('{"schema":"approval-v1"}\n', encoding="utf-8")
+        verifier = self.write_executable("systemd-verifier.py", "#!/usr/bin/env python3\nprint('fixture verifier')\n")
+        target = self.root / "installed"
+        systemd = self.root / "systemd"
+        systemd.mkdir(mode=0o755)
+        systemd.chmod(0o755)
+        output = self.root / "receipt.json"
+        result = run_tool(
+            "install_runtime_bundle.py",
+            "--test-seam",
+            "--bundle-root",
+            bundle,
+            "--manifest",
+            manifest_path,
+            "--approval",
+            approval,
+            "--verify-command",
+            verifier,
+            "--release-sha",
+            SHA,
+            "--target-root",
+            target,
+            "--systemd-root",
+            systemd,
+            "--output",
+            output,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in installer.EXPECTED_INSTALLED_RUNTIME_MEMBERS:
+            self.assertTrue((target / name).is_file(), name)
+        for name in installer.EXPECTED_SYSTEMD_MEMBERS:
+            self.assertTrue((systemd / name.removeprefix("systemd/")).is_file(), name)
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {item["path"] for item in receipt["members"] if item.get("install_root") == "systemd"},
+            set(installer.EXPECTED_SYSTEMD_MEMBERS),
+        )
+
     def test_check_fixture_remains_explicit_fixture_mode(self):
         result = run_tool("install_runtime_bundle.py", "--check-fixture")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -724,6 +799,204 @@ class TestProductionRollout(AdapterTestCase):
         result = run_tool("record_rollout.py", *args)
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex((result.stdout + result.stderr).lower(), r"health|process|runtime|fixed")
+    def test_installed_entrypoint_and_adapters_are_self_contained(self):
+        recover = (ROOT / "scripts" / "asrsub-recover").read_text(encoding="utf-8")
+        runtime = (ROOT / "scripts" / "asrsub-runtime").read_text(encoding="utf-8")
+        entrypoint = (ROOT / "tools" / "production_entrypoint.py").read_text(encoding="utf-8")
+        for wrapper, action in ((recover, "recover"), (runtime, "runtime")):
+            self.assertIn("/usr/local/libexec/asrsub/production_entrypoint.py", wrapper)
+            self.assertNotIn("/opt/mediastack/asrsub/tools", wrapper)
+            self.assertIn(action, wrapper)
+        self.assertIn("RUNTIME_ROOT / \"compose.yaml\"", entrypoint)
+        self.assertNotIn("REPOSITORY_ROOT", entrypoint)
+        self.assertNotIn("Path(__file__)", entrypoint)
+        for name in ("production_adapter_common.py", "deploy_docker.py"):
+            self.assertIn(name, entrypoint)
+
+    def test_production_preflight_requires_signed_manifest_and_install_receipt(self):
+        entrypoint = (ROOT / "tools" / "production_entrypoint.py").read_text(encoding="utf-8")
+        for needle in (
+            "approval.sig",
+            "bundle-manifest.sig",
+            "runtime-bundle-install.json",
+            "_verify_detached",
+            "sha256_file",
+            "installed runtime",
+        ):
+            self.assertIn(needle, entrypoint)
+
+    def test_reconcile_pulls_before_inspecting_and_binds_pull_evidence(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            entrypoint = __import__("production_entrypoint")
+        finally:
+            sys.path.pop(0)
+        calls = []
+        fake_deploy = types.ModuleType("deploy_docker")
+
+        def fake_run_adapter(operation, **kwargs):
+            calls.append((operation, kwargs))
+            return {"operation": operation}
+
+        fake_deploy.run_adapter = fake_run_adapter
+        approved = {
+            "image_digest": DIGEST,
+            "release_sha": SHA,
+            "compose_sha256": "c" * 64,
+        }
+        with mock.patch.dict(sys.modules, {"deploy_docker": fake_deploy}), mock.patch.object(
+            entrypoint, "preflight", return_value=approved
+        ):
+            self.assertEqual(entrypoint.reconcile(), 0)
+        self.assertEqual([operation for operation, _ in calls[:3]], ["image-pull", "image-inspect", "compose-config"])
+        self.assertEqual(calls[3][0], "compose-up")
+        self.assertEqual(calls[3][1]["pull_evidence"], entrypoint.PULL_EVIDENCE)
+
+    def test_systemd_and_cgroup_require_expected_entries_but_tolerate_extras(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            rollout = __import__("record_rollout")
+        finally:
+            sys.path.pop(0)
+        systemd = self.root / "systemd"
+        (systemd / "docker.service.d").mkdir(parents=True)
+        for relative in rollout.EXPECTED_SYSTEMD_FILES:
+            path = systemd / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture\n", encoding="utf-8")
+            path.chmod(0o644)
+        (systemd / "unrelated.service").write_text("fixture\n", encoding="utf-8")
+        (systemd / "unrelated-link").symlink_to(systemd / "unrelated.service")
+        evidence = rollout._systemd_evidence(systemd, production=True)
+        self.assertTrue(evidence["observed"])
+        cgroup = self.root / "cgroup"
+        cgroup.mkdir()
+        for name in rollout.EXPECTED_CGROUP_FILES:
+            (cgroup / name).write_text("fixture\n", encoding="utf-8")
+        (cgroup / "unrelated").write_text("fixture\n", encoding="utf-8")
+        cgroup_evidence = rollout._cgroup_evidence(cgroup, production=True)
+        self.assertTrue(cgroup_evidence["available"])
+
+    def test_state_evidence_checks_required_subdirectory_metadata(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            rollout = __import__("record_rollout")
+        finally:
+            sys.path.pop(0)
+        state = self.root / "state"
+        state.mkdir(mode=0o700)
+        for relative in rollout.EXPECTED_STATE_DIRECTORIES:
+            directory = state / relative
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
+        for relative in rollout.EXPECTED_STATE_FILES:
+            path = state / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                '{"schema":"admission-v1","mode":"running","generation":1,"active":[],"updated_epoch_ns":1}\n'
+                if path.name == "admission.json" else "",
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+        evidence = rollout._state_evidence(state, production=True)
+        self.assertTrue(evidence["observed"])
+        (state / "discord-notifications").chmod(0o755)
+        with self.assertRaises(Exception):
+            rollout._state_evidence(state, production=True)
+
+    def test_installed_health_probe_emits_health_evidence_v1(self):
+        probe = (ROOT / "scripts" / "asrsub-health-probe").read_text(encoding="utf-8")
+        self.assertIn("health-evidence-v1", probe)
+        self.assertIn("--output", probe)
+        self.assertIn("/ready", probe)
+
+    def test_production_manifest_declares_exact_executable_modes(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            installer = __import__("install_runtime_bundle")
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(installer.RUNTIME_MEMBER_MODES["asrsub"], 0o755)
+        for name in installer.RUNTIME_EXECUTABLE_MEMBERS:
+            self.assertEqual(installer.RUNTIME_MEMBER_MODES[name], 0o755)
+        self.assertEqual(installer.RUNTIME_MEMBER_MODES["media-runtime-dependencies.json"], 0o644)
+
+    def test_fixture_approval_policy_is_explicit_without_a_production_signer(self):
+        policy = json.loads((ROOT / "tools" / "signer_argv_policy.json").read_text(encoding="utf-8"))
+        command = policy["approval"]["command"]
+        self.assertIn("--fixture", command)
+        self.assertIn("fixture-only", (ROOT / "tools" / "create_approval.py").read_text(encoding="utf-8"))
+
+    def test_production_docker_rejects_unapproved_digest_before_command(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            deploy = __import__("deploy_docker")
+        finally:
+            sys.path.pop(0)
+        approved = self.root / "approved-image.json"
+        approved.write_text(
+            json.dumps(
+                {
+                    "schema": "approved-image-v1",
+                    "image_ref": DIGEST,
+                    "image_digest": "a" * 64,
+                    "release_sha": SHA,
+                    "platform": "linux/amd64",
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = self.root / "image-inspect.json"
+        with mock.patch.object(deploy, "APPROVED_IMAGE_PATH", approved), mock.patch.object(
+            deploy, "IMAGE_INSPECT_EVIDENCE_PATH", output
+        ), mock.patch.object(deploy, "DEPLOY_EVIDENCE_ROOT", self.root):
+            with self.assertRaises(Exception):
+                deploy.run_adapter(
+                    "image-inspect",
+                    digest="ghcr.io/bedasrv/asrsub@sha256:" + "b" * 64,
+                    compose_file=None,
+                    output=output,
+                    approved_image=approved,
+                    release_sha=SHA,
+                )
+        self.assertFalse(output.exists())
+
+    def test_unverified_install_receipt_approval_is_rejected(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            entrypoint = __import__("production_entrypoint")
+        finally:
+            sys.path.pop(0)
+        with self.assertRaises(Exception):
+            entrypoint._validate_installed_members(
+                [],
+                {
+                    "schema": "runtime-bundle-install-receipt-v1",
+                    "dry_run": False,
+                    "evidence_eligible": True,
+                    "approval": {"verified": False},
+                },
+            )
+
+    def test_missing_detached_signature_is_a_production_blocker(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            installer = __import__("install_runtime_bundle")
+        finally:
+            sys.path.pop(0)
+        with self.assertRaises(Exception):
+            installer._require_fixed_path(
+                self.root / "missing.sig",
+                self.root / "missing.sig",
+                name="bundle signature",
+            )
+
+    def test_health_docs_match_digest_and_systemd_contract(self):
+        health = (ROOT / "docs" / "HEALTH.md").read_text(encoding="utf-8")
+        self.assertIn("@sha256:", health)
+        self.assertIn("asrsub-recover --preflight", health)
+        self.assertIn("asrsub-runtime --reconcile", health)
+        self.assertIn("--pull=never", health)
 
 
 if __name__ == "__main__":

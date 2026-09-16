@@ -3,7 +3,7 @@
 **Requirement (not executed evidence):** images are built by CI and published
 as immutable OCI digests. The tracked `docker-compose.yml` is a template; the
 sole renderer is `tools/compose_provenance.py`, which produces the exact
-interpolation-free candidate installed at `/opt/mediastack/asrsub/compose.yaml`.
+interpolation-free candidate installed at `/usr/local/libexec/asrsub/compose.yaml`.
 The template hash and rendered Compose hash are separate approval-bound
 identities. A mutable tag or registry lookup is never a production identity.
 

@@ -3,8 +3,8 @@ set -eu
 
 # The systemd-installed wrapper has one fixed adapter source.  It never accepts
 # a caller-selected repository, interpreter, environment file, or fixture.
-entrypoint=/opt/mediastack/asrsub/tools/production_entrypoint.py
-if [ ! -f "$entrypoint" ]; then
+entrypoint=/usr/local/libexec/asrsub/production_entrypoint.py
+if [ -L "$entrypoint" ] || [ ! -f "$entrypoint" ]; then
     printf '%s\n' 'ASRSub production preflight blocked: approved adapter source is absent' >&2
     exit 75
 fi

@@ -20,13 +20,16 @@ from production_adapter_common import (
     ensure_existing_directory,
     ensure_no_symlink,
     ensure_parent_directory,
+    ensure_regular_file,
     environment_secret_values,
     filesystem_identity,
+    production_command_environment,
     read_json,
     redact_text,
     require_absolute,
     require_hex,
     require_image_digest,
+    run_argv,
     sha256_file,
 )
 from deploy_docker import COMPOSE_FILE, DOCKER, PROJECT_DIRECTORY, docker_argv
@@ -34,6 +37,7 @@ from deploy_docker import COMPOSE_FILE, DOCKER, PROJECT_DIRECTORY, docker_argv
 
 PRODUCTION_STATE_ROOT = Path("/var/lib/asrsub/state")
 PRODUCTION_RUNTIME_ROOT = Path("/usr/local/libexec/asrsub")
+PRODUCTION_HEALTH_PROBE = PRODUCTION_RUNTIME_ROOT / "asrsub-health-probe"
 PRODUCTION_SYSTEMD_ROOT = Path("/etc/systemd/system")
 PRODUCTION_CGROUP_ROOT = Path("/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children")
 PRODUCTION_EVIDENCE_ROOT = Path("/var/lib/asrsub/deploy-state/evidence")
@@ -54,6 +58,22 @@ EXPECTED_RUNTIME_MEMBERS = frozenset(
         "asrsub-health-probe",
         "asrsub-provision-statefs",
         "media-runtime-dependencies.json",
+    }
+)
+EXPECTED_RUNTIME_SUPPORT_MEMBERS = frozenset(
+    {
+        "production_entrypoint.py",
+        "production_adapter_common.py",
+        "deploy_docker.py",
+        "compose.yaml",
+    }
+)
+EXPECTED_INSTALLED_RUNTIME_MEMBERS = EXPECTED_RUNTIME_MEMBERS | EXPECTED_RUNTIME_SUPPORT_MEMBERS
+EXPECTED_SYSTEMD_MEMBERS = frozenset(
+    {
+        "systemd/asrsub-recovery.service",
+        "systemd/asrsub-runtime.service",
+        "systemd/docker.service.d/asrsub-recovery.conf",
     }
 )
 EXPECTED_STATE_FILES = frozenset(
@@ -117,9 +137,15 @@ def _collect_tree(
     label: str,
     exact_files: set[str] | frozenset[str] | None = None,
     exact_dirs: set[str] | frozenset[str] | None = None,
+    required_files: set[str] | frozenset[str] | None = None,
+    required_dirs: set[str] | frozenset[str] | None = None,
+    tolerate_unrelated_unsafe: bool = False,
 ) -> dict[str, Any]:
     root = ensure_existing_directory(require_absolute(root, name=label), name=label)
+    required_file_set = set(required_files or ())
+    required_dir_set = set(required_dirs or ())
     entries: list[dict[str, Any]] = []
+    directory_entries: list[dict[str, Any]] = []
     directories: set[str] = set()
     for current, directory_names, files in os.walk(root, followlinks=False):
         current_path = Path(current)
@@ -130,18 +156,32 @@ def _collect_tree(
             except OSError as exc:
                 raise AdapterError(f"cannot inspect {label}") from exc
             if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                relative = path.relative_to(root).as_posix()
+                if tolerate_unrelated_unsafe and relative not in required_dir_set:
+                    continue
                 raise AdapterError(f"{label} contains an unsafe directory")
-            directories.add(path.relative_to(root).as_posix())
+            relative = path.relative_to(root).as_posix()
+            directories.add(relative)
+            directory_entries.append(
+                {
+                    "path": relative,
+                    "mode": stat.S_IMODE(st.st_mode),
+                    "uid": st.st_uid,
+                    "gid": st.st_gid,
+                    "identity": filesystem_identity(path, name=f"{label} directory"),
+                }
+            )
         for name in files:
             path = current_path / name
             try:
                 st = os.lstat(path)
             except OSError as exc:
                 raise AdapterError(f"cannot inspect {label}") from exc
-            if stat.S_ISLNK(st.st_mode):
-                raise AdapterError(f"{label} contains a symlink")
-            if not stat.S_ISREG(st.st_mode):
-                raise AdapterError(f"{label} contains an unsupported entry")
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+                if tolerate_unrelated_unsafe and relative not in required_file_set:
+                    continue
+                raise AdapterError(f"{label} contains an unsafe file")
             entries.append(
                 {
                     "path": path.relative_to(root).as_posix(),
@@ -153,15 +193,22 @@ def _collect_tree(
                 }
             )
     entries.sort(key=lambda entry: entry["path"])
+    directory_entries.sort(key=lambda entry: entry["path"])
     observed_files = {entry["path"] for entry in entries}
     if exact_files is not None and observed_files != set(exact_files):
         missing = sorted(set(exact_files) - observed_files)
         extra = sorted(observed_files - set(exact_files))
         raise AdapterError(f"{label} inventory mismatch: missing={missing}, extra={extra}")
+    if required_files is not None and not set(required_files).issubset(observed_files):
+        missing = sorted(set(required_files) - observed_files)
+        raise AdapterError(f"{label} required entries missing: {missing}")
     if exact_dirs is not None and directories != set(exact_dirs):
         missing = sorted(set(exact_dirs) - directories)
         extra = sorted(directories - set(exact_dirs))
         raise AdapterError(f"{label} directory inventory mismatch: missing={missing}, extra={extra}")
+    if required_dirs is not None and not set(required_dirs).issubset(directories):
+        missing = sorted(set(required_dirs) - directories)
+        raise AdapterError(f"{label} required directories missing: {missing}")
     if not entries:
         raise AdapterError(f"{label} has no observable regular files")
     return {
@@ -169,6 +216,7 @@ def _collect_tree(
         "root_identity": filesystem_identity(root, name=label),
         "observed": True,
         "entries": entries,
+        "directories": directory_entries,
         "tree_sha256": _tree_hash(entries),
     }
 
@@ -231,13 +279,21 @@ def _manifest_value(path: Path, *, expected_hash: str, release_sha: str) -> tupl
     if hashlib.sha256(canonical_json(value)).hexdigest() != expected_hash:
         raise AdapterError("bundle manifest hash does not match")
     members = value.get("members")
-    if not isinstance(members, list) or {item.get("path") for item in members if isinstance(item, dict)} != EXPECTED_RUNTIME_MEMBERS:
-        raise AdapterError("bundle manifest members do not match the closed inventory")
+    if not isinstance(members, list):
+        raise AdapterError("bundle manifest members are invalid")
     normalized = []
     for item in members:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not isinstance(item.get("sha256"), str):
             raise AdapterError("bundle manifest member is invalid")
-        normalized.append({"path": item["path"], "mode": item.get("mode"), "sha256": item["sha256"]})
+        install_root = item.get("install_root", "runtime")
+        if install_root not in {"runtime", "systemd"}:
+            raise AdapterError("bundle manifest install root is invalid")
+        path_value = item["path"]
+        target = path_value.removeprefix("systemd/") if install_root == "systemd" else path_value
+        normalized.append({"path": path_value, "target": target, "install_root": install_root, "mode": item.get("mode"), "sha256": item["sha256"]})
+    expected_paths = {item["path"] for item in normalized}
+    if expected_paths != EXPECTED_INSTALLED_RUNTIME_MEMBERS | EXPECTED_SYSTEMD_MEMBERS:
+        raise AdapterError("bundle manifest members do not match the closed inventory")
     return value, normalized
 
 
@@ -272,13 +328,21 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
     target_root_value = receipt.get("target_root")
     if not isinstance(target_root_value, str) or Path(target_root_value) != runtime_artifacts:
         raise AdapterError("bundle receipt target is not the observed runtime root")
+    if production and receipt.get("systemd_root") != os.fspath(PRODUCTION_SYSTEMD_ROOT):
+        raise AdapterError("bundle receipt systemd root is not fixed")
     members = receipt.get("members")
-    if not isinstance(members, list) or not all(isinstance(item, dict) for item in members) or {item.get("path") for item in members} != EXPECTED_RUNTIME_MEMBERS:
+    if not isinstance(members, list) or not all(isinstance(item, dict) for item in members):
+        raise AdapterError("bundle receipt members are invalid")
+    runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
+    systemd_members = [item for item in members if item.get("install_root") == "systemd"]
+    if {item.get("target", item.get("path")) for item in runtime_members} != EXPECTED_INSTALLED_RUNTIME_MEMBERS:
         raise AdapterError("bundle receipt inventory does not match the closed runtime inventory")
+    if {item.get("path") for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
+        raise AdapterError("bundle receipt systemd inventory does not match the signed inventory")
     tree = _collect_tree(
         runtime_artifacts,
         label="installed runtime artifacts",
-        exact_files=EXPECTED_RUNTIME_MEMBERS,
+        exact_files=EXPECTED_INSTALLED_RUNTIME_MEMBERS,
         exact_dirs=frozenset(),
     )
     if production:
@@ -287,7 +351,7 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             raise AdapterError("installed runtime root metadata is not approved")
         if any(entry["uid"] != 1000 or entry["gid"] != 1000 for entry in tree["entries"]):
             raise AdapterError("installed runtime member ownership is not approved")
-    expected_by_path = {item["path"]: item for item in members}
+    expected_by_path = {item.get("target", item.get("path")): item for item in runtime_members}
     for entry in tree["entries"]:
         expected = expected_by_path.get(entry["path"])
         if expected is None:
@@ -297,11 +361,12 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             expected_mode = int(expected_mode, 8) if isinstance(expected_mode, str) else int(expected_mode)
         except (TypeError, ValueError) as exc:
             raise AdapterError(f"installed runtime member mode is invalid: {entry['path']}") from exc
-        if expected is None or expected.get("sha256") != entry["sha256"] or expected_mode != entry["mode"]:
+        if expected.get("sha256") != entry["sha256"] or expected_mode != entry["mode"]:
             raise AdapterError(f"installed runtime member is not bound to the receipt: {entry['path']}")
     if args.bundle_manifest is not None:
         _, manifest_members = _manifest_value(args.bundle_manifest, expected_hash=expected_hash, release_sha=release_sha)
-        def member_key(item: dict[str, Any]) -> tuple[str, int, str]:
+
+        def member_key(item: dict[str, Any]) -> tuple[str, str, int, str]:
             mode = item.get("mode")
             if isinstance(mode, str):
                 try:
@@ -314,30 +379,57 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
                 raise AdapterError("bundle member mode is invalid")
             path = item.get("path")
             digest = item.get("sha256")
-            if not isinstance(path, str) or not isinstance(digest, str):
+            install_root = item.get("install_root", "runtime")
+            if not isinstance(path, str) or not isinstance(digest, str) or install_root not in {"runtime", "systemd"}:
                 raise AdapterError("bundle member binding is invalid")
-            return path, mode_value, digest
+            return path, install_root, mode_value, digest
+
         if sorted(member_key(item) for item in manifest_members) != sorted(member_key(item) for item in members):
             raise AdapterError("installed bundle receipt members do not match the signed manifest")
     tree["bundle_sha256"] = expected_hash
     tree["source_receipt"] = os.fspath(args.bundle_receipt)
+    tree["systemd_members"] = systemd_members
     return tree
 
 
-def _systemd_evidence(root: Path, *, production: bool) -> dict[str, Any]:
+def _systemd_evidence(
+    root: Path,
+    *,
+    production: bool,
+    expected_members: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     observed = _collect_tree(
         root,
         label="systemd artifacts",
-        exact_files=EXPECTED_SYSTEMD_FILES if production else None,
-        exact_dirs=EXPECTED_SYSTEMD_DIRECTORIES if production else None,
+        exact_files=None,
+        exact_dirs=None,
+        required_files=EXPECTED_SYSTEMD_FILES if production else None,
+        required_dirs=EXPECTED_SYSTEMD_DIRECTORIES if production else None,
+        tolerate_unrelated_unsafe=production,
     )
     if production:
-        source_root = Path(__file__).resolve().parents[1] / "systemd"
-        for relative in EXPECTED_SYSTEMD_FILES:
-            target = root / relative
-            source = source_root / relative
-            if not source.is_file() or target.read_bytes() != source.read_bytes():
-                raise AdapterError(f"systemd artifact content mismatch: {relative}")
+        expected_files = EXPECTED_SYSTEMD_FILES
+        for entry in observed["entries"]:
+            if entry["path"] in expected_files and entry["mode"] != 0o644:
+                raise AdapterError(f"systemd artifact mode mismatch: {entry['path']}")
+        if expected_members is not None:
+            observed_by_path = {entry["path"]: entry for entry in observed["entries"]}
+            for member in expected_members:
+                if not isinstance(member, dict):
+                    raise AdapterError("signed systemd member is invalid")
+                raw_path = member.get("path")
+                target = member.get("target")
+                if not isinstance(target, str):
+                    if not isinstance(raw_path, str) or not raw_path.startswith("systemd/"):
+                        raise AdapterError("signed systemd member path is invalid")
+                    target = raw_path.removeprefix("systemd/")
+                entry = observed_by_path.get(target)
+                if entry is None or entry["sha256"] != member.get("sha256"):
+                    raise AdapterError(f"systemd artifact is not bound to the signed member: {target}")
+                raw_mode = member.get("mode")
+                expected_mode = int(raw_mode, 8) if isinstance(raw_mode, str) else raw_mode
+                if expected_mode != entry["mode"]:
+                    raise AdapterError(f"systemd artifact mode is not bound: {target}")
     return observed
 
 
@@ -352,9 +444,13 @@ def _state_evidence(root: Path, *, production: bool) -> dict[str, Any]:
         root_stat = os.lstat(root)
         if stat.S_IMODE(root_stat.st_mode) != 0o700 or root_stat.st_uid != 1000 or root_stat.st_gid != 1000:
             raise AdapterError("deployment state root metadata is not approved")
+        for entry in evidence["directories"]:
+            if entry["path"] in EXPECTED_STATE_DIRECTORIES and (
+                entry["mode"] != 0o700 or entry["uid"] != 1000 or entry["gid"] != 1000
+            ):
+                raise AdapterError(f"deployment state directory metadata mismatch: {entry['path']}")
         for entry in evidence["entries"]:
-            expected_mode = 0o700 if entry["path"] in EXPECTED_STATE_DIRECTORIES else 0o600
-            if entry["mode"] != expected_mode or entry["uid"] != 1000 or entry["gid"] != 1000:
+            if entry["mode"] != 0o600 or entry["uid"] != 1000 or entry["gid"] != 1000:
                 raise AdapterError(f"deployment state member metadata mismatch: {entry['path']}")
     admission = root / "deployment-admission" / "admission.json"
     if not admission.is_file():
@@ -372,8 +468,10 @@ def _cgroup_evidence(root: Path, *, production: bool) -> dict[str, Any]:
     evidence = _collect_tree(
         root,
         label="cgroup root",
-        exact_files=EXPECTED_CGROUP_FILES if production else None,
-        exact_dirs=frozenset() if production else None,
+        exact_files=None,
+        exact_dirs=None,
+        required_files=EXPECTED_CGROUP_FILES if production else None,
+        tolerate_unrelated_unsafe=production,
     )
     return {
         "available": True,
@@ -417,14 +515,40 @@ def _health_evidence(path: Path | None, *, production: bool) -> dict[str, Any]:
         if production:
             raise AdapterError("production rollout requires health evidence")
         return {"available": False, "reason": "test seam did not request health evidence"}
-    value = read_json(require_absolute(path, name="health evidence"), name="health evidence")
+    path = require_absolute(path, name="health evidence")
+    probe_evidence = None
+    if production:
+        if path != PRODUCTION_HEALTH_EVIDENCE:
+            raise AdapterError("production health evidence path is not fixed")
+        ensure_regular_file(
+            PRODUCTION_HEALTH_PROBE,
+            mode=0o755,
+            uid=1000,
+            gid=1000,
+            name="installed health probe",
+        )
+        probe_evidence = run_argv(
+            [PRODUCTION_HEALTH_PROBE, "--output", path],
+            cwd=PRODUCTION_RUNTIME_ROOT,
+            secret_values=environment_secret_values(),
+            env=production_command_environment(),
+        )
+        ensure_regular_file(path, mode=0o600, uid=1000, gid=1000, name="health evidence")
+    value = read_json(path, name="health evidence")
     if not isinstance(value, dict) or value.get("schema") != "health-evidence-v1":
         raise AdapterError("health evidence has an unsupported schema")
     if value.get("returncode") != 0 or value.get("status") != 200 or value.get("ready") is not True:
         raise AdapterError("health evidence is not a successful /ready observation")
-    if production and value.get("endpoint") != "/ready":
+    if value.get("endpoint") != "/ready":
         raise AdapterError("health evidence endpoint is not /ready")
-    return {"schema": value["schema"], "endpoint": "/ready", "status": 200, "returncode": 0, "ready": True}
+    result = {"schema": value["schema"], "endpoint": "/ready", "status": 200, "returncode": 0, "ready": True}
+    if probe_evidence is not None:
+        result["probe"] = {
+            "path": os.fspath(PRODUCTION_HEALTH_PROBE),
+            "sha256": sha256_file(PRODUCTION_HEALTH_PROBE, name="installed health probe"),
+            "argv": probe_evidence["argv"],
+        }
+    return result
 
 
 def _approval_evidence(path: Path, *, release_sha: str, image_digest: str, bundle_sha: str, production: bool) -> dict[str, Any]:
@@ -490,7 +614,11 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     deployment = _state_evidence(deployment_root, production=not test_seam)
     docker = _docker_evidence(args.docker_evidence, release_sha=release_sha, image_digest=image_digest, production=not test_seam)
     bundle = _bundle_evidence(args, runtime_bundle if test_seam and args.runtime_artifacts is None else require_absolute(args.runtime_artifacts or runtime_bundle, name="runtime artifacts"), bundle_sha, release_sha, production=not test_seam)
-    systemd = _systemd_evidence(ensure_existing_directory(require_absolute(args.systemd_root, name="systemd root"), name="systemd root"), production=not test_seam)
+    systemd = _systemd_evidence(
+        ensure_existing_directory(require_absolute(args.systemd_root, name="systemd root"), name="systemd root"),
+        production=not test_seam,
+        expected_members=bundle.get("systemd_members") if not test_seam else None,
+    )
     runtime_artifacts_path = require_absolute(args.runtime_artifacts or runtime_bundle, name="runtime artifacts")
     if not test_seam and runtime_artifacts_path == runtime_bundle and runtime_artifacts_path != PRODUCTION_RUNTIME_ROOT:
         raise AdapterError("source bundle cannot stand in for installed runtime artifacts")

@@ -48,10 +48,10 @@ DEFAULT_APPROVAL_PUBLIC_KEY = PRODUCTION_TRUST_ROOT / "approval-key.pub"
 DEFAULT_BUNDLE_SIGNATURE = PRODUCTION_TRUST_ROOT / "bundle-manifest.sig"
 DEFAULT_BUNDLE_PUBLIC_KEY = PRODUCTION_TRUST_ROOT / "bundle-signing-key.pub"
 
-# This is the closed inventory in tests/fixtures/systemd/runtime-bundle-inventory.json.
-# It is deliberately duplicated as a code contract so a production caller cannot
-# widen the installed set by supplying a different inventory file.
-EXPECTED_RUNTIME_MEMBERS = frozenset(
+# Nine operational files remain the closed runtime inventory.  The signed
+# bundle also carries the fixed production adapters and rendered Compose file;
+# systemd descriptors are signed members installed outside the runtime root.
+CLOSED_RUNTIME_MEMBERS = frozenset(
     {
         "asrsub",
         "asrsub-state",
@@ -64,6 +64,46 @@ EXPECTED_RUNTIME_MEMBERS = frozenset(
         "media-runtime-dependencies.json",
     }
 )
+RUNTIME_SUPPORT_MEMBERS = frozenset(
+    {
+        "production_entrypoint.py",
+        "production_adapter_common.py",
+        "deploy_docker.py",
+        "compose.yaml",
+    }
+)
+EXPECTED_RUNTIME_MEMBERS = CLOSED_RUNTIME_MEMBERS
+EXPECTED_RUNTIME_SUPPORT_MEMBERS = RUNTIME_SUPPORT_MEMBERS
+EXPECTED_INSTALLED_RUNTIME_MEMBERS = EXPECTED_RUNTIME_MEMBERS | EXPECTED_RUNTIME_SUPPORT_MEMBERS
+EXPECTED_SYSTEMD_MEMBERS = frozenset(
+    {
+        "systemd/asrsub-recovery.service",
+        "systemd/asrsub-runtime.service",
+        "systemd/docker.service.d/asrsub-recovery.conf",
+    }
+)
+EXPECTED_BUNDLE_MEMBERS = EXPECTED_INSTALLED_RUNTIME_MEMBERS | EXPECTED_SYSTEMD_MEMBERS
+RUNTIME_EXECUTABLE_MEMBERS = frozenset(
+    {
+        "asrsub",
+        "asrsub-state",
+        "asrsub-record-rollout",
+        "asrsub-generate-media-runtime-manifest",
+        "asrsub-recover",
+        "asrsub-runtime",
+        "asrsub-health-probe",
+        "asrsub-provision-statefs",
+        "production_entrypoint.py",
+    }
+)
+RUNTIME_MEMBER_MODES = {
+    **{name: 0o755 for name in RUNTIME_EXECUTABLE_MEMBERS},
+    "media-runtime-dependencies.json": 0o644,
+    "production_adapter_common.py": 0o644,
+    "deploy_docker.py": 0o644,
+    "compose.yaml": 0o644,
+}
+SYSTEMD_MEMBER_MODES = {name: 0o644 for name in EXPECTED_SYSTEMD_MEMBERS}
 _ALLOWED_MANIFEST_SCHEMAS = {"runtime-bundle-manifest-v1", "bundle-manifest-v1"}
 
 
@@ -126,7 +166,16 @@ def _load_manifest(bundle_root: Path, manifest_path: Path, release_sha: str) -> 
         digest = item.get("sha256")
         if not isinstance(digest, str) or not digest.islower() or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
             raise AdapterError(f"invalid expected hash for bundle member: {path}")
-        normalized.append({"path": path, "sha256": digest, "mode": _parse_mode_value(item.get("mode"))})
+        install_root = item.get("install_root", "runtime")
+        if install_root not in {"runtime", "systemd"}:
+            raise AdapterError(f"invalid install root for bundle member: {path}")
+        if install_root == "systemd":
+            if not path.startswith("systemd/") or path == "systemd/":
+                raise AdapterError(f"invalid systemd bundle member path: {path}")
+            target = path.removeprefix("systemd/")
+        else:
+            target = path
+        normalized.append({"path": path, "target": target, "install_root": install_root, "sha256": digest, "mode": _parse_mode_value(item.get("mode"))})
     manifest_hash = hashlib.sha256(canonical_json(manifest)).hexdigest()
     return manifest, normalized, manifest_hash
 
@@ -213,28 +262,40 @@ def _validate_bundle_tree(
 
 
 
-def _validate_systemd_contract(root: Path) -> None:
+def _validate_systemd_contract(root: Path, members: list[dict[str, Any]] | None = None, *, uid: int | None = None, gid: int | None = None) -> None:
     root = require_absolute(root, name="systemd root")
     ensure_no_symlink(root, name="systemd root", allow_missing=False)
     if not root.is_dir():
         raise AdapterError("systemd root is not a directory")
-    source_root = Path(__file__).resolve().parents[1] / "systemd"
-    required = (
-        "asrsub-recovery.service",
-        "asrsub-runtime.service",
-        "docker.service.d/asrsub-recovery.conf",
-    )
-    for relative in required:
-        target = root / relative
-        source = source_root / relative
+    required = EXPECTED_SYSTEMD_MEMBERS if members is None else {
+        item["path"] for item in members if item.get("install_root") == "systemd"
+    }
+    if required != EXPECTED_SYSTEMD_MEMBERS:
+        raise AdapterError("signed systemd inventory is incomplete")
+    for relative in sorted(required):
+        target = root / relative.removeprefix("systemd/")
         ensure_no_symlink(target, name="systemd contract", allow_missing=False)
-        if not target.is_file() or not source.is_file():
-            raise AdapterError(f"systemd contract member is missing: {relative}")
         try:
-            if target.read_bytes() != source.read_bytes():
-                raise AdapterError(f"systemd contract content mismatch: {relative}")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise AdapterError("cannot read systemd contract") from exc
+            st = os.lstat(target)
+        except OSError as exc:
+            raise AdapterError(f"cannot inspect systemd contract: {relative}") from exc
+        if not stat.S_ISREG(st.st_mode):
+            raise AdapterError(f"systemd contract member is not regular: {relative}")
+        if stat.S_IMODE(st.st_mode) != SYSTEMD_MEMBER_MODES[relative]:
+            raise AdapterError(f"systemd contract mode mismatch: {relative}")
+        if uid is not None and st.st_uid != uid:
+            raise AdapterError(f"systemd contract uid mismatch: {relative}")
+        if gid is not None and st.st_gid != gid:
+            raise AdapterError(f"systemd contract gid mismatch: {relative}")
+
+
+def _validate_installed_systemd(root: Path, members: list[dict[str, Any]], *, uid: int, gid: int) -> None:
+    _validate_systemd_contract(root, members, uid=uid, gid=gid)
+    by_path = {item["path"]: item for item in members if item.get("install_root") == "systemd"}
+    for relative, item in by_path.items():
+        target = root / item["target"]
+        if sha256_file(target, name=f"installed systemd member {relative}") != item["sha256"]:
+            raise AdapterError(f"installed systemd member hash mismatch: {relative}")
 
 
 def _read_approval(path: Path) -> dict[str, Any]:
@@ -383,15 +444,81 @@ def _fsync_directory(path: Path) -> None:
         raise AdapterError("directory durability check failed") from exc
 
 
-def _stage_bundle(bundle_root: Path, members: list[dict[str, Any]], stage: Path, *, uid: int, gid: int) -> None:
+def _stage_bundle(
+    bundle_root: Path,
+    members: list[dict[str, Any]],
+    stage: Path,
+    *,
+    uid: int,
+    gid: int,
+    systemd_stage: Path | None = None,
+    systemd_uid: int | None = None,
+    systemd_gid: int | None = None,
+) -> None:
     for item in members:
-        destination = stage / Path(item["path"])
-        ensure_directory(destination.parent, mode=0o755, uid=uid, gid=gid, name="bundle staging directory")
-        _copy_verified(bundle_root / Path(item["path"]), destination, mode=item["mode"], uid=uid, gid=gid)
+        install_root = item.get("install_root", "runtime")
+        if install_root == "systemd":
+            if systemd_stage is None:
+                raise AdapterError("systemd bundle member has no staging root")
+            destination_root = systemd_stage
+            destination_uid = uid if systemd_uid is None else systemd_uid
+            destination_gid = gid if systemd_gid is None else systemd_gid
+            relative = item["target"]
+        else:
+            destination_root = stage
+            destination_uid = uid
+            destination_gid = gid
+            relative = item["target"]
+        destination = destination_root / Path(relative)
+        ensure_directory(destination.parent, mode=0o755, uid=destination_uid, gid=destination_gid, name="bundle staging directory")
+        _copy_verified(bundle_root / Path(item["path"]), destination, mode=item["mode"], uid=destination_uid, gid=destination_gid)
         if sha256_file(destination, name="staged bundle member") != item["sha256"]:
             raise AdapterError(f"staged bundle member hash mismatch: {item['path']}")
         _fsync_directory(destination.parent)
     _fsync_directory(stage)
+    if systemd_stage is not None:
+        _fsync_directory(systemd_stage)
+
+
+def _install_systemd_stage(stage: Path, root: Path, members: list[dict[str, Any]], *, uid: int, gid: int) -> None:
+    root = ensure_existing_directory(root, name="systemd root")
+    systemd_members = [item for item in members if item.get("install_root") == "systemd"]
+    if {item["path"] for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
+        raise AdapterError("signed systemd inventory is incomplete")
+    installed: list[tuple[Path, Path | None]] = []
+    try:
+        for item in sorted(systemd_members, key=lambda value: value["target"]):
+            source = stage / item["target"]
+            target = root / item["target"]
+            ensure_directory(target.parent, mode=0o755, uid=uid, gid=gid, name="systemd target directory")
+            ensure_no_symlink(target, name="systemd target", allow_missing=True)
+            backup: Path | None = None
+            if os.path.lexists(target):
+                backup = target.parent / f".{target.name}.asrsub-backup-{os.getpid()}"
+                if os.path.lexists(backup):
+                    raise AdapterError("systemd rollback path is occupied")
+                os.replace(target, backup)
+            installed.append((target, backup))
+            os.replace(source, target)
+            os.chmod(target, item["mode"])
+            os.chown(target, uid, gid)
+            _fsync_directory(target.parent)
+        _validate_installed_systemd(root, members, uid=uid, gid=gid)
+        for _, backup in installed:
+            if backup is not None and backup.exists():
+                backup.unlink()
+        shutil.rmtree(stage, ignore_errors=True)
+        _fsync_directory(root)
+    except Exception:
+        for target, backup in reversed(installed):
+            try:
+                if target.exists():
+                    target.unlink()
+                if backup is not None and backup.exists():
+                    os.replace(backup, target)
+            except OSError:
+                pass
+        raise
 
 
 def _target_files(target: Path) -> tuple[set[str], set[str]]:
@@ -419,12 +546,13 @@ def _validate_target(target: Path, members: list[dict[str, Any]], *, target_mode
     st = os.lstat(target)
     if stat.S_IMODE(st.st_mode) != target_mode or st.st_uid != uid or st.st_gid != gid:
         raise AdapterError("installed runtime root metadata does not match the contract")
+    runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
     files, directories = _target_files(target)
-    expected_files = {item["path"] for item in members}
-    expected_dirs = _expected_directories(members)
+    expected_files = {item["target"] for item in runtime_members}
+    expected_dirs = _expected_directories([{"path": item["target"]} for item in runtime_members])
     if files != expected_files or directories != expected_dirs:
         raise AdapterError("installed runtime inventory does not match the closed manifest")
-    by_path = {item["path"]: item for item in members}
+    by_path = {item["target"]: item for item in runtime_members}
     for relative, item in by_path.items():
         path = target / Path(relative)
         st = os.lstat(path)
@@ -476,7 +604,7 @@ def _commit_stage(stage: Path, target: Path, *, target_mode: int, uid: int, gid:
         raise
 
 
-def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
+def _production_legacy(args: argparse.Namespace, *, test_seam: bool) -> int:
     required = {
         "bundle root": args.bundle_root,
         "bundle manifest": args.manifest,
@@ -611,6 +739,175 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     output = output_path
     ensure_parent_directory(output, name="install receipt output")
     atomic_write_json(output, receipt, mode=0o600, uid=uid, gid=gid, name="install receipt")
+    return 0
+
+
+def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
+    required = {
+        "bundle root": args.bundle_root,
+        "bundle manifest": args.manifest,
+        "authenticated approval": args.approval,
+        "release SHA": args.release_sha,
+        "target root": args.target_root,
+        "output": args.output,
+    }
+    for label, value in required.items():
+        if value is None:
+            raise AdapterError(f"{'test-seam' if test_seam else 'production'} mode requires {label}")
+    if args.dry_run and not test_seam:
+        raise AdapterError("dry-run is non-production and cannot be used for production evidence")
+    if not test_seam and args.verify_command is not None and require_absolute(args.verify_command, name="verification command") != PRODUCTION_OPENSSL:
+        raise AdapterError("production verification command must use the fixed /usr/bin/openssl")
+    release_sha = require_hex(args.release_sha, name="release SHA", length=40)
+    bundle_root_arg = require_absolute(args.bundle_root, name="bundle root")
+    target = require_absolute(args.target_root, name="bundle target")
+    manifest_path = require_absolute(args.manifest, name="bundle manifest")
+    output_path = require_absolute(args.output, name="install receipt output")
+    systemd_root = require_absolute(args.systemd_root, name="systemd root")
+    if not test_seam:
+        if bundle_root_arg != PRODUCTION_BUNDLE_ROOT:
+            raise AdapterError("production bundle root must use the fixed approved path")
+        if manifest_path != PRODUCTION_BUNDLE_MANIFEST:
+            raise AdapterError("production bundle manifest must use the fixed approved path")
+        if require_absolute(args.approval, name="authenticated approval") != PRODUCTION_APPROVAL:
+            raise AdapterError("production approval must use the fixed approved path")
+        if target != PRODUCTION_TARGET_ROOT:
+            raise AdapterError("production bundle target must use the fixed runtime path")
+        if output_path != PRODUCTION_INSTALL_RECEIPT:
+            raise AdapterError("production install receipt must use the fixed evidence path")
+        if systemd_root != PRODUCTION_SYSTEMD_ROOT:
+            raise AdapterError("production systemd root must use the fixed approved path")
+    bundle_root = ensure_existing_directory(bundle_root_arg, name="bundle root")
+    if target == bundle_root:
+        raise AdapterError("bundle target must differ from bundle root")
+    uid, gid = (default_owner() if test_seam else (1000, 1000))
+    systemd_uid, systemd_gid = (default_owner() if test_seam else (0, 0))
+    target_mode = args.target_mode
+    if target_mode != 0o755 or target_mode & ~0o777:
+        raise AdapterError("bundle target mode must be exactly 0755")
+    manifest, members, manifest_hash = _load_manifest(bundle_root, manifest_path, release_sha)
+    runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
+    systemd_members = [item for item in members if item.get("install_root") == "systemd"]
+    if not test_seam:
+        if {item["target"] for item in runtime_members} != EXPECTED_INSTALLED_RUNTIME_MEMBERS:
+            raise AdapterError("runtime bundle manifest does not match the closed inventory")
+        if {item["path"] for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
+            raise AdapterError("systemd bundle manifest does not match the signed inventory")
+        for item in runtime_members:
+            if item["mode"] != RUNTIME_MEMBER_MODES[item["target"]]:
+                raise AdapterError(f"runtime bundle executable mode mismatch: {item['target']}")
+        for item in systemd_members:
+            if item["mode"] != SYSTEMD_MEMBER_MODES[item["path"]]:
+                raise AdapterError(f"systemd bundle mode mismatch: {item['path']}")
+    _validate_bundle_tree(bundle_root, manifest_path, members, exact_inventory=not test_seam)
+
+    if not test_seam:
+        verifier = PRODUCTION_OPENSSL
+        image_digest = _bare_digest(args.image_digest)
+        compose_sha256 = require_hex(args.compose_sha256, name="rendered Compose SHA256", length=64)
+        compose_template_sha256 = require_hex(args.compose_template_sha256, name="Compose template SHA256", length=64)
+        state_root = "/var/lib/asrsub/state"
+        generation = args.generation
+        if generation is not None and generation <= 0:
+            raise AdapterError("approval generation must be positive")
+        approval = _read_approval(args.approval)
+        _validate_approval(
+            approval,
+            release_sha=release_sha,
+            manifest_hash=manifest_hash,
+            image_digest=image_digest,
+            compose_sha256=compose_sha256,
+            compose_template_sha256=compose_template_sha256,
+            state_root=state_root,
+            generation=generation,
+            production=True,
+        )
+        approval_signature = _require_fixed_path(args.approval_signature or DEFAULT_APPROVAL_SIGNATURE, DEFAULT_APPROVAL_SIGNATURE, name="approval signature")
+        approval_key = _require_fixed_path(args.approval_public_key or DEFAULT_APPROVAL_PUBLIC_KEY, DEFAULT_APPROVAL_PUBLIC_KEY, name="approval trust anchor")
+        bundle_signature = _require_fixed_path(args.bundle_signature or DEFAULT_BUNDLE_SIGNATURE, DEFAULT_BUNDLE_SIGNATURE, name="bundle signature")
+        bundle_key = _require_fixed_path(args.bundle_public_key or DEFAULT_BUNDLE_PUBLIC_KEY, DEFAULT_BUNDLE_PUBLIC_KEY, name="bundle trust anchor")
+        _verify_detached(verifier=verifier, signature=bundle_signature, public_key=bundle_key, data=manifest_path, label="bundle", test_seam=False)
+        _verify_detached(verifier=verifier, signature=approval_signature, public_key=approval_key, data=args.approval, label="approval", test_seam=False)
+        approval_receipt = {
+            "verified": True,
+            "schema": approval["schema"],
+            "generation": approval["generation"],
+            "release_sha": release_sha,
+            "bundle_sha256": manifest_hash,
+            "image_digest": image_digest,
+            "compose_sha256": compose_sha256,
+            "compose_template_sha256": compose_template_sha256,
+            "approved_docker_socket": "default",
+            "approved_state_root": state_root,
+            "signature_algorithm": "openssl-dgst-sha256",
+        }
+    else:
+        verifier = args.verify_command
+        if verifier is None:
+            raise AdapterError("test-seam mode requires --verify-command")
+        verifier = require_absolute(verifier, name="verification command")
+        ensure_no_symlink(verifier, name="verification command", allow_missing=False)
+        if not verifier.is_file() or not os.access(verifier, os.X_OK):
+            raise AdapterError("verification command must be an executable regular file")
+        # Fixture/test-seam approval remains intentionally non-production.
+        _read_approval(args.approval)
+        verification = run_argv(
+            [verifier, "--bundle-root", bundle_root, "--manifest", manifest_path, "--approval", args.approval, "--release-sha", release_sha],
+            cwd=bundle_root,
+            secret_values=environment_secret_values(),
+        )
+        approval_receipt = {"verified": False, "test_seam": True, "verification_returncode": verification["returncode"]}
+
+    target_identity = None
+    if not args.dry_run:
+        parent = ensure_parent_directory(target, name="bundle target")
+        stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=parent))
+        systemd_stage: Path | None = None
+        if systemd_members:
+            systemd_stage = Path(tempfile.mkdtemp(prefix=".asrsub-systemd-stage-", dir=systemd_root))
+            os.chmod(systemd_stage, 0o755)
+            os.chown(systemd_stage, systemd_uid, systemd_gid)
+        try:
+            os.chmod(stage, target_mode)
+            os.chown(stage, uid, gid)
+            _stage_bundle(
+                bundle_root,
+                members,
+                stage,
+                uid=uid,
+                gid=gid,
+                systemd_stage=systemd_stage,
+                systemd_uid=systemd_uid,
+                systemd_gid=systemd_gid,
+            )
+            _commit_stage(stage, target, target_mode=target_mode, uid=uid, gid=gid, members=runtime_members)
+            if systemd_stage is not None:
+                _install_systemd_stage(systemd_stage, systemd_root, members, uid=systemd_uid, gid=systemd_gid)
+                systemd_stage = None
+        except Exception:
+            shutil.rmtree(stage, ignore_errors=True)
+            if systemd_stage is not None:
+                shutil.rmtree(systemd_stage, ignore_errors=True)
+            raise
+        _validate_target(target, runtime_members, target_mode=target_mode, uid=uid, gid=gid)
+        if systemd_members:
+            _validate_installed_systemd(systemd_root, members, uid=systemd_uid, gid=systemd_gid)
+        target_identity = filesystem_identity(target, name="bundle target")
+
+    receipt = {
+        "schema": "runtime-bundle-install-dry-run-receipt-v1" if args.dry_run else "runtime-bundle-install-receipt-v1",
+        "release_sha": release_sha,
+        "manifest_sha256": manifest_hash,
+        "members": members,
+        "approval": approval_receipt,
+        "target_root": os.fspath(target),
+        "systemd_root": os.fspath(systemd_root),
+        "target_identity": target_identity,
+        "dry_run": bool(args.dry_run),
+        "evidence_eligible": False if args.dry_run or test_seam else True,
+    }
+    ensure_parent_directory(output_path, name="install receipt output")
+    atomic_write_json(output_path, receipt, mode=0o600, uid=uid, gid=gid, name="install receipt")
     return 0
 
 
