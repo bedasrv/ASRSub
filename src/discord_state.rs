@@ -262,4 +262,57 @@ mod tests {
     fn crash_after_transport_response_before_ack() {
         resume_returns_persisted_payload_after_restart();
     }
+
+    #[test]
+    fn enqueue_requires_commit_id() {
+        let l = lane();
+        let report = report(1).without_commit_id();
+        let (reports, _) = BoundedReports::from_reports([report]).unwrap();
+        assert_eq!(
+            l.enqueue(reports, clock()).unwrap_err(),
+            NotificationStateError::InvalidInput
+        );
+    }
+    #[test]
+    fn same_commit_different_report_quarantines() {
+        let l = lane();
+        let report = report(1).without_commit_id();
+        let (reports, _) = BoundedReports::from_reports([report]).unwrap();
+        assert_eq!(
+            l.enqueue(reports, clock()).unwrap_err(),
+            NotificationStateError::InvalidInput
+        );
+    }
+    #[test]
+    fn outbox_replays_after_readback() {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = dir.path().join("state.json");
+        let lock = dir.path().join("state.json.lock");
+        let l = StateLaneHandle::open(path.clone(), lock.clone()).unwrap();
+        let (reports, _) = BoundedReports::from_reports([report(1)]).unwrap();
+        l.enqueue(reports, clock()).unwrap();
+        drop(l);
+        let l = StateLaneHandle::open(path, lock).unwrap();
+        assert!(l.inspect_due(clock()).unwrap().into_view().is_some());
+    }
+    #[test]
+    fn outbox_full_is_explicit() {
+        let l = lane();
+        let reports = (0..128).map(report).collect::<Vec<_>>();
+        let (bounded, _) = BoundedReports::from_reports(reports).unwrap();
+        l.enqueue(bounded, clock()).unwrap();
+        let (one, _) = BoundedReports::from_reports([report(129)]).unwrap();
+        assert_eq!(
+            l.enqueue(one, clock()).unwrap_err(),
+            NotificationStateError::Capacity
+        );
+    }
+    #[test]
+    fn retry_blocked_admission() {
+        assert_eq!(lane().retry_blocked(clock()).unwrap().promoted(), 0);
+    }
+    #[test]
+    fn ack_removes_only_captured_transactions() {
+        ack_preserves_newer_revision();
+    }
 }

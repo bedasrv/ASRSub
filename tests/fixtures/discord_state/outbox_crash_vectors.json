@@ -1,0 +1,1 @@
+{"schema":"discord-outbox-scenarios-v1","faults":["before-commit","before-admission","during-write","after-readback","after-transport-before-ack"],"classification":"at-least-once"}
