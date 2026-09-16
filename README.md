@@ -81,6 +81,41 @@ value enters the process environment at container start — rotate by editing
 the env file and re-running `docker compose up -d`. The keyless template
 ships inside the Docker image (see `docs/DEPLOY.md`).
 
+## Optional Discord notifications
+
+**Requirement (core):** the daemon may send a bounded digest to Discord through
+the outbound webhook stored at the fixed runtime-secret path
+`/run/secrets/discord_webhook`. Discord is a destination only: it is never an
+ASRSub command source, listener, control plane, or replacement for the
+authenticated inbound `/webhook` route.
+
+Notifications are daemon-only. `asrsub run-once` continues to use the public
+stats-only pipeline wrapper and performs no Discord secret, notification-state,
+DNS, or transport access. Idle passes create no new digest; an already durable
+due digest may still be delivered. The durable notification gate enforces a
+minimum 900-second interval between HTTP attempt starts and uses at-least-once
+delivery after outbox admission, so a crash after remote acceptance can be a
+conservative duplicate.
+
+Invalid, missing, empty, or inaccessible optional secret input disables
+notifications without stopping subtitle processing. The reserved key
+`DISCORD_WEBHOOK_URL` (in any ASCII case) is rejected from configuration files,
+process environment merging, API/dashboard writes, and masked output. The URL
+is never stored in `Config::raw`, logs, public responses, or an application
+environment.
+
+**Local evidence:** renderer/state/transport tests use bounded safe fixtures,
+an in-memory fake transport, or test-only localhost endpoints. They verify
+deterministic non-mention payloads, state quarantine, replay, and failure
+isolation without contacting Discord.
+
+**Rollout-only evidence (hardening):** production secret staging, non-root
+container mounts, child cleanup, release provenance, resolver/address
+binding, systemd recovery, and deployment journal/rollback evidence are owned
+by the deployment-hardening plan. This repository's `pipeline.env.example`
+remains non-secret and intentionally contains no Discord URL, token, enable
+flag, or outbound webhook setting.
+
 Failover: every LLM chunk races all configured models fastest-first (404
 or error → next model, 3 straight failures → 60 s breaker); Whisper tries
 `whisper_stt` then `whisper_stt_fallbacks` in order with the same

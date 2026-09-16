@@ -82,6 +82,29 @@ curl -sf http://127.0.0.1:8085/ready  | jq .   # non-zero exit when 503
 
 Checked by `/ready` (media root, state dir, providers) or by the operator:
 
+### Notification and deployment boundary
+
+- **Requirement (core):** outbound Discord delivery is constructed only by the
+  long-running daemon. `run-once` has zero notification secret/state/transport
+  access, and the existing authenticated inbound `/webhook` remains an
+  independent Tdarr wake/extraction route.
+- **Requirement (core):** notification state is separate from the pipeline
+  JSONL ledgers. State admission is serialized by one StateLane, survives
+  restart, quarantines contradictory bytes rather than treating them as an
+  empty store, and enforces the 900-second attempt-start floor. Notification
+  failures do not change pipeline counters, `LastPass`, readiness, or public
+  response shapes.
+- **Local evidence:** local fake/localhost transport and bounded fixture tests
+  cover safe payloads, optional-secret failure continuation, state replay, and
+  acknowledgement races. These tests do not prove a live container boundary
+  or visual Discord rendering.
+- **Rollout-only evidence (hardening):** production StateFs mount identity,
+  staged secret ownership, child-process isolation, signed image/Compose
+  provenance, resolver snapshots, systemd recovery, authenticated quiesce,
+  and rollback receipts must be established by the separate deployment
+  hardening gates. No notifier-only firewall claim is made: the current
+  notifier shares the ASRSub process with its other integrations.
+
 ### 1. Local State Directory
 
 - **What**: `/home/user/.config/asr-pipeline` (or `$STATE_FILE` dirname)
