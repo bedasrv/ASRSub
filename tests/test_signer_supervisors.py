@@ -1,4 +1,5 @@
 import atexit
+import errno
 import json
 import os
 import pwd
@@ -86,6 +87,17 @@ class TestSignerPolicyAndBuild(unittest.TestCase):
             self.assertEqual(POLICY[role]["command"][0:4], ["/usr/bin/python3", "tools/asrsub-env", "--pass-fd", target_fd])
             self.assertNotIn("--fixture", POLICY[role]["command"])
             self.assertEqual(POLICY[role]["command"][-2:], ["--key-fd", "3"] if role == "bundle" else ["--approval-key-fd", "4"])
+
+    def test_descriptor_matrix_is_role_scoped_to_its_target_fd(self):
+        expected_target_fds = {"bundle": 3, "approval": 4}
+        seen_roles = set()
+        for entry in POLICY["descriptor_matrix"]:
+            self.assertIn("role", entry)
+            role = entry["role"]
+            self.assertIn(role, expected_target_fds)
+            self.assertEqual(entry["target_fd"], expected_target_fds[role])
+            seen_roles.add(role)
+        self.assertEqual(seen_roles, set(expected_target_fds))
 
     def test_recipe_emits_two_reproducible_executables(self):
         first = TASK_SCRATCH / "first"
@@ -192,6 +204,15 @@ class TestRealAsrsubEnvBoundary(unittest.TestCase):
         )
         key = TASK_SCRATCH / "forward-key.pem"
         key.write_bytes(b"temporary-test-key\n")
+        saved_fd_3 = None
+        saved_fd_3_inheritable = None
+        try:
+            saved_fd_3 = os.dup(3)
+        except OSError as exc:
+            if exc.errno != errno.EBADF:
+                raise
+        else:
+            saved_fd_3_inheritable = os.get_inheritable(3)
         key_fd = os.open(key, os.O_RDONLY)
         try:
             if key_fd != 3:
@@ -220,10 +241,18 @@ class TestRealAsrsubEnvBoundary(unittest.TestCase):
             self.assertEqual(observed["fds"], [3])
             self.assertNotIn("ASRSUB_TEST_INHERITED", observed["env"])
         finally:
-            try:
-                os.close(3)
-            except OSError:
-                pass
+            if saved_fd_3 is not None:
+                try:
+                    os.dup2(saved_fd_3, 3)
+                    os.set_inheritable(3, saved_fd_3_inheritable)
+                finally:
+                    os.close(saved_fd_3)
+            else:
+                try:
+                    os.close(3)
+                except OSError as exc:
+                    if exc.errno != errno.EBADF:
+                        raise
 
     def test_wrapper_cancellation_contract_forwards_process_group_signal(self):
         source = (ROOT / "tools" / "asrsub-env").read_text(encoding="utf-8")
@@ -482,10 +511,15 @@ raise SystemExit(int(pathlib.Path('supervisor-exit-code').read_text(encoding='ut
         privileged_command("chmod", "0400", str(fixed))
 
     def test_unsafe_implementation_root_mode_fails_closed(self):
+        observation = self.implementation / "supervisor-observation.json"
+        privileged_command("rm", "-f", str(observation))
         privileged_command("chmod", "0777", str(self.implementation))
-        result = self.invoke("bundle")
-        self.assertNotEqual(result.returncode, 0)
-        privileged_command("chmod", "0755", str(self.implementation))
+        try:
+            result = self.invoke("bundle")
+        finally:
+            privileged_command("chmod", "0755", str(self.implementation))
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertFalse(observation.exists(), "unsafe implementation root reached the child")
 
 
 if __name__ == "__main__":

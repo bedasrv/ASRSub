@@ -64,6 +64,7 @@
   },
   "descriptor_matrix": [
     {
+      "role": "bundle",
       "stage": "launcher",
       "key_fd": 7,
       "target_fd": 3,
@@ -71,6 +72,7 @@
       "target_present": false
     },
     {
+      "role": "bundle",
       "stage": "wrapper-entry",
       "key_fd": 3,
       "target_fd": 3,
@@ -78,6 +80,7 @@
       "target_present": true
     },
     {
+      "role": "bundle",
       "stage": "wrapper-parent",
       "key_fd": 8,
       "target_fd": 3,
@@ -85,6 +88,7 @@
       "target_present": false
     },
     {
+      "role": "bundle",
       "stage": "direct-child",
       "key_fd": 8,
       "target_fd": 3,
@@ -92,9 +96,50 @@
       "target_present": true
     },
     {
+      "role": "bundle",
       "stage": "non-target",
       "key_fd": 8,
       "target_fd": 3,
+      "key_cloexec": false,
+      "target_present": false
+    },
+    {
+      "role": "approval",
+      "stage": "launcher",
+      "key_fd": 7,
+      "target_fd": 4,
+      "key_cloexec": true,
+      "target_present": false
+    },
+    {
+      "role": "approval",
+      "stage": "wrapper-entry",
+      "key_fd": 4,
+      "target_fd": 4,
+      "key_cloexec": false,
+      "target_present": true
+    },
+    {
+      "role": "approval",
+      "stage": "wrapper-parent",
+      "key_fd": 8,
+      "target_fd": 4,
+      "key_cloexec": true,
+      "target_present": false
+    },
+    {
+      "role": "approval",
+      "stage": "direct-child",
+      "key_fd": 8,
+      "target_fd": 4,
+      "key_cloexec": false,
+      "target_present": true
+    },
+    {
+      "role": "approval",
+      "stage": "non-target",
+      "key_fd": 8,
+      "target_fd": 4,
       "key_cloexec": false,
       "target_present": false
     }
