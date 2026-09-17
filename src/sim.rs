@@ -245,14 +245,6 @@ fn ladder_ja_fixture() -> String {
     s
 }
 
-fn state_rows(path: &Path) -> Vec<crate::state::StateEntry> {
-    crate::state::load_jsonl(path)
-}
-
-fn registry_rows(path: &Path) -> Vec<crate::state::RegistryRow> {
-    crate::state::load_jsonl(path)
-}
-
 /// Full-program simulation: stub services + fake media tools, real pipeline.
 /// See the module docs for the phase plan.
 #[tokio::test]
@@ -415,14 +407,14 @@ exit 0
     let mut ups = stubs.uploads.lock().await.clone();
     ups.sort();
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     assert_eq!(
         rows.iter()
             .filter(|r| r.status.as_deref() == Some("done"))
             .count(),
         2
     );
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("asr")));
     assert!(reg.iter().all(|r| r.source_kind.is_none()));
@@ -498,7 +490,9 @@ exit 0
         }
     ));
     assert!(!Path::new(&format!("{stem_s}.fr.hi.srt")).exists());
-    assert!(!registry_rows(&failing_pipe.cfg.registry_file)
+    let registry =
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&failing_pipe.cfg.registry_file);
+    assert!(!registry
         .iter()
         .any(|row| row.episode_id == Some(8) && row.lang.as_deref() == Some("fr")));
     assert!(!stubs.uploads.lock().await.iter().any(|lang| lang == "fr"));
@@ -520,7 +514,7 @@ exit 0
         "ladder must skip ASR"
     );
     assert!(*stubs.llm_hits.lock().await > 0);
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("jpn")));
     assert!(reg
@@ -555,7 +549,7 @@ exit 0
     let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
     stubs.wanted_id_missing.store(true, Ordering::Relaxed);
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     assert!(rows
         .iter()
         .any(|r| r.language.as_deref() == Some("id") && r.status.as_deref() == Some("done")));
@@ -655,7 +649,7 @@ exit 0
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
     // Both movie languages committed as kind=movie; the decoy series row
     // for id 100 is still there, untouched and irrelevant.
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     for lang in ["id", "en"] {
         assert!(
             rows.iter().any(|r| r.kind.as_deref() == Some("movie")
@@ -665,7 +659,7 @@ exit 0
             "missing movie done row for {lang}"
         );
     }
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(
         reg.iter()
             .filter(|r| r.extra.get("kind").and_then(|v| v.as_str()) == Some("movie"))
@@ -744,11 +738,12 @@ fi
             "no sidecar may be written for an unestablished source language"
         );
     }
-    assert!(registry_rows(&pipe.cfg.registry_file).is_empty());
+    assert!(
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file).is_empty()
+    );
     assert!(stubs.uploads.lock().await.is_empty());
-    assert!(state_rows(&pipe.cfg.state_file)
-        .iter()
-        .any(|r| r.status.as_deref() == Some("error")));
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
+    assert!(rows.iter().any(|r| r.status.as_deref() == Some("error")));
 
     // ---- Phase I: successful detection (round-2 coverage) ----
     // The same untagged track, but the provider now reports a language. The
@@ -788,7 +783,7 @@ fi
     let mut ups = stubs.uploads.lock().await.clone();
     ups.sort();
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     for r in &reg {
         assert_eq!(r.source.as_deref(), Some("asr"), "row is not ASR: {r:?}");
@@ -804,7 +799,7 @@ fi
         );
     }
     assert_eq!(
-        state_rows(&pipe.cfg.state_file)
+        crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file)
             .iter()
             .filter(|r| r.status.as_deref() == Some("done"))
             .count(),
@@ -819,7 +814,8 @@ fi
         std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
     }
     std::fs::write(&pipe.cfg.state_file, "").unwrap();
-    let mut registry = registry_rows(&pipe.cfg.registry_file);
+    let mut registry =
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     for row in &mut registry {
         if row.lang.as_deref() == Some("id") {
             row.source = Some("contradiction".to_string());
@@ -883,7 +879,8 @@ fi
         retry_reports.iter().next().unwrap().aggregate(),
         crate::feature_modules::discord_types::AggregateDisposition::Failed
     );
-    assert!(!state_rows(&pipe.cfg.state_file).iter().any(|row| {
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
+    assert!(!rows.iter().any(|row| {
         row.language.as_deref() == Some("id") && row.status.as_deref() == Some("done")
     }));
 }
