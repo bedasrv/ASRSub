@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import os
+import signal
 import shutil
 import stat
 import subprocess
@@ -43,6 +44,23 @@ FORBIDDEN_ENV_FRAGMENTS = (
 CARGO_COMMANDS = frozenset({"cargo", "rustc", "rustup"})
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+CANCELLATION_SIGNALS = tuple(
+    value for value in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM) if value is not None
+)
+_child_process: subprocess.Popen | None = None
+_cancel_signal: int | None = None
+
+
+def _forward_cancellation(signum: int, _frame: object) -> None:
+    global _cancel_signal
+    _cancel_signal = signum
+    child = _child_process
+    if child is None or child.poll() is not None:
+        return
+    try:
+        os.killpg(child.pid, signum)
+    except ProcessLookupError:
+        pass
 
 
 def _lstat_directory_components(path: Path, *, name: str) -> os.stat_result:
@@ -267,6 +285,8 @@ def _environment(root: Path, pass_fd: int | None, *, cargo_home: Path, target_ro
 
 
 def main(argv: list[str]) -> int:
+    global _child_process, _cancel_signal
+
     pass_fd: int | None = None
     if argv[:1] == ["--pass-fd"]:
         if len(argv) < 3:
@@ -298,17 +318,30 @@ def main(argv: list[str]) -> int:
                     raise SystemExit(f"asrsub-env: forbidden environment key {key}")
 
         pass_fds = (pass_fd,) if pass_fd is not None else ()
-        proc = subprocess.Popen(
-            argv,
-            env=env,
-            cwd=os.getcwd(),
-            stdin=None,
-            stdout=None,
-            stderr=None,
-            close_fds=True,
-            pass_fds=pass_fds,
-            start_new_session=False,
-        )
+        previous_handlers: dict[signal.Signals, object] = {}
+        _cancel_signal = None
+        for signum in CANCELLATION_SIGNALS:
+            previous_handlers[signum] = signal.signal(signum, _forward_cancellation)
+        try:
+            proc = subprocess.Popen(
+                argv,
+                env=env,
+                cwd=os.getcwd(),
+                stdin=None,
+                stdout=None,
+                stderr=None,
+                close_fds=True,
+                pass_fds=pass_fds,
+                start_new_session=True,
+            )
+            _child_process = proc
+            if _cancel_signal is not None:
+                _forward_cancellation(_cancel_signal, None)
+            returncode = proc.wait()
+        finally:
+            _child_process = None
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
         if pass_fd is not None:
             try:
                 os.close(pass_fd)
@@ -316,7 +349,9 @@ def main(argv: list[str]) -> int:
                 if exc.errno != errno.EBADF:
                     raise
             pass_fd = None
-        return proc.wait()
+        if _cancel_signal is not None:
+            return 128 + _cancel_signal
+        return returncode
     finally:
         if pass_fd is not None:
             try:

@@ -29,7 +29,7 @@ jobs:
       - run: bash -n build.sh
       - run: bash -n tools/build_signer_supervisors.sh
       - run: bash -n scripts/asrsub-health-probe scripts/deploy_smoke.sh
-      - run: python3 tools/check_file_budgets.py --structural-only --repo-root . --manifest tests/fixtures/platform/file-budgets.json
+      - run: python3 tools/check_file_budgets.py --repo-root . --manifest tests/fixtures/platform/file-budgets.json
       - run: ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:ci docker compose config -q
 
   docker:

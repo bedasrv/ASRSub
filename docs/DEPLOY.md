@@ -192,8 +192,13 @@ by `tools/build_signer_supervisors.sh`, producing the fixed-role launchers
 material; install it as root on the approved signing host:
 
 ```bash
-sudo tools/build_signer_supervisors.sh --output-dir /usr/local/sbin
+sudo tools/build_signer_supervisors.sh
 ```
+
+The `--output-dir` option is only a test seam and is constrained to a
+no-symlink directory below `/tmp/agent-scratch` or `/var/tmp`; production
+installation is fixed at `/usr/local/sbin` and uses `/usr/bin/cc` and
+`/usr/bin/install`.
 
 The bundle supervisor uses the root-owned `0400` key
 `/etc/asrsub/signing/bundle-signing-key.pem`; the approval supervisor uses
@@ -205,12 +210,20 @@ absolute no-symlink implementation root, and the exact command in
 without putting its path in `argv`, the environment, logs, or receipts, then
 passes it only as FD 3 (bundle) or FD 4 (approval). All other inherited
 non-standard descriptors are closed before the direct `execve`.
+Before execution it revalidates the root-owned, non-writable `tools/` scripts
+and the fixed release input trees without following links; output paths are
+intentionally not part of that validation. A privileged root attacker who can
+replace files after validation remains outside this user-space boundary.
 
 For a trusted, root-owned repository checkout containing the current `release/`
 inputs, the host invokes the role launcher with the matching token and root;
 the command after `--` must be copied exactly from the policy. The Python
 signers retain the current RSA contract: `/usr/bin/openssl dgst -sha256` signs
 through that FD, and no Ed25519 path is supported.
+
+`tools/asrsub-env` starts the signer in its own process group and forwards
+SIGHUP, SIGINT, and SIGTERM to that group so cancellation does not strand the
+OpenSSL descendant.
 
 The repository does not open or hand off a production private key, fabricate a
 signed bundle, or claim target signing/rollout evidence. Key provisioning,

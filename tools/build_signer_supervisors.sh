@@ -1,16 +1,26 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 # Build and install the two fixed-role ASRSub signer supervisors.
 set -euo pipefail
-PATH=/usr/bin:/bin
-export PATH
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+ROOT="$(cd -- "$(/usr/bin/dirname -- "$0")/.." && /usr/bin/pwd -P)"
+SOURCE="$ROOT/tools/asrsub_signer_supervisor.c"
 OUTPUT_DIR="/usr/local/sbin"
-CC_BIN="${CC:-/usr/bin/cc}"
+OUTPUT_OVERRIDE=0
+CC_BIN="/usr/bin/cc"
+INSTALL_BIN="/usr/bin/install"
+MKTEMP_BIN="/usr/bin/mktemp"
+REALPATH_BIN="/usr/bin/realpath"
+RM_BIN="/usr/bin/rm"
+STAT_BIN="/usr/bin/stat"
 
 usage() {
-    echo "usage: tools/build_signer_supervisors.sh [--output-dir DIR] [--cc COMPILER]" >&2
+    echo "usage: tools/build_signer_supervisors.sh [--output-dir TEST_DIR]" >&2
     exit 2
+}
+
+fail() {
+    echo "asrsub-signer-build: $1" >&2
+    exit 1
 }
 
 while (($#)); do
@@ -18,11 +28,7 @@ while (($#)); do
         --output-dir)
             (($# >= 2)) || usage
             OUTPUT_DIR=$2
-            shift 2
-            ;;
-        --cc)
-            (($# >= 2)) || usage
-            CC_BIN=$2
+            OUTPUT_OVERRIDE=1
             shift 2
             ;;
         *)
@@ -32,15 +38,61 @@ while (($#)); do
 done
 
 [[ -n "$OUTPUT_DIR" ]] || usage
-if [[ "$OUTPUT_DIR" != /* ]]; then
-    OUTPUT_DIR="$ROOT/$OUTPUT_DIR"
+[[ "$OUTPUT_DIR" == /* ]] || fail "output directory must be absolute"
+case "$OUTPUT_DIR" in
+    *"/../"*|*/..|../*|..)
+        fail "output directory contains traversal"
+        ;;
+esac
+
+check_directory_metadata() {
+    local directory=$1
+    local uid mode type
+    [[ -d "$directory" && ! -L "$directory" ]] || fail "output directory component is unsafe"
+    read -r uid mode type < <("$STAT_BIN" -c '%u %a %F' -- "$directory") || fail "cannot inspect output directory"
+    [[ "$uid" == 0 && "$type" == "directory" ]] || fail "production output directory is not root-owned"
+    (( (8#$mode & 022) == 0 )) || fail "production output directory is writable by group or other"
+}
+
+check_production_destination() {
+    [[ "$OUTPUT_DIR" == "/usr/local/sbin" ]] || fail "production output directory is fixed at /usr/local/sbin"
+    local directory
+    for directory in / /usr /usr/local /usr/local/sbin; do
+        check_directory_metadata "$directory"
+    done
+}
+
+check_test_destination() {
+    case "$OUTPUT_DIR" in
+        /tmp/agent-scratch/*|/var/tmp/*)
+            ;;
+        *)
+            fail "test output directory must be below /tmp/agent-scratch or /var/tmp"
+            ;;
+    esac
+    local parent resolved
+    parent="$(/usr/bin/dirname -- "$OUTPUT_DIR")"
+    [[ -d "$parent" && ! -L "$parent" ]] || fail "test output parent is unsafe or absent"
+    resolved="$($REALPATH_BIN -e -- "$parent")" || fail "cannot resolve test output parent"
+    [[ "$resolved" == "$parent" ]] || fail "test output parent contains a symlink"
+    if [[ -e "$OUTPUT_DIR" || -L "$OUTPUT_DIR" ]]; then
+        [[ -d "$OUTPUT_DIR" && ! -L "$OUTPUT_DIR" ]] || fail "test output directory is not a directory"
+    else
+        "$INSTALL_BIN" -d -m 0700 -- "$OUTPUT_DIR"
+    fi
+    resolved="$($REALPATH_BIN -e -- "$OUTPUT_DIR")" || fail "cannot resolve test output directory"
+    [[ "$resolved" == "$OUTPUT_DIR" ]] || fail "test output directory contains a symlink"
+}
+
+if [[ "$OUTPUT_OVERRIDE" == 0 || "$OUTPUT_DIR" == "/usr/local/sbin" ]]; then
+    check_production_destination
+else
+    check_test_destination
 fi
 
-SOURCE="$ROOT/tools/asrsub_signer_supervisor.c"
-install -d -m 0755 -- "$OUTPUT_DIR"
-BUILD_DIR="$(mktemp -d -- "$OUTPUT_DIR/.asrsub-signer-build.XXXXXX")"
+BUILD_DIR="$($MKTEMP_BIN -d -- "$OUTPUT_DIR/.asrsub-signer-build.XXXXXX")"
 cleanup() {
-    rm -rf -- "$BUILD_DIR"
+    "$RM_BIN" -rf -- "$BUILD_DIR"
 }
 trap cleanup EXIT
 
@@ -62,5 +114,18 @@ COMMON_CFLAGS=(
     -Wl,-z,relro,-z,now -Wl,--build-id=none -pie \
     -o "$BUILD_DIR/asrsub-approval-signer"
 
-install -m 0755 -- "$BUILD_DIR/asrsub-bundle-signer" "$OUTPUT_DIR/asrsub-bundle-signer"
-install -m 0755 -- "$BUILD_DIR/asrsub-approval-signer" "$OUTPUT_DIR/asrsub-approval-signer"
+for name in asrsub-bundle-signer asrsub-approval-signer; do
+    destination="$OUTPUT_DIR/$name"
+    if [[ -L "$destination" || ( -e "$destination" && ! -f "$destination" ) ]]; then
+        fail "refusing unsafe existing destination"
+    fi
+done
+for name in asrsub-bundle-signer asrsub-approval-signer; do
+    destination="$OUTPUT_DIR/$name"
+    "$INSTALL_BIN" -m 0755 -- "$BUILD_DIR/$name" "$destination"
+    read -r uid mode type < <("$STAT_BIN" -c '%u %a %F' -- "$destination") || fail "cannot inspect installed supervisor"
+    [[ ! -L "$destination" && "$type" == "regular file" && "$mode" == 755 ]] || fail "installed supervisor metadata is unsafe"
+    if [[ "$OUTPUT_OVERRIDE" == 0 || "$OUTPUT_DIR" == "/usr/local/sbin" ]]; then
+        [[ "$uid" == 0 ]] || fail "installed supervisor is not root-owned"
+    fi
+done

@@ -1,12 +1,13 @@
 #define _GNU_SOURCE
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -48,6 +49,40 @@ static const char *const child_argv[] = {
     "3",
     NULL,
 };
+static const char *const required_directories[] = {
+    "tools",
+    "release",
+    "release/runtime",
+    "release/systemd",
+    "release/systemd/docker.service.d",
+    NULL,
+};
+static const char *const required_files[] = {
+    "tools/asrsub-env",
+    "tools/package_bundle.py",
+    "release/runtime/asrsub",
+    "release/runtime/asrsub-state",
+    "release/runtime/asrsub-record-rollout",
+    "release/runtime/asrsub-generate-media-runtime-manifest",
+    "release/runtime/asrsub-recover",
+    "release/runtime/asrsub-runtime",
+    "release/runtime/asrsub-health-probe",
+    "release/runtime/asrsub-provision-statefs",
+    "release/runtime/media-runtime-dependencies.json",
+    "release/runtime/production_entrypoint.py",
+    "release/runtime/production_adapter_common.py",
+    "release/runtime/deploy_docker.py",
+    "release/runtime/compose.yaml",
+    "release/systemd/asrsub-recovery.service",
+    "release/systemd/asrsub-runtime.service",
+    "release/systemd/docker.service.d/asrsub-recovery.conf",
+    NULL,
+};
+static const char *const required_trees[] = {
+    "release/runtime",
+    "release/systemd",
+    NULL,
+};
 #else
 #define ROLE_TOKEN "asrsub-approval-key"
 #define KEY_SOURCE "/etc/asrsub/signing/approval-key.pem"
@@ -71,6 +106,20 @@ static const char *const child_argv[] = {
     "--release-sha-from-git",
     "--approval-key-fd",
     "4",
+    NULL,
+};
+static const char *const required_directories[] = {
+    "tools",
+    "release",
+    NULL,
+};
+static const char *const required_files[] = {
+    "tools/asrsub-env",
+    "tools/create_approval.py",
+    "release/approval-canonical.json",
+    NULL,
+};
+static const char *const required_trees[] = {
     NULL,
 };
 #endif
@@ -162,12 +211,23 @@ static int safe_directory_fd(int fd)
     if (fstat(fd, &status) < 0 || !S_ISDIR(status.st_mode)) {
         return -1;
     }
-    if (status.st_uid != 0U && (status.st_mode & S_ISVTX) == 0U) {
+    if (status.st_uid != 0U) {
         return -1;
     }
     mode = status.st_mode;
     if ((mode & (S_ISUID | S_ISGID)) != 0U ||
         ((mode & (S_IWGRP | S_IWOTH)) != 0U && (mode & S_ISVTX) == 0U)) {
+        return -1;
+    }
+    return 0;
+}
+
+static int safe_regular_file_fd(int fd)
+{
+    struct stat status;
+
+    if (fstat(fd, &status) < 0 || !S_ISREG(status.st_mode) || status.st_uid != 0U ||
+        (status.st_mode & (S_ISUID | S_ISGID | S_IWGRP | S_IWOTH)) != 0U) {
         return -1;
     }
     return 0;
@@ -244,6 +304,193 @@ static int open_safe_directory(const char *path)
     return current;
 }
 
+static int open_relative_directory(int root_fd, const char *path)
+{
+    int current;
+    const char *cursor = path;
+
+    if (path == NULL || path[0] == '\0' || path[0] == '/') {
+        return -1;
+    }
+    current = fcntl(root_fd, F_DUPFD_CLOEXEC, 3);
+    if (current < 0) {
+        return -1;
+    }
+    while (*cursor != '\0') {
+        const char *start = cursor;
+        size_t length;
+        char component[NAME_MAX + 1U];
+        int next;
+
+        while (*cursor != '\0' && *cursor != '/') {
+            ++cursor;
+        }
+        length = (size_t)(cursor - start);
+        if (length == 0U || length > NAME_MAX ||
+            (length == 1U && start[0] == '.') ||
+            (length == 2U && start[0] == '.' && start[1] == '.')) {
+            (void)close(current);
+            return -1;
+        }
+        (void)memcpy(component, start, length);
+        component[length] = '\0';
+        next = openat(current, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (next < 0 || safe_directory_fd(next) < 0) {
+            if (next >= 0) {
+                (void)close(next);
+            }
+            (void)close(current);
+            return -1;
+        }
+        (void)close(current);
+        current = next;
+        if (*cursor == '/') {
+            ++cursor;
+        }
+    }
+    if (safe_final_directory_fd(current) < 0) {
+        (void)close(current);
+        return -1;
+    }
+    return current;
+}
+
+static int open_relative_file(int root_fd, const char *path)
+{
+    const char *separator;
+    const char *name;
+    int directory_fd;
+    int file_fd;
+    char parent[PATH_MAX];
+    size_t parent_length;
+
+    if (path == NULL || path[0] == '\0' || path[0] == '/') {
+        return -1;
+    }
+    separator = strrchr(path, '/');
+    if (separator == NULL) {
+        directory_fd = fcntl(root_fd, F_DUPFD_CLOEXEC, 3);
+        name = path;
+    } else {
+        parent_length = (size_t)(separator - path);
+        if (parent_length == 0U || parent_length >= sizeof(parent)) {
+            return -1;
+        }
+        (void)memcpy(parent, path, parent_length);
+        parent[parent_length] = '\0';
+        directory_fd = open_relative_directory(root_fd, parent);
+        name = separator + 1;
+    }
+    if (directory_fd < 0 || name[0] == '\0' || strchr(name, '/') != NULL ||
+        (strcmp(name, ".") == 0) || (strcmp(name, "..") == 0)) {
+        if (directory_fd >= 0) {
+            (void)close(directory_fd);
+        }
+        return -1;
+    }
+    file_fd = openat(directory_fd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    (void)close(directory_fd);
+    if (file_fd < 0 || safe_regular_file_fd(file_fd) < 0) {
+        if (file_fd >= 0) {
+            (void)close(file_fd);
+        }
+        return -1;
+    }
+    return file_fd;
+}
+
+static int validate_tree_fd(int directory_fd)
+{
+    int scan_fd;
+    DIR *stream;
+    struct dirent *entry;
+    int result = 0;
+
+    scan_fd = fcntl(directory_fd, F_DUPFD_CLOEXEC, 3);
+    if (scan_fd < 0) {
+        return -1;
+    }
+    stream = fdopendir(scan_fd);
+    if (stream == NULL) {
+        (void)close(scan_fd);
+        return -1;
+    }
+    for (;;) {
+        int child_fd;
+        struct stat status;
+
+        errno = 0;
+        entry = readdir(stream);
+        if (entry == NULL) {
+            if (errno != 0) {
+                result = -1;
+            }
+            break;
+        }
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        child_fd = openat(directory_fd, entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (child_fd < 0 || fstat(child_fd, &status) < 0) {
+            if (child_fd >= 0) {
+                (void)close(child_fd);
+            }
+            result = -1;
+            break;
+        }
+        if (S_ISDIR(status.st_mode)) {
+            if (safe_final_directory_fd(child_fd) < 0 || validate_tree_fd(child_fd) < 0) {
+                result = -1;
+            }
+        } else if (safe_regular_file_fd(child_fd) < 0) {
+            result = -1;
+        }
+        (void)close(child_fd);
+        if (result < 0) {
+            break;
+        }
+    }
+    if (closedir(stream) < 0) {
+        result = -1;
+    }
+    return result;
+}
+
+static int validate_root_contents(int root_fd)
+{
+    size_t index;
+
+    for (index = 0U; required_directories[index] != NULL; ++index) {
+        int directory_fd = open_relative_directory(root_fd, required_directories[index]);
+
+        if (directory_fd < 0) {
+            return -1;
+        }
+        (void)close(directory_fd);
+    }
+    for (index = 0U; required_files[index] != NULL; ++index) {
+        int file_fd = open_relative_file(root_fd, required_files[index]);
+
+        if (file_fd < 0) {
+            return -1;
+        }
+        (void)close(file_fd);
+    }
+    for (index = 0U; required_trees[index] != NULL; ++index) {
+        int directory_fd = open_relative_directory(root_fd, required_trees[index]);
+
+        if (directory_fd < 0 || validate_tree_fd(directory_fd) < 0) {
+            if (directory_fd >= 0) {
+                (void)close(directory_fd);
+            }
+            return -1;
+        }
+        (void)close(directory_fd);
+    }
+    return 0;
+}
+
 static int open_signing_key(void)
 {
     int directory_fd;
@@ -292,20 +539,42 @@ static int close_non_target_descriptors(int target_fd)
     }
 #endif
     {
-        struct rlimit limit;
-        rlim_t maximum = 65536U;
-        int fd;
+        DIR *stream = opendir("/proc/self/fd");
+        struct dirent *entry;
+        int directory_fd;
+        int result = 0;
 
-        if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur < maximum) {
-            maximum = limit.rlim_cur;
+        if (stream == NULL) {
+            return -1;
         }
-        for (fd = 3; (rlim_t)fd < maximum; ++fd) {
-            if (fd != target_fd) {
-                (void)close(fd);
+        directory_fd = dirfd(stream);
+        for (;;) {
+            char *end = NULL;
+            long value;
+
+            errno = 0;
+            entry = readdir(stream);
+            if (entry == NULL) {
+                if (errno != 0) {
+                    result = -1;
+                }
+                break;
+            }
+
+            value = strtol(entry->d_name, &end, 10);
+            if (end == entry->d_name || *end != '\0' || value < 3L || value > INT_MAX ||
+                value == (long)target_fd || value == (long)directory_fd) {
+                continue;
+            }
+            if (close((int)value) < 0 && errno != EBADF) {
+                result = -1;
             }
         }
+        if (closedir(stream) < 0) {
+            result = -1;
+        }
+        return result;
     }
-    return 0;
 }
 
 static int move_key_to_target(int key_fd)
@@ -337,7 +606,14 @@ static int validate_invocation(int argc, char *const argv[], int *root_fd)
         }
     }
     *root_fd = open_safe_directory(argv[3]);
-    return *root_fd < 0 ? -1 : 0;
+    if (*root_fd < 0 || validate_root_contents(*root_fd) < 0) {
+        if (*root_fd >= 0) {
+            (void)close(*root_fd);
+            *root_fd = -1;
+        }
+        return -1;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)

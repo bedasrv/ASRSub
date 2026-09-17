@@ -2,10 +2,14 @@ import atexit
 import json
 import os
 import pwd
+import runpy
+import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -95,18 +99,44 @@ class TestSignerPolicyAndBuild(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(left.stat().st_mode), 0o755)
             self.assertEqual(left.read_bytes(), right.read_bytes())
 
+    def test_descriptor_cleanup_has_a_complete_non_close_range_fallback(self):
+        source = (ROOT / "tools" / "asrsub_signer_supervisor.c").read_text(encoding="utf-8")
+        self.assertIn('opendir("/proc/self/fd")', source)
+        self.assertNotIn("maximum = 65536U", source)
+
+    def test_build_recipe_pins_production_tooling_and_destination(self):
+        source = BUILD.read_text(encoding="utf-8")
+        self.assertTrue(source.startswith("#!/usr/bin/bash\n"))
+        self.assertIn('CC_BIN="/usr/bin/cc"', source)
+        self.assertIn('INSTALL_BIN="/usr/bin/install"', source)
+        self.assertIn('OUTPUT_DIR="/usr/local/sbin"', source)
+        self.assertNotIn("--cc", source)
+
 
 class TestSignerInvocationRejection(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="reject-", dir=TASK_SCRATCH))
         (self.root / "tools").mkdir()
+        self.sentinel = self.root / "child-ran"
+        wrapper = self.root / "tools" / "asrsub-env"
+        wrapper.write_text(
+            "#!/usr/bin/python3\n"
+            "from pathlib import Path\n"
+            "Path('child-ran').write_text('ran', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def assert_rejected_without_child(self, result):
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertFalse(self.sentinel.exists(), "the rejected child command executed")
+
     def test_wrong_role_token_is_rejected(self):
         result = run_reject("bundle", self.root, token=POLICY["approval"]["role_token"])
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_without_child(result)
         self.assertNotIn("private-test-key.pem", result.stderr)
 
     def test_extra_reordered_and_caller_selected_key_arguments_are_rejected(self):
@@ -119,26 +149,127 @@ class TestSignerInvocationRejection(unittest.TestCase):
             [*command[:1], "/tmp/tools/asrsub-env", *command[2:]],
         ):
             result = run_reject("bundle", self.root, candidate)
-            self.assertNotEqual(result.returncode, 0, candidate)
+            self.assert_rejected_without_child(result)
             self.assertNotIn("private-test-key.pem", result.stderr)
 
     def test_relative_traversal_and_symlink_implementation_roots_are_rejected(self):
         traversal = str(self.root / ".." / self.root.name)
         result = run_reject("bundle", traversal)
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_without_child(result)
 
         real = self.root / "real"
         real.mkdir()
         link = self.root / "link"
         link.symlink_to(real, target_is_directory=True)
         result = run_reject("bundle", link)
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_without_child(result)
 
     def test_relative_and_missing_implementation_roots_are_rejected(self):
         result = run_reject("approval", "relative-root")
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_without_child(result)
         result = run_reject("approval", self.root / "missing")
-        self.assertNotEqual(result.returncode, 0)
+        self.assert_rejected_without_child(result)
+
+
+class TestRealAsrsubEnvBoundary(unittest.TestCase):
+    def test_real_wrapper_forwards_fd_environment_and_exit_status(self):
+        parent = TASK_SCRATCH / "asrsub-env-parent"
+        parent.mkdir(mode=0o700)
+        child = TASK_SCRATCH / "forward-child.py"
+        observation = TASK_SCRATCH / "forward-observation.json"
+        child.write_text(
+            "import json, os, pathlib, sys\n"
+            "visible = []\n"
+            "for name in os.listdir('/proc/self/fd'):\n"
+            "    fd = int(name)\n"
+            "    if fd >= 3:\n"
+            "        try: os.fstat(fd)\n"
+            "        except OSError: continue\n"
+            "        visible.append(fd)\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({'env': dict(os.environ), 'fds': sorted(visible)}), encoding='utf-8')\n"
+            "raise SystemExit(17)\n",
+            encoding="utf-8",
+        )
+        key = TASK_SCRATCH / "forward-key.pem"
+        key.write_bytes(b"temporary-test-key\n")
+        key_fd = os.open(key, os.O_RDONLY)
+        try:
+            if key_fd != 3:
+                os.dup2(key_fd, 3)
+                os.close(key_fd)
+                key_fd = 3
+            module = runpy.run_path(str(ROOT / "tools" / "asrsub-env"))
+            module["SCRATCH_PARENT"] = parent
+            old_environment = os.environ.copy()
+            os.environ["ASRSUB_TEST_INHERITED"] = "must-not-reach-child"
+            try:
+                result = module["main"](
+                    [
+                        "--pass-fd",
+                        "3",
+                        "/usr/bin/python3",
+                        str(child),
+                        str(observation),
+                    ]
+                )
+            finally:
+                os.environ.clear()
+                os.environ.update(old_environment)
+            self.assertEqual(result, 17)
+            observed = json.loads(observation.read_text(encoding="utf-8"))
+            self.assertEqual(observed["fds"], [3])
+            self.assertNotIn("ASRSUB_TEST_INHERITED", observed["env"])
+        finally:
+            try:
+                os.close(3)
+            except OSError:
+                pass
+
+    def test_wrapper_cancellation_contract_forwards_process_group_signal(self):
+        source = (ROOT / "tools" / "asrsub-env").read_text(encoding="utf-8")
+        self.assertIn("start_new_session=True", source)
+        self.assertIn("os.killpg", source)
+        self.assertIn("signal.SIGTERM", source)
+
+    def test_real_wrapper_cancellation_stops_its_child_group(self):
+        parent = TASK_SCRATCH / "cancel-parent"
+        parent.mkdir(mode=0o700)
+        child = TASK_SCRATCH / "cancel-child.py"
+        marker = TASK_SCRATCH / "cancel-child-survived"
+        child.write_text(
+            "import pathlib, sys, time\n"
+            "time.sleep(1.0)\n"
+            "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+        runner = (
+            "import pathlib, runpy, sys\n"
+            "module = runpy.run_path(sys.argv[4])\n"
+            "module['SCRATCH_PARENT'] = pathlib.Path(sys.argv[1])\n"
+            "raise SystemExit(module['main'](['/usr/bin/python3', sys.argv[2], sys.argv[3]]))\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", runner, str(parent), str(child), str(marker), str(ROOT / "tools" / "asrsub-env")],
+            cwd=ROOT,
+            start_new_session=True,
+        )
+        try:
+            time.sleep(0.25)
+            process.terminate()
+            returncode = process.wait(timeout=3)
+            time.sleep(1.1)
+            survived = marker.exists()
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=3)
+            raise
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.assertEqual(returncode, 128 + signal.SIGTERM)
+        self.assertFalse(survived, "the cancelled wrapper left its child running")
 
 
 def privileged_command(*args, check=True):
@@ -198,7 +329,40 @@ class TestSignerExecutionBoundary(unittest.TestCase):
                 f"/etc/asrsub/signing/{name}",
             )
         cls.implementation = cls.tmp / "implementation"
-        (cls.implementation / "tools").mkdir(parents=True)
+        for directory in (
+            "tools",
+            "release",
+            "release/runtime",
+            "release/systemd",
+            "release/systemd/docker.service.d",
+        ):
+            (cls.implementation / directory).mkdir(parents=True, exist_ok=True)
+            (cls.implementation / directory).chmod(0o755)
+        required_files = (
+            "tools/package_bundle.py",
+            "tools/create_approval.py",
+            "release/approval-canonical.json",
+            "release/runtime/asrsub",
+            "release/runtime/asrsub-state",
+            "release/runtime/asrsub-record-rollout",
+            "release/runtime/asrsub-generate-media-runtime-manifest",
+            "release/runtime/asrsub-recover",
+            "release/runtime/asrsub-runtime",
+            "release/runtime/asrsub-health-probe",
+            "release/runtime/asrsub-provision-statefs",
+            "release/runtime/media-runtime-dependencies.json",
+            "release/runtime/production_entrypoint.py",
+            "release/runtime/production_adapter_common.py",
+            "release/runtime/deploy_docker.py",
+            "release/runtime/compose.yaml",
+            "release/systemd/asrsub-recovery.service",
+            "release/systemd/asrsub-runtime.service",
+            "release/systemd/docker.service.d/asrsub-recovery.conf",
+        )
+        for relative in required_files:
+            path = cls.implementation / relative
+            path.write_text("fixture\n", encoding="utf-8")
+            path.chmod(0o644)
         (cls.implementation / "supervisor-exit-code").write_text("0\n", encoding="utf-8")
         (cls.implementation / "supervisor-exit-code").chmod(0o666)
         (cls.implementation / "tools" / "asrsub-env").write_text(
