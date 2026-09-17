@@ -1,5 +1,7 @@
+import atexit
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -9,19 +11,27 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRATCH = Path("/tmp/agent-scratch/asrsub-signer-supervisors")
+TASK_SCRATCH_PARENT = Path(os.environ.get("ASRSUB_SIGNER_TASK_PARENT", "/tmp/agent-scratch"))
 BUILD = ROOT / "tools" / "build_signer_supervisors.sh"
 POLICY_PATH = ROOT / "tools" / "signer_argv_policy.json"
-if not SCRATCH.exists():
-    SCRATCH.mkdir(mode=0o700, parents=True, exist_ok=True)
-MODULE_ROOT = Path(tempfile.mkdtemp(prefix="test-", dir=SCRATCH))
-BIN_DIR = MODULE_ROOT / "bin"
-subprocess.run([str(BUILD), "--output-dir", str(BIN_DIR)], cwd=ROOT, check=True)
-POLICY = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
+TASK_SCRATCH_PARENT.mkdir(mode=0o700, parents=True, exist_ok=True)
+TASK_SCRATCH = Path(tempfile.mkdtemp(prefix="asrsub-signer-supervisors-", dir=TASK_SCRATCH_PARENT))
+BIN_DIR = TASK_SCRATCH / "bin"
+
+
+def cleanup_task_scratch():
+    shutil.rmtree(TASK_SCRATCH, ignore_errors=True)
+
+
+atexit.register(cleanup_task_scratch)
 
 
 def tearDownModule():
-    shutil.rmtree(MODULE_ROOT, ignore_errors=True)
+    cleanup_task_scratch()
+
+
+subprocess.run([str(BUILD), "--output-dir", str(BIN_DIR)], cwd=ROOT, check=True)
+POLICY = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
 
 
 def command_for(role):
@@ -74,8 +84,8 @@ class TestSignerPolicyAndBuild(unittest.TestCase):
             self.assertEqual(POLICY[role]["command"][-2:], ["--key-fd", "3"] if role == "bundle" else ["--approval-key-fd", "4"])
 
     def test_recipe_emits_two_reproducible_executables(self):
-        first = MODULE_ROOT / "first"
-        second = MODULE_ROOT / "second"
+        first = TASK_SCRATCH / "first"
+        second = TASK_SCRATCH / "second"
         subprocess.run([str(BUILD), "--output-dir", str(first)], cwd=ROOT, check=True)
         subprocess.run([str(BUILD), "--output-dir", str(second)], cwd=ROOT, check=True)
         for name in ("asrsub-bundle-signer", "asrsub-approval-signer"):
@@ -88,7 +98,7 @@ class TestSignerPolicyAndBuild(unittest.TestCase):
 
 class TestSignerInvocationRejection(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp(prefix="reject-", dir=SCRATCH))
+        self.root = Path(tempfile.mkdtemp(prefix="reject-", dir=TASK_SCRATCH))
         (self.root / "tools").mkdir()
 
     def tearDown(self):
@@ -136,27 +146,27 @@ def privileged_command(*args, check=True):
     return subprocess.run(prefix + list(args), check=check, capture_output=True, text=True)
 
 
-def trusted_scratch_ancestry(path):
-    current = path
-    while current != current.parent:
-        status = current.stat()
-        if status.st_uid != 0 and not (status.st_mode & stat.S_ISVTX):
-            return False
-        current = current.parent
-    return True
+def non_root_identity():
+    try:
+        account = pwd.getpwnam("nobody")
+    except KeyError:
+        account = next((item for item in pwd.getpwall() if item.pw_uid != 0), None)
+    if account is None or account.pw_uid == 0:
+        return None
+    return account.pw_uid, account.pw_gid
 
 
 class TestSignerExecutionBoundary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if os.geteuid() != 0 and privileged_command("true", check=False).returncode != 0:
-            raise unittest.SkipTest("root-owned fixed-key integration needs root or passwordless sudo")
-        if not trusted_scratch_ancestry(SCRATCH):
-            raise unittest.SkipTest("temporary implementation root is not under a trusted directory")
+            raise RuntimeError("root-owned fixed-key integration needs root or passwordless sudo")
         cls.fixed_root = Path("/etc/asrsub")
         if cls.fixed_root.exists():
-            raise unittest.SkipTest("do not disturb an existing /etc/asrsub signing installation")
-        cls.tmp = Path(tempfile.mkdtemp(prefix="execution-", dir=SCRATCH))
+            raise RuntimeError("refusing to disturb an existing /etc/asrsub signing installation")
+        cls.tmp = Path(tempfile.mkdtemp(prefix="asrsub-signer-supervisors-", dir="/var/tmp"))
+        cls.fixed_created = False
+        cls.addClassCleanup(cls._cleanup)
         cls.key_source = cls.tmp / "temporary-rsa-key.pem"
         subprocess.run(
             [
@@ -174,6 +184,7 @@ class TestSignerExecutionBoundary(unittest.TestCase):
             stderr=subprocess.DEVNULL,
         )
         privileged_command("install", "-d", "-o", "root", "-g", "root", "-m", "0755", "/etc/asrsub/signing")
+        cls.fixed_created = True
         for name in ("bundle-signing-key.pem", "approval-key.pem"):
             privileged_command(
                 "install",
@@ -220,13 +231,12 @@ raise SystemExit(int(pathlib.Path('supervisor-exit-code').read_text(encoding='ut
         privileged_command("chmod", "0755", str(cls.tmp), str(cls.implementation))
 
     @classmethod
-    def tearDownClass(cls):
-        if not hasattr(cls, "fixed_root") or not cls.fixed_root.exists():
-            return
-        for name in ("bundle-signing-key.pem", "approval-key.pem"):
-            privileged_command("rm", "-f", f"/etc/asrsub/signing/{name}", check=False)
-        privileged_command("rmdir", "/etc/asrsub/signing", check=False)
-        privileged_command("rmdir", "/etc/asrsub", check=False)
+    def _cleanup(cls):
+        if getattr(cls, "fixed_created", False):
+            for name in ("bundle-signing-key.pem", "approval-key.pem"):
+                privileged_command("rm", "-f", f"/etc/asrsub/signing/{name}", check=False)
+            privileged_command("rmdir", "/etc/asrsub/signing", check=False)
+            privileged_command("rmdir", "/etc/asrsub", check=False)
         if hasattr(cls, "tmp"):
             privileged_command("rm", "-rf", str(cls.tmp), check=False)
 
@@ -283,9 +293,14 @@ raise SystemExit(int(pathlib.Path('supervisor-exit-code').read_text(encoding='ut
         self.assertNotEqual(self.invoke("bundle").returncode, 0)
         privileged_command("chmod", "0400", str(fixed))
 
-        privileged_command("chown", f"{os.getuid()}:{os.getgid()}", str(fixed))
-        self.assertNotEqual(self.invoke("bundle").returncode, 0)
-        privileged_command("chown", "root:root", str(fixed))
+        identity = non_root_identity()
+        if identity is None:
+            self.skipTest("no non-root account is available for the ownership-negative case")
+        try:
+            privileged_command("chown", f"{identity[0]}:{identity[1]}", str(fixed))
+            self.assertNotEqual(self.invoke("bundle").returncode, 0)
+        finally:
+            privileged_command("chown", "root:root", str(fixed))
 
         backup = Path("/etc/asrsub/signing/.bundle-signing-key.pem.test-backup")
         privileged_command("mv", str(fixed), str(backup))
