@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+entrypoint=/usr/local/libexec/asrsub/production_entrypoint.py
+if [ -L "$entrypoint" ] || [ ! -f "$entrypoint" ]; then
+    exit 75
+fi
+exec /usr/bin/python3 "$entrypoint" recover --preflight

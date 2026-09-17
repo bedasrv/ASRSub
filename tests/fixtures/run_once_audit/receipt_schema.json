@@ -1,0 +1,1 @@
+{"schema":"run-once-audit-receipt-v1","required":["kind","implementation_commit","binary_sha256","events","observed_result"]}

@@ -8,7 +8,7 @@
 //! wrong-script rejection, CJK-echo probe, count-mismatch retry, per-line
 //! fallback, merge-aware tail completion.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::lang::normalize_lang;
@@ -84,57 +84,102 @@ async fn post_chat_once(
     thinking: bool,
     messages: &[ChatMsg],
 ) -> Result<Option<String>> {
-    let _permit = pool.acquire(idx).await;
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-    });
-    if thinking {
-        body["thinking"] = serde_json::json!({"type": "enabled", "effort": "max"});
-    }
-    let fut = pool
-        .http()
-        .post(endpoint)
-        .header("Authorization", format!("Bearer {key}"))
-        .json(&body)
-        .timeout(ProviderPool::llm_timeout())
-        .send();
-    let resp = match tokio::time::timeout(ProviderPool::llm_timeout(), fut).await {
-        Err(_) => {
-            // Outer timeout (hung endpoint): trip the breaker like any other
-            // failure so it leaves the rotation instead of stalling chunks.
-            pool.record_failure(idx);
-            anyhow::bail!("llm timeout");
+    let timeouts = pool.llm_timeouts();
+    let request = async {
+        let _permit = pool.acquire(idx).await;
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages,
+            "temperature": 0.3,
+        });
+        if thinking {
+            body["thinking"] = serde_json::json!({"type": "enabled", "effort": "max"});
         }
-        Ok(Err(e)) => {
+        let fut = pool
+            .http()
+            .post(endpoint)
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&body)
+            .timeout(timeouts.request)
+            .send();
+        let resp = match tokio::time::timeout(timeouts.connect.min(timeouts.request), fut).await {
+            Err(_) => {
+                pool.record_failure(idx);
+                anyhow::bail!(
+                    "llm connect/headers timeout after {} ms",
+                    timeouts.connect.as_millis()
+                );
+            }
+            Ok(Err(e)) => {
+                pool.record_failure(idx);
+                anyhow::bail!("llm {}", safe_reqwest_reason(&e));
+            }
+            Ok(Ok(r)) => r,
+        };
+        let code = resp.status().as_u16();
+        if code == 404 {
             pool.record_failure(idx);
-            return Err(e.into());
+            return Ok(None);
         }
-        Ok(Ok(r)) => r,
+        if code == 429 || code >= 500 {
+            pool.record_failure(idx);
+            anyhow::bail!("llm HTTP {code} (retryable, defer)");
+        }
+        if code != 200 {
+            pool.record_failure(idx);
+            anyhow::bail!("llm HTTP {code}");
+        }
+        let parsed: ChatResp =
+            match tokio::time::timeout(timeouts.read.min(timeouts.request), resp.json()).await {
+                Err(_) => {
+                    pool.record_failure(idx);
+                    anyhow::bail!(
+                        "llm response-body timeout after {} ms",
+                        timeouts.read.as_millis()
+                    );
+                }
+                Ok(Err(e)) => {
+                    pool.record_failure(idx);
+                    anyhow::bail!("llm {}", safe_reqwest_reason(&e));
+                }
+                Ok(Ok(parsed)) => parsed,
+            };
+        let content = parsed
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content);
+        let Some(content) = content else {
+            pool.record_failure(idx);
+            anyhow::bail!("llm response missing content");
+        };
+        pool.record_success(idx);
+        Ok(Some(content))
     };
-    let code = resp.status().as_u16();
-    if code == 404 {
-        pool.record_failure(idx);
-        return Ok(None);
+    match tokio::time::timeout(timeouts.request, request).await {
+        Err(_) => {
+            pool.record_failure(idx);
+            anyhow::bail!(
+                "llm overall request timeout after {} ms",
+                timeouts.request.as_millis()
+            );
+        }
+        Ok(result) => result,
     }
-    if code == 429 || code >= 500 {
-        let _ = resp.text().await;
-        pool.record_failure(idx);
-        anyhow::bail!("llm HTTP {code} (retryable, defer)");
+}
+
+fn safe_reqwest_reason(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "request timeout"
+    } else if error.is_connect() {
+        "connect failure"
+    } else if error.is_body() {
+        "request/response body failure"
+    } else if error.is_decode() {
+        "response decode failure"
+    } else {
+        "transport failure"
     }
-    if code != 200 {
-        let body = resp.text().await.unwrap_or_default();
-        pool.record_failure(idx);
-        anyhow::bail!("llm HTTP {code}: {}", crate::srt::snippet(&body));
-    }
-    let parsed: ChatResp = resp.json().await?;
-    pool.record_success(idx);
-    Ok(parsed
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.message.content))
 }
 
 /// Try providers in order until one yields content.
@@ -142,9 +187,11 @@ async fn chat_across_providers(
     pool: &ProviderPool,
     messages: &[ChatMsg],
 ) -> Result<Option<String>> {
+    let mut failures = Vec::new();
     for (idx, p) in pool.ordered() {
         let key = p.api_key();
         if key.is_empty() {
+            failures.push(format!("model {}: no API key", p.model));
             continue;
         }
         match post_chat_once(
@@ -159,18 +206,37 @@ async fn chat_across_providers(
         .await
         {
             Ok(Some(content)) => return Ok(Some(content)),
-            Ok(None) => continue, // 404 -> next model
+            Ok(None) => {
+                failures.push(format!("model {}: HTTP 404", p.model));
+                continue;
+            }
             Err(e) => {
-                tracing::debug!(
-                    provider = %p.model,
-                    error = %crate::config::mask_for_log(&e.to_string()),
-                    "llm attempt failed, next provider"
-                );
+                let reason = crate::config::mask_for_log(&e.to_string()).into_owned();
+                if reason.contains("timeout") {
+                    tracing::warn!(
+                        model = %p.model,
+                        reason = %reason,
+                        "llm attempt timed out, trying next provider"
+                    );
+                } else {
+                    tracing::debug!(
+                        model = %p.model,
+                        reason = %reason,
+                        "llm attempt failed, trying next provider"
+                    );
+                }
+                failures.push(format!("model {}: {reason}", p.model));
                 continue;
             }
         }
     }
-    Ok(None)
+    if failures.is_empty() {
+        anyhow::bail!("translation failed: no providers configured");
+    }
+    anyhow::bail!(
+        "translation failed: all providers exhausted ({})",
+        failures.join("; ")
+    )
 }
 
 fn echo_hit(text: &str) -> bool {
@@ -198,7 +264,7 @@ async fn attempt_chunk(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> Option<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let target_name = lang_name(target_lang).to_string();
     let source_name = if source_lang == "ja" {
         "Japanese"
@@ -224,7 +290,9 @@ async fn attempt_chunk(
         },
     ];
     for _ in 0..2 {
-        let raw = chat_across_providers(pool, &messages).await.ok()??;
+        let raw = chat_across_providers(pool, &messages)
+            .await?
+            .context("translation response missing")?;
         if let Some(parsed) = extract_json_array(&raw) {
             // Placeholder lines are exempt from both guards (see
             // is_placeholder): they are CJK by design.
@@ -237,7 +305,7 @@ async fn attempt_chunk(
                     .take(11.min(parsed.len()))
                     .any(|t| !is_placeholder(t, placeholders) && echo_hit(t));
             if parsed.len() == chunk.len() && script_ok && echo_ok {
-                return Some(parsed);
+                return Ok(Some(parsed));
             }
         }
         messages.push(ChatMsg {
@@ -253,7 +321,7 @@ async fn attempt_chunk(
             ),
         });
     }
-    None
+    Ok(None)
 }
 
 async fn translate_single_line(
@@ -263,7 +331,7 @@ async fn translate_single_line(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> String {
+) -> Result<String> {
     match attempt_chunk(
         pool,
         &[line.to_string()],
@@ -274,10 +342,10 @@ async fn translate_single_line(
     )
     .await
     {
-        Some(mut v) if !v.is_empty() => {
-            v.remove(0).trim_start_matches('>').trim_start().to_string()
+        Ok(Some(mut v)) if !v.is_empty() => {
+            Ok(v.remove(0).trim_start_matches('>').trim_start().to_string())
         }
-        _ => String::new(),
+        _ => anyhow::bail!("translation failed: provider returned no valid line"),
     }
 }
 
@@ -300,6 +368,27 @@ pub struct TranslateJob<'a> {
 /// tolerated via tail completion + bounded per-line fallback so output length
 /// always equals input length.
 pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
+    let language = normalize_lang(job.target_lang);
+    let deadline = pool.llm_timeouts().translation;
+    let models = pool.llm_models();
+    match tokio::time::timeout(deadline, translate_lines_inner(pool, job)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                language = %language,
+                models = ?models,
+                timeout_ms = deadline.as_millis(),
+                "translation episode-language deadline exceeded"
+            );
+            anyhow::bail!(
+                "translation failed for {language}: episode-language deadline exceeded after {} ms",
+                deadline.as_millis()
+            );
+        }
+    }
+}
+
+async fn translate_lines_inner(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
     let target_lang = normalize_lang(job.target_lang);
     let mut lines = sanitize_lines(job.lines, 10);
     if !job.skip_guard {
@@ -325,7 +414,7 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
         );
         jobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
-            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await;
+            let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await?;
             Ok::<_, anyhow::Error>((ci, chunk, out))
         });
     }
@@ -349,7 +438,7 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
             );
             fb_jobs.push(async move {
                 let _p = fb_sem.acquire_owned().await.expect("semaphore closed");
-                let text = translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await;
+                let text = translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await?;
                 Ok::<_, anyhow::Error>((idx, text))
             });
         }
@@ -448,140 +537,5 @@ pub async fn review_lines(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn placeholders() -> Vec<String> {
-        vec!["（歌詞）".to_string()]
-    }
-
-    #[test]
-    fn placeholder_lines_pass_script_and_echo_guards() {
-        // A correctly-echoed SDH placeholder must not fail chunk acceptance:
-        // it is CJK by design (wrong_script + echo_hit both fire on it).
-        assert!(is_placeholder("（歌詞）", &placeholders()));
-        assert!(!is_placeholder("Halo dunia", &placeholders()));
-        assert!(!is_placeholder("", &placeholders()));
-        assert!(wrong_script("（歌詞）", "Indonesian"));
-        assert!(echo_hit("（歌詞）"));
-    }
-
-    #[test]
-    fn guards_still_catch_real_foreign_output() {
-        // Non-placeholder CJK in a latin target is still rejected.
-        assert!(!is_placeholder("こんにちは世界", &placeholders()));
-        assert!(wrong_script("こんにちは世界", "Indonesian"));
-        assert!(!wrong_script("Halo, apa kabar?", "Indonesian"));
-    }
-
-    #[test]
-    fn stitch_rejects_oversized_and_orders_chunks() {
-        // Oversized model arrays never write past their slots (no panic,
-        // no cross-chunk bleed): the whole chunk becomes fallback work.
-        let results = vec![
-            (
-                1usize,
-                vec!["c".to_string(), "d".to_string()],
-                Some(vec!["C".to_string()]),
-            ),
-            (
-                0usize,
-                vec!["a".to_string(), "b".to_string()],
-                Some(vec!["A".to_string(), "B".to_string(), "EXTRA".to_string()]),
-            ),
-        ];
-        let (out, pending) = stitch_chunks(4, &results);
-        // Neither the oversized array (chunk 0) nor the short one (chunk 1)
-        // lands: every line becomes fallback work at its own position.
-        assert_eq!(out, vec!["", "", "", ""]);
-        assert_eq!(
-            pending,
-            vec![
-                (0, "a".to_string()),
-                (1, "b".to_string()),
-                (2, "c".to_string()),
-                (3, "d".to_string())
-            ]
-        );
-    }
-
-    #[test]
-    fn stitch_places_exact_chunks_in_order() {
-        let results = vec![
-            (1usize, vec!["c".to_string()], Some(vec!["C".to_string()])),
-            (
-                0usize,
-                vec!["a".to_string(), "b".to_string()],
-                Some(vec!["A".to_string(), "B".to_string()]),
-            ),
-        ];
-        let (out, pending) = stitch_chunks(3, &results);
-        assert_eq!(out, vec!["A", "B", "C"]);
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn prompt_carries_actual_source_and_target() {
-        // Legacy parity (test_translation_source_language.py): the prompt
-        // must name the real source language, not a hardcoded one — the
-        // ladder passes English through for `en` sources, the ASR passes the
-        // track's real tag for everything else.
-        let p = system_prompt("Indonesian", display_source_lang("en"), "");
-        assert!(p.contains("English"), "{p}");
-        assert!(p.contains("Indonesian"), "{p}");
-        assert_eq!(display_source_lang("ja"), "Japanese");
-        assert_eq!(display_source_lang("jpn"), "Japanese");
-        assert_eq!(display_source_lang("en"), "English");
-        // A French source must not be called Japanese (the defect).
-        assert_eq!(display_source_lang("fr"), "French");
-        assert_eq!(display_source_lang("fre"), "French");
-    }
-
-    #[test]
-    fn french_source_lines_must_skip_the_foreign_guard() {
-        // The foreign-script guard turns "mostly-latin" lines into SDH
-        // placeholders (it exists for Japanese ASR echoing OP/ED lyrics in
-        // English/Chinese). A faithful French transcript is mostly latin, so
-        // running it there would empty the episode — the guard must only run
-        // for CJK sources, and `fr` is not one.
-        let fr = vec![
-            "Bonjour, comment allez-vous ?".to_string(),
-            "Le president est arrive.".to_string(),
-        ];
-        let wiped = guard_foreign_lines(fr.clone(), &placeholders());
-        assert_eq!(wiped, vec!["（歌詞）".to_string(), "（歌詞）".to_string()]);
-        assert!(!crate::lang::needs_foreign_guard("fr"));
-        assert!(crate::lang::needs_foreign_guard("ja"));
-    }
-
-    #[tokio::test]
-    async fn persistent_failure_emits_empty_lines() {
-        // Legacy parity (dry_tests per_line_fallback): with no usable
-        // provider, every line — chunk and per-line fallback — resolves to
-        // empty text, and output length still equals input length.
-        let pool = ProviderPool::new(
-            crate::providers::ProvidersFile {
-                llm_translation_models: vec![],
-                whisper_stt: None,
-                whisper_stt_fallbacks: vec![],
-            },
-            reqwest::Client::new(),
-        );
-        let out = translate_lines(
-            &pool,
-            TranslateJob {
-                lines: vec!["first line".to_string(), "second line".to_string()],
-                target_lang: "id",
-                source_lang: "English",
-                knowledge: "",
-                chunk_size: 10,
-                fanout: 2,
-                skip_guard: false,
-                placeholders: &[],
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(out, vec!["", ""]);
-    }
-}
+#[path = "translate_tests.rs"]
+mod tests;

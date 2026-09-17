@@ -1,0 +1,1 @@
+{"schema":"kernel-capability-v1","kernel":"6.12.107","arch":"x86_64","openat2":true,"renameat2":true,"statx":true,"pidfd":true,"landlock_abi":4,"cgroup_v2":true,"source":"local-read-only-probe"}

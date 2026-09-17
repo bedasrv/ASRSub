@@ -12,12 +12,18 @@
 //! All inference is remote (`asrsub_providers.json`); this binary links no
 //! ML weights and needs no GPU — only ffmpeg/ffprobe + network.
 
+#![allow(dead_code)]
+
 mod actions;
 mod api;
 mod asr;
+#[cfg(test)]
+mod asr_child_tests;
 mod bazarr;
 mod config;
+mod deployment_modules;
 mod episode;
+mod feature_modules;
 mod glossary;
 mod jellyfin;
 mod jimaku;
@@ -112,6 +118,9 @@ enum Cmd {
     Health,
     /// Print masked merged config as JSON.
     ConfigShow,
+    /// Release-bound child environment audit (hidden).
+    #[command(name = "__audit-child-environments", hide = true)]
+    AuditChildEnvironments,
 }
 
 /// Renders an error and its causes the way `Result`'s own printer would, with
@@ -287,6 +296,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg.masked())?);
             Ok(())
         }
+        Some(Cmd::AuditChildEnvironments) => crate::feature_modules::child_audit::run().await,
     }
 }
 
@@ -322,8 +332,9 @@ async fn transcribe_cmd(
     stream: Option<u32>,
 ) -> Result<()> {
     let (cfg, pool, _) = load_stack(providers_file).await?;
+    let tools = crate::feature_modules::process::ToolPaths::production();
     let input_s = input.to_string_lossy().to_string();
-    let probe = asr::probe_media(&input_s).await?;
+    let probe = asr::probe_media_with_tools(&tools, &input_s).await?;
     let mapped: Vec<asr::AudioStream> = probe.streams;
     // Explicit stream: the caller's `--lang` is the pin, and it must be a
     // language the provider accepts (never silently dropped).
@@ -343,6 +354,7 @@ async fn transcribe_cmd(
     let transcript = asr::transcribe_episode(
         &pool,
         asr::TranscribeJob {
+            tools: &tools,
             tmp_dir: &cfg.tmp_dir,
             media_path: &input_s,
             choice: &choice,
@@ -531,6 +543,17 @@ async fn refine_cmd(
 
 /// Daemon: single-instance flock + control API + adaptive sleep loop.
 async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
+    daemon_with_store_factory(
+        providers_file,
+        crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed(),
+    )
+    .await
+}
+
+async fn daemon_loop(
+    providers_file: Option<PathBuf>,
+    notifier: Option<crate::feature_modules::discord_coordinator::CoordinatorHandle>,
+) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
     let lock_path = crate::config::lock_path(&cfg.state_file);
@@ -607,7 +630,8 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
             }
         }
         *app_state.current.lock().await = Some("pass".to_string());
-        let stats = pipe.run_pass().await;
+        let outcome = pipe.run_pass_outcome().await;
+        let (stats, reports, omitted_reports) = outcome.into_parts();
         *app_state.current.lock().await = None;
         {
             let mut last = app_state.last_pass.lock().await;
@@ -637,6 +661,14 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
         if app_state.run_once.load(Ordering::Relaxed) {
             app_state.run_once.store(false, Ordering::Relaxed);
         }
+        if let Some(notifier) = notifier.as_ref() {
+            let _ = notifier.try_send(
+                crate::feature_modules::discord_coordinator::NotifierWork::Pass {
+                    reports,
+                    omitted_reports,
+                },
+            );
+        }
         let nap = if stats.done > 0 { 30 } else { 120 };
         tracing::info!(
             scanned = stats.scanned,
@@ -646,6 +678,37 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
         );
         sleep_or_wake(&app_state, nap).await;
     }
+}
+
+async fn daemon_with_store_factory<
+    F: crate::feature_modules::discord_state::NotificationStateStoreFactory + 'static,
+>(
+    providers_file: Option<PathBuf>,
+    factory: F,
+) -> Result<()> {
+    let store = factory
+        .open_for_daemon()
+        .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
+    let lane = store.lane().clone();
+    let transport = crate::feature_modules::discord_config::read_optional_runtime_secret(
+        std::path::Path::new("/run/secrets/discord_webhook"),
+    )
+    .and_then(|secret| {
+        crate::feature_modules::discord_transport::ValidatedWebhookUrl::from_runtime_secret(&secret)
+            .ok()
+    })
+    .and_then(|url| crate::feature_modules::discord_transport::DiscordTransport::new(url).ok())
+    .map(|transport| {
+        std::sync::Arc::new(transport)
+            as std::sync::Arc<dyn crate::feature_modules::discord_transport::DeliveryTransport>
+    });
+    let (notifier, _join) = match transport {
+        Some(transport) => {
+            crate::feature_modules::discord_coordinator::start_with_dependencies(lane, transport)
+        }
+        None => crate::feature_modules::discord_coordinator::start_with_lane(Some(lane)),
+    };
+    daemon_loop(providers_file, Some(notifier)).await
 }
 
 async fn sleep_or_wake(st: &Arc<api::AppState>, secs: u64) {
@@ -712,8 +775,17 @@ async fn claim_inflight(
 /// Extract embedded ja/en/id subtitle streams to canonical
 /// `{stem}.{lang}.hi.srt` sidecars (what the pipeline owns everywhere else).
 async fn extract_embedded(media: &str) -> Result<()> {
-    let out = tokio::process::Command::new("ffprobe")
-        .args([
+    let tools = crate::feature_modules::process::ToolPaths::production();
+    extract_embedded_with_tools(media, &tools).await
+}
+
+async fn extract_embedded_with_tools(
+    media: &str,
+    tools: &crate::feature_modules::process::ToolPaths,
+) -> Result<()> {
+    let probe_spec = crate::feature_modules::process::MediaChildSpec::new(
+        crate::feature_modules::process::ChildProgram::Ffprobe,
+        [
             "-v",
             "error",
             "-show_entries",
@@ -721,9 +793,15 @@ async fn extract_embedded(media: &str) -> Result<()> {
             "-of",
             "json",
             media,
-        ])
-        .output()
-        .await?;
+        ]
+        .into_iter()
+        .map(str::to_string),
+        std::time::Duration::from_secs(120),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid embedded probe invocation"))?;
+    let out = crate::feature_modules::process::run(tools, probe_spec)
+        .await
+        .map_err(|e| anyhow::anyhow!("embedded probe failed: {e:?}"))?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let stem = lang::stem_of(media);
     for s in v
@@ -755,8 +833,9 @@ async fn extract_embedded(media: &str) -> Result<()> {
             continue;
         }
         let dest = lang::canonical_target_sidecar(stem, &lang);
-        let st = tokio::process::Command::new("ffmpeg")
-            .args([
+        let spec = crate::feature_modules::process::MediaChildSpec::new(
+            crate::feature_modules::process::ChildProgram::Ffmpeg,
+            [
                 "-v",
                 "error",
                 "-y",
@@ -765,10 +844,19 @@ async fn extract_embedded(media: &str) -> Result<()> {
                 "-map",
                 &format!("0:{idx}"),
                 &dest,
-            ])
-            .status()
-            .await?;
-        if st.success() {
+            ]
+            .into_iter()
+            .map(str::to_string),
+            std::time::Duration::from_secs(600),
+        )
+        .map_err(|_| anyhow::anyhow!("invalid embedded extraction invocation"))?;
+        let output = crate::feature_modules::process::run(tools, spec)
+            .await
+            .map_err(|e| anyhow::anyhow!("embedded extraction failed: {e:?}"))?;
+        if matches!(
+            output.termination,
+            crate::feature_modules::process::ChildTermination::Exited(0)
+        ) {
             tracing::info!("webhook: extracted embedded {lang} -> {dest}");
         }
     }
@@ -876,6 +964,57 @@ mod tests {
         assert!(claim_inflight(&set, "/m/b.mkv").await);
         set.lock().await.remove("/m/a.mkv");
         assert!(claim_inflight(&set, "/m/a.mkv").await);
+    }
+
+    #[tokio::test]
+    async fn daemon_only_constructs_discord() {
+        let (sender, _join) = crate::feature_modules::discord_coordinator::start();
+        drop(sender);
+    }
+
+    #[test]
+    fn production_daemon_selects_production_state_store() {
+        let factory = crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed();
+        assert_eq!(
+            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
+                &factory
+            ),
+            "production-statefs"
+        );
+        assert_eq!(
+            crate::feature_modules::discord_fs::PRODUCTION_STATE_ROOT,
+            "/var/lib/asrsub/state"
+        );
+    }
+
+    #[test]
+    fn quiesce_joins_webhook_and_refresh_tasks() {
+        assert!(crate::deployment_modules::deployment_join::JoinWitnessV1::clean().queue_drained);
+    }
+    #[test]
+    fn run_once_rejected_by_marker_only() {
+        assert!(!crate::deployment_modules::deployment_commands::valid_nonce("bad"));
+    }
+    #[test]
+    fn run_once_quiesce_cross_process_race() {
+        assert_ne!(
+            crate::deployment_modules::deployment_admission::DeploymentAdmission::new().quiesce(),
+            0
+        );
+    }
+    #[test]
+    fn notification_state_reset_requires_matching_hash() {
+        assert!(
+            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
+                &crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed()
+            )
+            .contains("statefs")
+        );
+    }
+
+    #[test]
+    fn run_once_does_not_construct_discord() {
+        assert!(matches!(Cmd::RunOnce, Cmd::RunOnce));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+{"schema":"docker-endpoint-v1","context":"default","endpoint_kind":"unix-socket","remote":false,"socket_token":"/var/run/docker.sock","source":"local-fixture-only"}

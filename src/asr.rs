@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::feature_modules::process::{
+    self, ChildProgram, ChildTermination, MediaChildSpec, ToolPaths,
+};
 use crate::providers::ProviderPool;
 use crate::srt::{ensure_contiguous, split_long_cues, Cue};
 
@@ -98,8 +101,13 @@ pub struct MediaProbe {
 }
 
 pub async fn probe_media(path: &str) -> Result<MediaProbe> {
-    let out = tokio::process::Command::new("ffprobe")
-        .args([
+    probe_media_with_tools(&ToolPaths::production(), path).await
+}
+
+pub(crate) async fn probe_media_with_tools(tools: &ToolPaths, path: &str) -> Result<MediaProbe> {
+    let spec = MediaChildSpec::new(
+        ChildProgram::Ffprobe,
+        [
             "-v",
             "error",
             "-show_entries",
@@ -107,11 +115,16 @@ pub async fn probe_media(path: &str) -> Result<MediaProbe> {
             "-of",
             "json",
             path,
-        ])
-        .output()
+        ]
+        .into_iter()
+        .map(str::to_string),
+        ProviderPool::whisper_timeout(),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid ffprobe invocation"))?;
+    let out = process::run(tools, spec)
         .await
-        .context("spawn ffprobe")?;
-    if !out.status.success() {
+        .map_err(|e| anyhow::anyhow!("ffprobe failed: {e:?}"))?;
+    if !matches!(out.termination, ChildTermination::Exited(0)) {
         anyhow::bail!("ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
@@ -254,13 +267,23 @@ pub fn choose_source(
 
 /// Extract one audio track to a compact MP3 for upload.
 pub async fn extract_audio(media: &str, stream_index: u32, dest: &Path) -> Result<()> {
+    extract_audio_with_tools(&ToolPaths::production(), media, stream_index, dest).await
+}
+
+pub(crate) async fn extract_audio_with_tools(
+    tools: &ToolPaths,
+    media: &str,
+    stream_index: u32,
+    dest: &Path,
+) -> Result<()> {
     if let Some(p) = dest.parent() {
         if !p.as_os_str().is_empty() {
             tokio::fs::create_dir_all(p).await?;
         }
     }
-    let out = tokio::process::Command::new("ffmpeg")
-        .args([
+    let spec = MediaChildSpec::new(
+        ChildProgram::Ffmpeg,
+        [
             "-v",
             "error",
             "-y",
@@ -277,17 +300,46 @@ pub async fn extract_audio(media: &str, stream_index: u32, dest: &Path) -> Resul
             "-b:a",
             "64k",
             &dest.to_string_lossy(),
-        ])
-        .output()
+        ]
+        .into_iter()
+        .map(str::to_string),
+        std::time::Duration::from_secs(600),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid ffmpeg invocation"))?;
+    let out = process::run(tools, spec)
         .await
-        .context("spawn ffmpeg")?;
-    if !out.status.success() {
+        .map_err(|e| anyhow::anyhow!("ffmpeg extract failed: {e:?}"))?;
+    if !matches!(out.termination, ChildTermination::Exited(0)) {
         anyhow::bail!(
             "ffmpeg extract failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
     Ok(())
+}
+
+pub(crate) async fn convert_subtitle_with_tools(
+    tools: &ToolPaths,
+    input: &Path,
+    output: &Path,
+) -> Result<bool> {
+    let spec = MediaChildSpec::new(
+        ChildProgram::Ffmpeg,
+        [
+            "-v".to_string(),
+            "error".to_string(),
+            "-y".to_string(),
+            "-i".to_string(),
+            input.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+        ],
+        std::time::Duration::from_secs(600),
+    )
+    .map_err(|_| anyhow::anyhow!("invalid subtitle conversion invocation"))?;
+    let result = process::run(tools, spec)
+        .await
+        .map_err(|e| anyhow::anyhow!("subtitle conversion failed: {e:?}"))?;
+    Ok(matches!(result.termination, ChildTermination::Exited(0)))
 }
 
 /// The `language` value a request will ACTUALLY carry: the carried code only
@@ -576,6 +628,7 @@ pub struct Transcript {
 /// borderline sizes take the old extract-then-measure path, and the chunk
 /// layout uses the probed duration (no third ffprobe).
 pub struct TranscribeJob<'a> {
+    pub(crate) tools: &'a ToolPaths,
     pub tmp_dir: &'a Path,
     pub media_path: &'a str,
     pub choice: &'a AudioChoice,
@@ -617,7 +670,7 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
     // Skip the full extract when the probe already proves chunking: the
     // extract would be transcoded and deleted without ever being read.
     let mut transcript = if !job.audio_bytes.is_some_and(|b| b > CHUNK_BYTES) {
-        extract_audio(media_path, choice.stream_index, &full).await?;
+        extract_audio_with_tools(job.tools, media_path, choice.stream_index, &full).await?;
         let size = tokio::fs::metadata(&full)
             .await
             .map(|m| m.len())
@@ -626,6 +679,7 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
             transcribe_file(pool, &full, sent.as_deref()).await?
         } else {
             transcribe_pieces(
+                job.tools,
                 pool,
                 &base,
                 media_path,
@@ -638,6 +692,7 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
         }
     } else {
         transcribe_pieces(
+            job.tools,
             pool,
             &base,
             media_path,
@@ -662,7 +717,9 @@ pub async fn transcribe_episode(pool: &ProviderPool, job: TranscribeJob<'_>) -> 
 /// transcribed as Japanese, and a detected code the endpoint rejects is never
 /// asserted as a pin (round 3 asserted it, then aborted the episode when the
 /// forced response disagreed with a field that had never been sent).
+#[allow(clippy::too_many_arguments)]
 async fn transcribe_pieces(
+    tools: &ToolPaths,
     pool: &ProviderPool,
     base: &Path,
     media_path: &str,
@@ -687,8 +744,9 @@ async fn transcribe_pieces(
         let split_sem = split_sem.clone();
         jobs.push(async move {
             let _p = split_sem.acquire_owned().await.expect("semaphore closed");
-            let out = tokio::process::Command::new("ffmpeg")
-                .args([
+            let spec = MediaChildSpec::new(
+                ChildProgram::Ffmpeg,
+                [
                     "-v",
                     "error",
                     "-y",
@@ -709,10 +767,16 @@ async fn transcribe_pieces(
                     "-b:a",
                     "64k",
                     &dest.to_string_lossy(),
-                ])
-                .output()
-                .await?;
-            if !out.status.success() {
+                ]
+                .into_iter()
+                .map(str::to_string),
+                std::time::Duration::from_secs(600),
+            )
+            .map_err(|_| anyhow::anyhow!("invalid ffmpeg split invocation"))?;
+            let out = process::run(tools, spec)
+                .await
+                .map_err(|e| anyhow::anyhow!("ffmpeg split failed: {e:?}"))?;
+            if !matches!(out.termination, ChildTermination::Exited(0)) {
                 anyhow::bail!("ffmpeg split failed");
             }
             Ok::<_, anyhow::Error>((dest, (start * 1000.0) as u32))

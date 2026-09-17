@@ -1,0 +1,1 @@
+{"schema":"deployment-journal-scenarios-v1","scenarios":["phase-transition","timeout","rollback"]}

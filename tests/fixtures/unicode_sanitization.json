@@ -1,0 +1,1 @@
+{"schema":"unicode-sanitization-v1","normalization":"NFC","whitespace":"ASCII-space","removed":["C0","C1","bidi","line-separator","default-ignorable"],"escaped":["backslash","backtick","asterisk","underscore","tilde","pipe","greater-than","brackets","parentheses","hash"]}

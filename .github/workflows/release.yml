@@ -1,12 +1,8 @@
 name: Release
 
 # The only path that publishes images. Every push to main builds the image
-# once and pushes two tags to GHCR:
-#   * ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>  — immutable, authoritative
-#   * ghcr.io/bedasrv/asrsub:latest                  — convenience alias for
-#     the newest main build (so public pulls get the current Rust image)
-# Production deploys must still pin the immutable SHA: docker-compose.yml
-# requires an explicit ${ASRSUB_IMAGE} and never falls back to `latest`.
+# once and pushes the full-40-character git SHA digest to GHCR. Production
+# deploys bind the exact image digest through the signed approval manifest.
 # NOTE: the image name is hardcoded lowercase — github.repository would
 # expand to bedasrv/ASRSub, which GHCR rejects (must be lowercase).
 
@@ -26,22 +22,21 @@ jobs:
   image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Guard full-SHA tag
         run: echo "${{ github.sha }}" | grep -qE '^[0-9a-f]{40}$'
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           push: true
           tags: |
             ghcr.io/bedasrv/asrsub:${{ github.sha }}
-            ghcr.io/bedasrv/asrsub:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Emit non-secret release descriptor
@@ -53,7 +48,7 @@ jobs:
             "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08
         with:
           name: release-${{ github.sha }}
           path: release.json

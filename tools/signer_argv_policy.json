@@ -1,0 +1,91 @@
+{
+  "schema": "signer-argv-policy-v2",
+  "version": 2,
+  "working_directory": "repository-root",
+  "cwd": ".",
+  "bundle": {
+    "launcher": "tools/asrsub-env",
+    "target_fd": 3,
+    "command": [
+      "/usr/bin/python3",
+      "tools/asrsub-env",
+      "--pass-fd",
+      "3",
+      "/usr/bin/python3",
+      "tools/package_bundle.py",
+      "--production",
+      "--runtime-source-root",
+      "release/runtime",
+      "--systemd-source-root",
+      "release/systemd",
+      "--output-root",
+      "release/asrsub-runtime-bundle",
+      "--manifest-output",
+      "release/bundle-manifest.json",
+      "--signature-output",
+      "release/bundle-manifest.sig",
+      "--release-sha-from-git",
+      "--key-fd",
+      "3"
+    ]
+  },
+  "approval": {
+    "launcher": "tools/asrsub-env",
+    "target_fd": 4,
+    "command": [
+      "/usr/bin/python3",
+      "tools/asrsub-env",
+      "--pass-fd",
+      "4",
+      "/usr/bin/python3",
+      "tools/create_approval.py",
+      "--production",
+      "--canonical-approval-bytes",
+      "release/approval-canonical.json",
+      "--approval-manifest",
+      "release/approval.json",
+      "--approval-signature",
+      "release/approval.sig",
+      "--release-sha-from-git",
+      "--approval-key-fd",
+      "4"
+    ]
+  },
+  "descriptor_matrix": [
+    {
+      "stage": "launcher",
+      "key_fd": 7,
+      "target_fd": 3,
+      "key_cloexec": true,
+      "target_present": false
+    },
+    {
+      "stage": "wrapper-entry",
+      "key_fd": 3,
+      "target_fd": 3,
+      "key_cloexec": false,
+      "target_present": true
+    },
+    {
+      "stage": "wrapper-parent",
+      "key_fd": 8,
+      "target_fd": 3,
+      "key_cloexec": true,
+      "target_present": false
+    },
+    {
+      "stage": "direct-child",
+      "key_fd": 8,
+      "target_fd": 3,
+      "key_cloexec": false,
+      "target_present": true
+    },
+    {
+      "stage": "non-target",
+      "key_fd": 8,
+      "target_fd": 3,
+      "key_cloexec": false,
+      "target_present": false
+    }
+  ]
+}

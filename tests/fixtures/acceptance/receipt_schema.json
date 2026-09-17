@@ -1,0 +1,1 @@
+{"schema":"receipt-schema-v1","required":["schema","kind","implementation_commit","core_plan_sha256","hardening_plan_sha256","observed_result","evidence_paths"]}

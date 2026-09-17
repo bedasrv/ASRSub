@@ -1,0 +1,1 @@
+{"schema":"egress-policy-v1","generation":1,"host":"discord.com","port":443,"allowed_transport":"https","created_epoch_ns":0}

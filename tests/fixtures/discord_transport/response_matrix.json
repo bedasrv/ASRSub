@@ -1,0 +1,1 @@
+{"schema":"discord-response-matrix-v1","accepted":[200,201,202,204],"retryable":[408,425,429,500,502,503],"permanent":[100,301,302,400,401,404]}

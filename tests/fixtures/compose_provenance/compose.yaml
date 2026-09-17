@@ -1,0 +1,5 @@
+services:
+  orchestrator:
+    image: ghcr.io/bedasrv/asrsub@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    user: "1000:1000"
+    cap_drop: [ALL]

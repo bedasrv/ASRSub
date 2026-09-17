@@ -472,4 +472,11 @@ mod tests {
         assert_eq!(invalid_number(&pairs("MAX_EPS_PER_RUN", "")), None);
         assert_eq!(invalid_number(&pairs("JELLYFIN_URL", "http://x")), None);
     }
+
+    #[test]
+    fn settings_reject_reserved_discord_key() {
+        assert!(crate::feature_modules::discord_config::is_reserved_key(
+            " DISCORD_WEBHOOK_URL "
+        ));
+    }
 }

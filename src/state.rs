@@ -27,10 +27,9 @@ pub struct StateEntry {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-/// Provenance ledger row: which sidecar came from where, and when.
-/// `source_path`/`target_path`/`ts`/`extra` are human-debugging provenance;
-/// nothing verifies hashes (no trust gate was ported), so no hash fields
-/// are stored — the sidecar bytes on disk are authoritative.
+/// Registry rows carry the target path, a shared commit timestamp, and the
+/// artifact digest in `extra`; admission rechecks that digest against the
+/// paired state row and the sidecar bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryRow {
     #[serde(default)]

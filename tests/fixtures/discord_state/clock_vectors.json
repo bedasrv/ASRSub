@@ -1,0 +1,1 @@
+{"schema":"discord-clock-scenarios-v1","window_seconds":900,"drift_accept_seconds":300,"drift_reject_seconds":301,"retry_after_max_seconds":86400,"backoff_seconds":[900,1800,3600,86400]}

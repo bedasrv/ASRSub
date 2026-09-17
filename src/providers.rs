@@ -15,153 +15,19 @@
 //! * Consecutive failures trip a short circuit-breaker (60 s) instead of
 //!   burning the pass on a dead endpoint.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
-/// Honored provider-file keys per entry: `endpoint`, `model`, `key_env`,
-/// `api_key`, `probe_latency_s`, `thinking_param_accepted` (+ the
-/// `whisper_stt` / `whisper_stt_fallbacks` / `llm_translation_models`
-/// structure). Anything else in the file (legacy `request_shape`, cost
-/// metadata, name aliases) parses but is intentionally ignored: unknown
-/// keys never fail a load.
+#[path = "provider_config.rs"]
+mod provider_config;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LlmProvider {
-    pub endpoint: String,
-    pub model: String,
-    #[serde(default)]
-    pub key_env: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default = "default_latency")]
-    pub probe_latency_s: f64,
-    #[serde(default)]
-    pub thinking_param_accepted: bool,
-}
+pub(crate) use provider_config::{LlmProvider, LlmTimeouts, ProvidersFile, WhisperProvider};
 
-fn default_latency() -> f64 {
-    30.0
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WhisperProvider {
-    pub endpoint: String,
-    pub model: String,
-    #[serde(default)]
-    pub key_env: String,
-    #[serde(default)]
-    pub api_key: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ProvidersFile {
-    #[serde(default)]
-    pub llm_translation_models: Vec<LlmProvider>,
-    #[serde(default)]
-    pub whisper_stt: Option<WhisperProvider>,
-    /// Optional Whisper failover endpoints, same shape as `whisper_stt`,
-    /// attempted in order after the primary (primary first, then these).
-    /// Absent in older files: fully backward compatible (fails over to
-    /// nothing, exactly like before).
-    #[serde(default)]
-    pub whisper_stt_fallbacks: Vec<WhisperProvider>,
-}
-
-impl ProvidersFile {
-    /// Load the providers file. An explicitly configured path that exists is
-    /// parsed strictly — read/parse failures are returned with context, never
-    /// swallowed. When the configured path is missing, the well-known
-    /// fallbacks (CWD, executable dir) are tried before failing.
-    pub fn load(path: &Path) -> Result<Self> {
-        if path.exists() {
-            return Self::load_exact(path);
-        }
-        let mut tried = vec![path.to_path_buf()];
-        if path.is_relative() {
-            let mut fallbacks = vec![Path::new("asrsub_providers.json").to_path_buf()];
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    fallbacks.push(dir.join("asrsub_providers.json"));
-                }
-            }
-            for cand in fallbacks {
-                if cand == *path {
-                    continue;
-                }
-                tried.push(cand.clone());
-                if cand.exists() {
-                    return Self::load_exact(&cand);
-                }
-            }
-        }
-        // The path is operator input and this message reaches stderr and the log,
-        // so it is masked like every other sink for a configured value.
-        let tried: Vec<String> = tried
-            .iter()
-            .map(|p| crate::config::mask_for_log(&p.display().to_string()).into_owned())
-            .collect();
-        anyhow::bail!(
-            "providers file not found (tried {tried:?}); set PROVIDERS_FILE or --providers-file"
-        )
-    }
-
-    fn load_exact(path: &Path) -> Result<Self> {
-        let shown = crate::config::mask_for_log(&path.display().to_string()).into_owned();
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("read providers file {shown:?}"))?;
-        let mut v: Self = serde_json::from_str(&text)
-            .with_context(|| format!("parse providers file {shown:?}"))?;
-        v.llm_translation_models
-            .sort_by(|a, b| a.probe_latency_s.partial_cmp(&b.probe_latency_s).unwrap());
-        Ok(v)
-    }
-
-    #[cfg(test)]
-    pub fn load_str(text: &str) -> Result<Self> {
-        let mut v: Self = serde_json::from_str(text)?;
-        v.llm_translation_models
-            .sort_by(|a, b| a.probe_latency_s.partial_cmp(&b.probe_latency_s).unwrap());
-        Ok(v)
-    }
-}
-
-/// API key: embedded value wins, otherwise `$key_env` from the process
-/// environment (fixed at container start, so rotation needs a recreate).
-/// Shared by LLM and Whisper entries.
-fn resolve_key(api_key: &str, key_env: &str) -> String {
-    if !api_key.is_empty() {
-        return api_key.to_string();
-    }
-    if !key_env.is_empty() {
-        // Trimmed and empty-filtered like every other environment read: a key
-        // pasted with a trailing newline must still work, and `KEY=` means
-        // "no key", which leaves the endpoint unkeyed instead of sending
-        // whitespace as a bearer token.
-        return crate::config::env_str(key_env).unwrap_or_default();
-    }
-    String::new()
-}
-
-impl LlmProvider {
-    /// API key: embedded value wins, otherwise `$key_env` from the process
-    /// environment. The environment is fixed when the container starts, so a
-    /// rotated key needs a container recreate, not a live reload.
-    pub fn api_key(&self) -> String {
-        resolve_key(&self.api_key, &self.key_env)
-    }
-}
-
-impl WhisperProvider {
-    pub fn api_key(&self) -> String {
-        resolve_key(&self.api_key, &self.key_env)
-    }
-}
+// Provider-file diagnostics remain masked in `provider_config.rs`:
+// `mask_for_log(&p.display().to_string())`.
 
 struct EndpointHealth {
     semaphore: Arc<Semaphore>,
@@ -206,11 +72,20 @@ struct PoolInner {
     health: Vec<EndpointHealth>,
     whisper: Vec<WhisperProvider>,
     whisper_health: Vec<EndpointHealth>,
+    llm_timeouts: LlmTimeouts,
     http: reqwest::Client,
 }
 
 impl ProviderPool {
     pub fn new(file: ProvidersFile, http: reqwest::Client) -> Self {
+        Self::new_with_timeouts(file, http, LlmTimeouts::from_env())
+    }
+
+    pub(crate) fn new_with_timeouts(
+        file: ProvidersFile,
+        http: reqwest::Client,
+        llm_timeouts: LlmTimeouts,
+    ) -> Self {
         let per_endpoint = crate::config::env_str("LLM_PER_ENDPOINT_CONCURRENCY")
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
@@ -237,6 +112,7 @@ impl ProviderPool {
                 health,
                 whisper,
                 whisper_health,
+                llm_timeouts,
                 http,
             }),
         }
@@ -274,6 +150,18 @@ impl ProviderPool {
 
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http
+    }
+
+    pub(crate) fn llm_timeouts(&self) -> LlmTimeouts {
+        self.inner.llm_timeouts
+    }
+
+    pub(crate) fn llm_models(&self) -> Vec<String> {
+        self.inner
+            .providers
+            .iter()
+            .map(|provider| provider.model.clone())
+            .collect()
     }
 
     fn now_ms() -> u64 {
@@ -381,10 +269,7 @@ impl ProviderPool {
     /// Deadline for one LLM attempt: bounded so a hung free-tier endpoint
     /// cannot stall the whole library sweep.
     pub fn llm_timeout() -> Duration {
-        let s: u64 = crate::config::env_str("LLM_TIMEOUT_S")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        Duration::from_secs(s.clamp(30, 900))
+        LlmTimeouts::from_env().request
     }
 
     pub fn whisper_timeout() -> Duration {
@@ -398,6 +283,7 @@ impl ProviderPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     const SAMPLE: &str = r#"{
       "llm_translation_models": [

@@ -60,3 +60,18 @@ outputs/
 # Eval harness local data (downloaded corpora, wavs, hf cache)
 benchmarks/data/
 benchmarks/results/*.sys.txt
+
+# Tracked hardening fixtures (these are deliberately checked in; they contain
+# only local metadata and non-secret placeholders).
+!tests/fixtures/compose_runtime/secret-source.env
+!systemd/
+!systemd/*.service
+!systemd/docker.service.d/
+!systemd/docker.service.d/*.conf
+!tests/fixtures/systemd/
+!tests/fixtures/systemd/etc/
+!tests/fixtures/systemd/etc/systemd/
+!tests/fixtures/systemd/etc/systemd/system/
+!tests/fixtures/systemd/etc/systemd/system/*.service
+!tests/fixtures/systemd/etc/systemd/system/docker.service.d/
+!tests/fixtures/systemd/etc/systemd/system/docker.service.d/*.conf

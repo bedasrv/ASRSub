@@ -222,56 +222,6 @@ fn router(cx: StubCx) -> axum::Router {
         .with_state(cx)
 }
 
-/// Restores process env on drop (the sim owns `PATH` while it runs).
-struct EnvGuard {
-    saved: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, val: &str) -> Self {
-        Self {
-            saved: vec![(key, std::env::var(key).ok())],
-        }
-        .and_set(key, val)
-    }
-
-    fn and_set(mut self, key: &'static str, val: &str) -> Self {
-        if !self.saved.iter().any(|(k, _)| *k == key) {
-            self.saved.push((key, std::env::var(key).ok()));
-        }
-        unsafe { std::env::set_var(key, val) };
-        self
-    }
-
-    fn scrub_proxy(mut self) -> Self {
-        for k in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            if !self.saved.iter().any(|(x, _)| *x == k) {
-                self.saved.push((k, std::env::var(k).ok()));
-            }
-            unsafe { std::env::remove_var(k) };
-        }
-        self
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (k, v) in self.saved.drain(..) {
-            match v {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-    }
-}
-
 fn write_exe(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -293,14 +243,6 @@ fn ladder_ja_fixture() -> String {
         ));
     }
     s
-}
-
-fn state_rows(path: &Path) -> Vec<crate::state::StateEntry> {
-    crate::state::load_jsonl(path)
-}
-
-fn registry_rows(path: &Path) -> Vec<crate::state::RegistryRow> {
-    crate::state::load_jsonl(path)
 }
 
 /// Full-program simulation: stub services + fake media tools, real pipeline.
@@ -327,7 +269,7 @@ async fn simulate_library_pass() {
     write_exe(
         &bin_dir.join("ffprobe"),
         r#"#!/bin/sh
-if printf '%s' "$*" | grep -q "stream=index"; then
+if printf '%s' "$*" | /usr/bin/grep -q "stream=index"; then
   printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio","tags":{"language":"jpn"}}],"format":{"duration":"300.0"}}'
 else
   printf '{"format":{"duration":"300.0"}}'
@@ -348,13 +290,6 @@ esac
 exit 0
 "#,
     );
-    let orig_path = std::env::var("PATH").unwrap_or_default();
-    let _env = EnvGuard::set(
-        "PATH",
-        &format!("{}:{orig_path}", bin_dir.to_string_lossy()),
-    )
-    .scrub_proxy();
-
     // One stub server for every remote dependency.
     let stubs = Arc::new(Stubs::default());
     stubs.wanted_id_missing.store(true, Ordering::Relaxed);
@@ -437,11 +372,19 @@ exit 0
         },
         http.clone(),
     );
-    let pipe = crate::pipeline::Pipeline::new(_cfg.clone(), pool, http.clone());
+    let tools = crate::feature_modules::process::ToolPaths::for_test(
+        bin_dir.join("ffmpeg"),
+        bin_dir.join("ffprobe"),
+    );
+    let pipe = crate::pipeline::Pipeline::new_with_tools(_cfg.clone(), pool, http.clone(), tools);
 
     // ---- Phase A: ASR path (no ja sidecar) ----
-    let stats = pipe.run_pass().await;
-    assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
+    assert_eq!(
+        (stats.scanned, stats.processed, stats.done, stats.failed),
+        (1, 1, 1, 0),
+        "run_pass compatibility fields must retain their legacy meanings"
+    );
     // One shared transcription for both languages.
     assert_eq!(*stubs.whisper_hits.lock().await, 1);
     // Both target sidecars land with the AI marker.
@@ -464,14 +407,14 @@ exit 0
     let mut ups = stubs.uploads.lock().await.clone();
     ups.sort();
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     assert_eq!(
         rows.iter()
             .filter(|r| r.status.as_deref() == Some("done"))
             .count(),
         2
     );
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("asr")));
     assert!(reg.iter().all(|r| r.source_kind.is_none()));
@@ -489,6 +432,71 @@ exit 0
         );
     }
 
+    // A translation failure is a typed target failure. It must not install a
+    // blank sidecar, upload it, or admit a ledger row for the target.
+    let failing_pool = crate::providers::ProviderPool::new(
+        crate::providers::ProvidersFile {
+            llm_translation_models: vec![],
+            whisper_stt: Some(crate::providers::WhisperProvider {
+                endpoint: format!("{base}/audio/transcriptions"),
+                model: "stub".into(),
+                key_env: String::new(),
+                api_key: "x".into(),
+            }),
+            whisper_stt_fallbacks: vec![],
+        },
+        http.clone(),
+    );
+    let failing_pipe = crate::pipeline::Pipeline::new_with_tools(
+        _cfg.clone(),
+        failing_pool,
+        http.clone(),
+        pipe.tools.clone(),
+    );
+    let failing_candidate = crate::pipeline::Candidate {
+        episode_id: 8,
+        series_id: Some(11),
+        series_title: "TestShow".into(),
+        path: None,
+        missing: vec!["fr".into()],
+        is_movie: false,
+        original_lang: None,
+    };
+    let series_titles = HashMap::from([(
+        11,
+        crate::sonarr::SeriesInfo {
+            title: "TestShow".into(),
+            original_language: None,
+        },
+    )]);
+    let outcome = failing_pipe
+        .process_one(&failing_candidate, &series_titles)
+        .await
+        .unwrap();
+    let report = match outcome {
+        crate::feature_modules::discord_types::EpisodeRunResult::Report(report) => report,
+        other => panic!("unexpected translation-failure outcome: {other:?}"),
+    };
+    let target = report
+        .targets()
+        .as_slice()
+        .iter()
+        .find(|target| target.language().as_str() == "fr")
+        .expect("translation failure target");
+    assert!(matches!(
+        target.status(),
+        crate::feature_modules::discord_types::TargetStatus::Failed {
+            class: crate::feature_modules::discord_types::FailureClass::Translation
+        }
+    ));
+    assert!(!Path::new(&format!("{stem_s}.fr.hi.srt")).exists());
+    let registry =
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&failing_pipe.cfg.registry_file);
+    assert!(!registry
+        .iter()
+        .any(|row| row.episode_id == Some(8) && row.lang.as_deref() == Some("fr")));
+    assert!(!stubs.uploads.lock().await.iter().any(|lang| lang == "fr"));
+
     // ---- Phase B: ladder path (adequate ja sidecar, zero new ASR) ----
     std::fs::remove_file(&pipe.cfg.state_file).ok();
     std::fs::remove_file(&pipe.cfg.registry_file).ok();
@@ -497,11 +505,16 @@ exit 0
     }
     stubs.uploads.lock().await.clear();
     std::fs::write(format!("{stem_s}.ja.srt"), ladder_ja_fixture()).unwrap();
-    let stats = pipe.run_pass().await;
+    let whisper_before_ladder = *stubs.whisper_hits.lock().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
-    assert_eq!(*stubs.whisper_hits.lock().await, 1, "ladder must skip ASR");
+    assert_eq!(
+        *stubs.whisper_hits.lock().await,
+        whisper_before_ladder,
+        "ladder must skip ASR"
+    );
     assert!(*stubs.llm_hits.lock().await > 0);
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     assert!(reg.iter().all(|r| r.source.as_deref() == Some("jpn")));
     assert!(reg
@@ -533,10 +546,10 @@ exit 0
         "{\"type\":\"retry\",\"episode_id\":7,\"kind\":\"series\",\"language\":\"id\"}\n",
     )
     .unwrap();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
     stubs.wanted_id_missing.store(true, Ordering::Relaxed);
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     assert!(rows
         .iter()
         .any(|r| r.language.as_deref() == Some("id") && r.status.as_deref() == Some("done")));
@@ -552,10 +565,10 @@ exit 0
         "{\"type\":\"skip\",\"episode_id\":7}\n",
     )
     .unwrap();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(stats.scanned, 0, "skip must filter the candidate");
     // Actions consumed: next pass sees the missing language again.
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done), (1, 1));
 
     // ---- Phase D: whisper failover (primary 500s, fallback serves) ----
@@ -592,8 +605,13 @@ exit 0
         },
         http.clone(),
     );
-    let pipe2 = crate::pipeline::Pipeline::new(pipe.cfg.clone(), failover_pool, http);
-    let stats = pipe2.run_pass().await;
+    let pipe2 = crate::pipeline::Pipeline::new_with_tools(
+        pipe.cfg.clone(),
+        failover_pool,
+        http,
+        pipe.tools.clone(),
+    );
+    let stats = pipe2.run_pass_with_tools(&pipe2.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     // Primary attempted (and failed) first, fallback served the shared
     // transcription — one serving hit, not two.
@@ -615,7 +633,7 @@ exit 0
     .unwrap();
     stubs.movie_on.store(true, Ordering::Relaxed);
     stubs.uploads.lock().await.clear();
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     for lang in ["id", "en"] {
         let p = format!("{mstem_s}.{lang}.hi.srt");
@@ -631,7 +649,7 @@ exit 0
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
     // Both movie languages committed as kind=movie; the decoy series row
     // for id 100 is still there, untouched and irrelevant.
-    let rows = state_rows(&pipe.cfg.state_file);
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
     for lang in ["id", "en"] {
         assert!(
             rows.iter().any(|r| r.kind.as_deref() == Some("movie")
@@ -641,7 +659,7 @@ exit 0
             "missing movie done row for {lang}"
         );
     }
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(
         reg.iter()
             .filter(|r| r.extra.get("kind").and_then(|v| v.as_str()) == Some("movie"))
@@ -656,7 +674,7 @@ exit 0
     std::fs::remove_file(format!("{stem_s}.id.hi.srt")).unwrap();
     stubs.uploads.lock().await.clear();
     let whisper_before = *stubs.whisper_hits.lock().await;
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     let text = std::fs::read_to_string(format!("{stem_s}.id.hi.srt")).unwrap();
     assert!(text.contains("[AI-generated by ASRSub]"));
@@ -672,7 +690,7 @@ exit 0
     stubs.uploads.lock().await.clear();
     stubs.upload_attempts.store(0, Ordering::SeqCst);
     stubs.upload_failures.store(2, Ordering::SeqCst);
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     let text = std::fs::read_to_string(format!("{mstem_s}.id.hi.srt")).unwrap();
@@ -682,7 +700,7 @@ exit 0
     std::fs::remove_file(format!("{mstem_s}.en.hi.srt")).unwrap();
     stubs.upload_attempts.store(0, Ordering::SeqCst);
     stubs.upload_failures.store(99, Ordering::SeqCst);
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!((stats.scanned, stats.done, stats.failed), (1, 1, 0));
     assert_eq!(stubs.upload_attempts.load(Ordering::SeqCst), 3);
     assert!(std::path::Path::new(&format!("{mstem_s}.en.hi.srt")).is_file());
@@ -701,14 +719,14 @@ exit 0
     write_exe(
         &bin_dir.join("ffprobe"),
         r#"#!/bin/sh
-if printf '%s' "$*" | grep -q "stream=index"; then
+if printf '%s' "$*" | /usr/bin/grep -q "stream=index"; then
   printf '{"streams":[{"index":1,"codec_name":"aac","codec_type":"audio"}],"format":{"duration":"300.0"}}'
 else
   printf '{"format":{"duration":"300.0"}}'
 fi
 "#,
     );
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(
         (stats.scanned, stats.done, stats.failed),
         (1, 0, 1),
@@ -720,11 +738,12 @@ fi
             "no sidecar may be written for an unestablished source language"
         );
     }
-    assert!(registry_rows(&pipe.cfg.registry_file).is_empty());
+    assert!(
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file).is_empty()
+    );
     assert!(stubs.uploads.lock().await.is_empty());
-    assert!(state_rows(&pipe.cfg.state_file)
-        .iter()
-        .any(|r| r.status.as_deref() == Some("error")));
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
+    assert!(rows.iter().any(|r| r.status.as_deref() == Some("error")));
 
     // ---- Phase I: successful detection (round-2 coverage) ----
     // The same untagged track, but the provider now reports a language. The
@@ -738,7 +757,7 @@ fi
     stubs.upload_failures.store(0, Ordering::SeqCst);
     let bodies_before = stubs.whisper_bodies.lock().await.len();
     let hits_before = *stubs.whisper_hits.lock().await;
-    let stats = pipe.run_pass().await;
+    let stats = pipe.run_pass_with_tools(&pipe.tools).await;
     assert_eq!(
         (stats.scanned, stats.done, stats.failed),
         (1, 1, 0),
@@ -764,7 +783,7 @@ fi
     let mut ups = stubs.uploads.lock().await.clone();
     ups.sort();
     assert_eq!(ups, vec!["en".to_string(), "id".to_string()]);
-    let reg = registry_rows(&pipe.cfg.registry_file);
+    let reg = crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
     assert_eq!(reg.len(), 2);
     for r in &reg {
         assert_eq!(r.source.as_deref(), Some("asr"), "row is not ASR: {r:?}");
@@ -780,10 +799,119 @@ fi
         );
     }
     assert_eq!(
-        state_rows(&pipe.cfg.state_file)
+        crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file)
             .iter()
             .filter(|r| r.status.as_deref() == Some("done"))
             .count(),
         2
     );
+
+    // ---- Phase J: sibling target reduction keeps one success + one failure ----
+    // Re-run both missing targets. Make the id registry row contradict the
+    // strict identity while leaving en unchanged; the pass must retain both
+    // target outcomes and reduce them to a partial report.
+    for lang in ["id", "en"] {
+        std::fs::remove_file(format!("{stem_s}.{lang}.hi.srt")).ok();
+    }
+    std::fs::write(&pipe.cfg.state_file, "").unwrap();
+    let mut registry =
+        crate::state::load_jsonl::<crate::state::RegistryRow>(&pipe.cfg.registry_file);
+    for row in &mut registry {
+        if row.lang.as_deref() == Some("id") {
+            row.source = Some("contradiction".to_string());
+        }
+    }
+    crate::state::rewrite_jsonl(&pipe.cfg.registry_file, &registry).unwrap();
+    assert_eq!(
+        registry
+            .iter()
+            .find(|row| row.lang.as_deref() == Some("id"))
+            .and_then(|row| row.source.as_deref()),
+        Some("contradiction")
+    );
+    let outcome = pipe.run_pass_outcome().await;
+    let (stats, reports, omitted) = outcome.into_parts();
+    assert_eq!(
+        (stats.scanned, stats.processed, stats.done, stats.failed),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(omitted, 0);
+    assert_eq!(reports.len(), 1);
+    let report = reports.iter().next().unwrap();
+    assert_eq!(
+        report.aggregate(),
+        crate::feature_modules::discord_types::AggregateDisposition::Partial,
+        "target outcomes: {:?}",
+        report.targets()
+    );
+    assert!(report.targets().as_slice().iter().any(|target| {
+        target.language().as_str() == "id"
+            && matches!(
+                target.status(),
+                crate::feature_modules::discord_types::TargetStatus::Failed {
+                    class: crate::feature_modules::discord_types::FailureClass::Storage
+                }
+            )
+    }));
+    assert!(report.targets().as_slice().iter().any(|target| {
+        target.language().as_str() == "en"
+            && matches!(
+                target.status(),
+                crate::feature_modules::discord_types::TargetStatus::Completed { .. }
+            )
+    }));
+
+    // A later pass must not promote the installed-but-unadmitted id sidecar.
+    let retry = pipe.run_pass_outcome().await;
+    let (retry_stats, retry_reports, retry_omitted) = retry.into_parts();
+    assert_eq!(
+        (
+            retry_stats.scanned,
+            retry_stats.processed,
+            retry_stats.done,
+            retry_stats.failed
+        ),
+        (1, 1, 0, 1)
+    );
+    assert_eq!(retry_omitted, 0);
+    assert_eq!(retry_reports.len(), 1);
+    assert_eq!(
+        retry_reports.iter().next().unwrap().aggregate(),
+        crate::feature_modules::discord_types::AggregateDisposition::Failed
+    );
+    let rows = crate::state::load_jsonl::<crate::state::StateEntry>(&pipe.cfg.state_file);
+    assert!(!rows.iter().any(|row| {
+        row.language.as_deref() == Some("id") && row.status.as_deref() == Some("done")
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn core_acceptance_manifest_lists_named_tests() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/core_acceptance/acceptance-manifest.json"
+        ))
+        .expect("core acceptance manifest JSON");
+        let names = manifest["tests"].as_array().expect("tests array");
+        let source = concat!(
+            include_str!("main.rs"),
+            include_str!("api.rs"),
+            include_str!("pipeline.rs"),
+            include_str!("episode.rs"),
+            include_str!("sim.rs"),
+            include_str!("discord_renderer.rs"),
+            include_str!("discord_state.rs"),
+            include_str!("discord_transport.rs"),
+            include_str!("../tests/pipeline_rs.rs")
+        );
+        for name in names {
+            let name = name.as_str().expect("named acceptance test");
+            let symbol = name.rsplit("::").next().unwrap_or(name);
+            assert!(
+                source.contains(&format!("fn {symbol}")),
+                "missing acceptance selector {name}"
+            );
+        }
+    }
 }

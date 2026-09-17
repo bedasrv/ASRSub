@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '%s\n' '{"schema":"health-evidence-v1","endpoint":"/ready","status":200,"returncode":0,"ready":true}'

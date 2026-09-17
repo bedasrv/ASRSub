@@ -1,0 +1,1 @@
+{"schema":"systemd-capability-v1","systemd_analyze":true,"systemctl":true,"fixture_only":true,"source":"local-read-only-probe"}

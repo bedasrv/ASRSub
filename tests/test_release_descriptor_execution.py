@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import runpy
 import subprocess
 import tempfile
 import shutil
@@ -94,3 +95,81 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=f"build.sh failed: stdout={result.stdout} stderr={result.stderr}")
         env_text = Path(self.repo_dir, ".release.env").read_text()
         self.assertIn(f"ASRSUB_IMAGE=example.com/x/asrsub:{self.sha}", env_text)
+
+
+class TestPlanningReceipt(unittest.TestCase):
+    def test_planning_receipt_schema(self):
+        path = REPO / "tests/fixtures/platform/planning-receipt.json"
+        value = json.loads(path.read_text())
+        self.assertEqual(value["schema"], "planning-receipt-v1")
+        self.assertEqual(value["phase"], "provisional")
+        for key in ("baseline_commit", "core_implementation_commit", "receipt_parent_commit"):
+            self.assertRegex(value[key], r"^[0-9a-f]{40}$")
+        for key in ("core_plan_sha256", "hardening_plan_sha256", "bundle_signer_sha256", "approval_signer_sha256", "asrsub_env_sha256", "signer_argv_policy_sha256"):
+            self.assertRegex(value[key], r"^[0-9a-f]{64}$")
+        self.assertIsNone(value["package_bundle_sha256"])
+        self.assertIsNone(value["create_approval_sha256"])
+
+
+class TestEnvironmentWrapper(unittest.TestCase):
+    def test_scrubs_inherited_state_and_uses_private_target(self):
+        env = os.environ.copy()
+        env.update({"DISCORD_WEBHOOK_URL": "fixture-value", "PIPELINE_ENV": "fixture-value", "HTTP_PROXY": "fixture-value"})
+        result = subprocess.run(
+            [str(REPO / "tools/asrsub-env"), "python3", "-c", "import os; print(os.environ.get('CARGO_TARGET_DIR','')); print(os.environ.get('DISCORD_WEBHOOK_URL',''))"],
+            cwd=REPO, env=env, capture_output=True, text=True, check=True,
+        )
+        lines = result.stdout.splitlines()
+        self.assertRegex(lines[0], r"^/tmp/(?:agent-scratch/)?asrsub-env-[^/]+/target")
+        self.assertEqual(lines[1], "")
+        self.assertNotIn("fixture-value", result.stderr)
+
+    def test_falls_back_to_secure_parent_when_preferred_parent_is_unusable(self):
+        module = runpy.run_path(str(REPO / "tools/asrsub-env"))
+        with tempfile.TemporaryDirectory(prefix="asrsub-env-parent-") as directory:
+            blocked = Path(directory) / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            module["_secure_scratch_parent"].__globals__["SCRATCH_PARENT"] = blocked
+            self.assertEqual(module["_secure_scratch_parent"](), Path(directory))
+
+    def test_each_invocation_has_private_nonshared_target_and_cache(self):
+        values = []
+        for _ in range(2):
+            result = subprocess.run(
+                [
+                    str(REPO / "tools/asrsub-env"),
+                    "/usr/bin/python3",
+                    "-c",
+                    "import os; print(os.environ['CARGO_TARGET_DIR']); print(os.environ['CARGO_HOME'])",
+                ],
+                cwd=REPO,
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            target, cargo_home = result.stdout.splitlines()
+            values.append((Path(target), Path(cargo_home)))
+        self.assertNotEqual(values[0][0], values[1][0])
+        self.assertNotEqual(values[0][1], values[1][1])
+        for target, cargo_home in values:
+            self.assertFalse(target.exists())
+            self.assertFalse(cargo_home.exists())
+
+    def test_signer_wrapper_pins_its_interpreter(self):
+        self.assertTrue((REPO / "tools/asrsub-env").read_text(encoding="utf-8").startswith("#!/usr/bin/python3\n"))
+
+    def test_wrapper_is_executable(self):
+        self.assertTrue(os.access(REPO / "tools/asrsub-env", os.X_OK))
+
+
+class TestSystemdContract(unittest.TestCase):
+    def test_systemd_units_verify(self):
+        recovery = (REPO / "systemd/asrsub-recovery.service").read_text()
+        runtime = (REPO / "systemd/asrsub-runtime.service").read_text()
+        self.assertIn("Before=docker.service", recovery)
+        self.assertIn("Requires=asrsub-recovery.service docker.service", runtime)
+
+    def test_runtime_scripts_install_with_protected_hashes(self):
+        for path in ("scripts/asrsub-health-probe", "scripts/asrsub-recover", "scripts/asrsub-runtime", "tools/provision_statefs.py", "tools/install_runtime_bundle.py"):
+            self.assertTrue((REPO / path).is_file(), path)

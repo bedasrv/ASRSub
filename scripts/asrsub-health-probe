@@ -1,0 +1,147 @@
+#!/bin/sh
+set -eu
+
+# The installed probe is the only production health-evidence producer.  It
+# writes the fixed rollout path and never accepts an alternate path unless the
+# explicit local test seam is selected.
+fixed_output=/var/lib/asrsub/deploy-state/evidence/health.json
+output=$fixed_output
+curl_executable=/usr/bin/curl
+test_seam=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output)
+            [ "$#" -ge 2 ] || { printf '%s\n' 'health probe: --output requires a path' >&2; exit 2; }
+            output=$2
+            shift 2
+            ;;
+        --curl-executable)
+            [ "$#" -ge 2 ] || { printf '%s\n' 'health probe: --curl-executable requires a path' >&2; exit 2; }
+            curl_executable=$2
+            shift 2
+            ;;
+        --test-seam)
+            test_seam=1
+            shift
+            ;;
+        *)
+            printf '%s\n' 'health probe: unsupported argument' >&2
+            exit 2
+            ;;
+    esac
+done
+if [ "$test_seam" -eq 0 ]; then
+    [ "$output" = "$fixed_output" ] || {
+        printf '%s\n' 'health probe: production output path is fixed' >&2
+        exit 2
+    }
+    [ "$curl_executable" = /usr/bin/curl ] || {
+        printf '%s\n' 'health probe: production curl path is fixed' >&2
+        exit 2
+    }
+else
+    case "$curl_executable" in
+        /*) ;;
+        *) printf '%s\n' 'health probe: test curl path must be absolute' >&2; exit 2 ;;
+    esac
+fi
+
+case "$output" in
+    /*) ;;
+    *) printf '%s\n' 'health probe: output path must be absolute' >&2; exit 2 ;;
+esac
+parent=${output%/*}
+[ "$parent" != "$output" ] && [ -d "$parent" ] && [ ! -L "$parent" ] || {
+    printf '%s\n' 'health probe: output parent is unavailable or unsafe' >&2
+    exit 2
+}
+component=$parent
+while [ "$component" != "/" ] && [ -n "$component" ]; do
+    [ ! -L "$component" ] || {
+        printf '%s\n' 'health probe: output path contains a symlinked parent' >&2
+        exit 2
+    }
+    component=${component%/*}
+    [ -n "$component" ] || component=/
+done
+[ ! -L "$output" ] || {
+    printf '%s\n' 'health probe: output path is a symlink' >&2
+    exit 2
+}
+[ ! -e "$output" ] || [ -f "$output" ] || {
+    printf '%s\n' 'health probe: output path is not a regular file' >&2
+    exit 2
+}
+[ -f "$curl_executable" ] && [ ! -L "$curl_executable" ] && [ -x "$curl_executable" ] || {
+    printf '%s\n' 'health probe: curl executable is unavailable or unsafe' >&2
+    exit 2
+}
+
+# mktemp creates the file with O_CREAT|O_EXCL in the destination directory;
+# the no-follow checks above prevent replacing a symlink at either endpoint.
+umask 077
+temporary=$(/usr/bin/mktemp "$output.tmp.XXXXXXXX")
+cleanup() {
+    if [ -n "${temporary:-}" ]; then
+        /bin/rm -f -- "$temporary"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ "$test_seam" -eq 1 ]; then
+    owner_uid=$(/usr/bin/id -u)
+    owner_gid=$(/usr/bin/id -g)
+else
+    owner_uid=1000
+    owner_gid=1000
+    current_uid=$(/usr/bin/id -u)
+    current_gid=$(/usr/bin/id -g)
+    if [ "$current_uid" -ne 1000 ] || [ "$current_gid" -ne 1000 ]; then
+        [ "$current_uid" -eq 0 ] && /usr/bin/chown 1000:1000 "$temporary" || {
+            printf '%s\n' 'health probe: production writer is not root or asrsub' >&2
+            exit 2
+        }
+    fi
+fi
+
+raw_status=$(
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$curl_executable" \
+        --fail \
+        --silent \
+        --show-error \
+        --output /dev/null \
+        --write-out '%{http_code}' \
+        --connect-timeout 2 \
+        --max-time 5 \
+        --max-redirs 0 \
+        --noproxy '*' \
+        http://127.0.0.1:8085/ready || true
+)
+case "$raw_status" in
+    [0-9][0-9][0-9])
+        case "$raw_status" in
+            000) status=null ;;
+            *) status=$raw_status ;;
+        esac
+        ;;
+    *) status=null ;;
+esac
+if [ "$status" = "200" ]; then
+    returncode=0
+    ready=true
+else
+    returncode=1
+    ready=false
+fi
+printf '{"schema":"health-evidence-v1","endpoint":"/ready","status":%s,"returncode":%s,"ready":%s}\n' "$status" "$returncode" "$ready" > "$temporary"
+chmod 0600 "$temporary"
+if [ "$test_seam" -eq 1 ]; then
+    /usr/bin/chown "$owner_uid:$owner_gid" "$temporary" 2>/dev/null || true
+elif [ "$current_uid" -eq 0 ]; then
+    /usr/bin/chown "$owner_uid:$owner_gid" "$temporary"
+fi
+mv -f -- "$temporary" "$output"
+temporary=
+if [ "$returncode" -ne 0 ]; then
+    exit "$returncode"
+fi

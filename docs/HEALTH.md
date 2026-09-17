@@ -82,6 +82,29 @@ curl -sf http://127.0.0.1:8085/ready  | jq .   # non-zero exit when 503
 
 Checked by `/ready` (media root, state dir, providers) or by the operator:
 
+### Notification and deployment boundary
+
+- **Requirement (core):** outbound Discord delivery is constructed only by the
+  long-running daemon. `run-once` has zero notification secret/state/transport
+  access, and the existing authenticated inbound `/webhook` remains an
+  independent Tdarr wake/extraction route.
+- **Requirement (core):** notification state is separate from the pipeline
+  JSONL ledgers. State admission is serialized by one StateLane, survives
+  restart, quarantines contradictory bytes rather than treating them as an
+  empty store, and enforces the 900-second attempt-start floor. Notification
+  failures do not change pipeline counters, `LastPass`, readiness, or public
+  response shapes.
+- **Local evidence:** local fake/localhost transport and bounded fixture tests
+  cover safe payloads, optional-secret failure continuation, state replay, and
+  acknowledgement races. These tests do not prove a live container boundary
+  or visual Discord rendering.
+- **Rollout-only evidence (hardening):** production StateFs mount identity,
+  staged secret ownership, child-process isolation, signed image/Compose
+  provenance, resolver snapshots, systemd recovery, authenticated quiesce,
+  and rollback receipts must be established by the separate deployment
+  hardening gates. No notifier-only firewall claim is made: the current
+  notifier shares the ASRSub process with its other integrations.
+
 ### 1. Local State Directory
 
 - **What**: `/home/user/.config/asr-pipeline` (or `$STATE_FILE` dirname)
@@ -161,15 +184,23 @@ curl -H "X-API-Key: $(cat /run/secrets/control_api_key)" http://127.0.0.1:8085/s
 - **No secret values** appear in health/readiness responses, logs, or dashboards. `CONTROL_API_KEY` is loaded from `/run/secrets/control_api_key` (or `CONTROL_API_KEY_FILE`); `pipeline.env` at `/home/user/.config/asr-pipeline/pipeline.env` holds non-control settings (BAZARR_URL, SONARR_URL, JELLYFIN_URL, …) and is mounted as a volume, not injected as environment variables.
 - **One daemon serves the dashboard**: exactly one `orchestrator` service runs the daemon, which serves the complete HTML UI at `/` and `/ui/*` and the API at `/api2/*` on `WEBHOOK_PORT` (default 8085). There is no separate dashboard replica: running a second full daemon on a read-only state mount caused an `EROFS` restart loop and risked competing state writers. Dashboard mutations (`POST /ui/…`) use ordinary POST/redirect/GET: a successful write returns `303 See Other` with a `Location` for the resulting complete page, while authentication, validation, unknown-action, and write failures return complete HTML with their original `401`, `400`, `404`, or `500` status. The embedded browser asset follows redirects and replaces the document; it does not maintain client-side page state or poll partial responses. A no-op settings submission remains a `200` complete page. The same validation rule guards both write paths, so `POST /api2/config` refuses an out-of-range value too — a value the loader would only warn about and discard is never persisted.
 - **Empty means unset, in every layer**: a variable that is set but empty (or whitespace-only) pins nothing, does not shadow a file value during the merge, is not validated, and is treated as unset by the consumers that read the environment directly — `PROVIDERS_FILE`, `ASRSUB_CONFIG_DIR`, `HOME`, `JIMAKU_BASE_URL`, `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_BASE_URL`, `ANILIST_CACHE`, `ANILIST_TIMEOUT`, `LLM_TIMEOUT_S`, `LLM_PER_ENDPOINT_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `WHISPER_CONCURRENCY`, `CONTROL_API_KEY` (empty denies control access) and every provider entry's `key_env`. Because of that, **blanking a variable no longer clears a value that lives in `pipeline.env` or `config.overrides.json`** — the file value survives. To clear such a value, edit `pipeline.env`, `POST /api2/config {"KEY":""}`, or delete the key from `config.overrides.json`; note the settings form never submits an empty `Secret`, so a password is cleared through one of those, not through the UI.
-- **Build vs deploy**: images are built by CI and pushed to GHCR as immutable `ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (`build.sh` is local/dev builds only and never pushes); deploy pulls an explicit tag (`docker compose pull`, then `up -d --no-build`). The compose file fails closed if `ASRSUB_IMAGE` is unset. Deployment detail lives in `DEPLOY.md`.
-- **Probes** (compose ships this healthcheck; `/health` for liveness, `/ready` for readiness). The probe is `CMD-SHELL` so it follows `WEBHOOK_PORT` — the same variable the daemon binds:
+- **Build vs deploy**: images are built by CI and published under an immutable
+  `ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` identity. The SHA tag is
+  only a lookup label. Production approval binds that digest, the signed
+  runtime bundle, and the rendered Compose bytes. Systemd invokes
+  `/usr/local/libexec/asrsub/asrsub-recover --preflight` and
+  `/usr/local/libexec/asrsub/asrsub-runtime --reconcile`; the adapter pulls
+  the approved digest first and starts the fixed Compose projection with
+  `up -d --no-build --pull=never`. A direct `docker compose up` is not the
+  production rollout path.
+- **Probes** (Compose ships this healthcheck; `/health` for liveness, `/ready` for readiness). The tracked template follows `WEBHOOK_PORT`; the approved rendered projection fixes the value before its Compose hash is signed:
   ```yaml
   healthcheck:
-    test: ["CMD-SHELL", "curl -sf http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready"]
+    test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:${WEBHOOK_PORT:-8085}/ready"]
     interval: 30s
     timeout: 5s
     retries: 3
-    start_period: 20s
+    start_period: 10s
   ```
   Release gating: `/ready` 200. Rollout gating (e.g. `depends_on:
   condition: service_healthy`) should also use `/ready`.

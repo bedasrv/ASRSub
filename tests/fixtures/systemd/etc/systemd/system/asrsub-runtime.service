@@ -1,0 +1,10 @@
+[Unit]
+Requires=asrsub-recovery.service docker.service
+After=asrsub-recovery.service docker.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/asrsub/asrsub-runtime --reconcile
+Restart=on-failure
+RestartPreventExitStatus=75
+Delegate=yes

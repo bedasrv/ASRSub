@@ -193,20 +193,10 @@ impl Pipeline {
             "ass" | "ssa"
         ) {
             let out = tmp.with_extension("srt");
-            let st = tokio::process::Command::new("ffmpeg")
-                .args([
-                    "-v",
-                    "error",
-                    "-y",
-                    "-i",
-                    &tmp.to_string_lossy(),
-                    &out.to_string_lossy(),
-                ])
-                .status()
-                .await;
+            let st = crate::asr::convert_subtitle_with_tools(&self.tools, &tmp, &out).await;
             let _ = tokio::fs::remove_file(&tmp).await;
             match st {
-                Ok(s) if s.success() => out,
+                Ok(true) => out,
                 _ => {
                     tracing::warn!("ladder: jimaku direct: ass convert failed ({tag})");
                     return None;

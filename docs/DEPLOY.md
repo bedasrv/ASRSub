@@ -1,10 +1,16 @@
 # ASRSub Deploy Instructions (Explicit, Immutable Release)
 
-Images are built by CI and published to GHCR; deployment pulls an explicit
-image by git SHA and starts it. There is no `deploy.sh` (deleted
-2026-09-09), and compose never consumes a mutable `latest` tag — the release
-image must always be set explicitly via `ASRSUB_IMAGE` (CI publishes a
-`latest` alias as a convenience; see Build).
+**Requirement (not executed evidence):** images are built by CI and published
+as immutable OCI digests. The tracked `docker-compose.yml` is a template; the
+sole renderer is `tools/compose_provenance.py`, which produces the exact
+interpolation-free candidate installed at `/usr/local/libexec/asrsub/compose.yaml`.
+The template hash and rendered Compose hash are separate approval-bound
+identities. A mutable tag or registry lookup is never a production identity.
+
+**Rollout-only evidence:** the final digest, release SHA, signed bundle,
+approval generation, installed inventory, and target receipt must be read back
+on the approved target before systemd may start the runtime. This document
+does not claim that any rollout, secret activation, or host mutation has run.
 
 ## What's in the image
 
@@ -37,6 +43,7 @@ knobs are read straight from the process environment by their consumers
 is parsed into the config map, never exported into the process environment.
 Put these in the container environment (the compose `environment:` block or
 the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
+`LLM_CONNECT_TIMEOUT_S`, `LLM_READ_TIMEOUT_S`, `TRANSLATION_TIMEOUT_S`,
 `WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
 `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
 `ANILIST_BASE_URL`, `RUST_LOG` (verbosity, `EnvFilter` syntax).
@@ -62,6 +69,32 @@ every config layer, so the dashboard renders them read-only — a value saved
 from the UI could never take effect. Change them in the compose `.env`.
 
 ## Prerequisites
+
+## Hardened boundary (requirements)
+
+- Runtime secrets are staged by a root-owned, journaled deployment operation
+  into `/var/lib/asrsub/runtime-secrets/`; the container sees only the fixed
+  read-only projections `/run/secrets/discord_webhook` and
+  `/run/secrets/control_api_key`. The operator source directory, provider-key
+  source, approval files, rollback material, deployment journal, and Docker
+  socket are never mounted.
+- The application runs as UID/GID `1000:1000` with no capabilities and
+  `no-new-privileges`. StateFs is separate from the pipeline JSONL ledgers and
+  is admitted only after no-follow, ownership, mode, filesystem, and mount
+  identity checks. Systemd owns recovery and restart; Compose does not.
+- Deployment admission is blocked before quiesce, replacement, recovery, or
+  journal mutation and is reopened only after terminal journal, receipt,
+  evidence, and active-set witnesses read back. Pending notification state is
+  preserved across deployment; no drain/reset side effect is defined.
+- The daemon uses an in-process resolver snapshot for Discord. It does **not**
+  claim a Discord-only firewall or cgroup allowlist because Discord shares the
+  ASRSub process with other integrations.
+
+**Local evidence:** disposable fixtures and localhost/fake transports verify
+Compose projections, journal transitions, StateFs behavior, child policy,
+provenance, and receipts. **Rollout-only evidence:** effective container
+mounts, cgroup delegation, resolver peers, systemd ownership, running image
+identity, and rollback timestamps require a target-VM receipt.
 
 - GHCR read access on the host (one time):
   ```bash
@@ -130,14 +163,13 @@ from the UI could never take effect. Change them in the compose `.env`.
 ## Build (CI-owned, immutable, versioned)
 
 Every push to `main` triggers `.github/workflows/release.yml`: it builds
-the image and pushes **two tags** to GHCR:
-`ghcr.io/bedasrv/asrsub:<full-40-char-git-sha>` (immutable, authoritative)
-and `ghcr.io/bedasrv/asrsub:latest` (a convenience alias tracking the
-newest `main` build, so public pulls get the current Rust image — it
-previously held the retired Python image). Production must still pin the
-SHA tag; compose requires an explicit `${ASRSUB_IMAGE}`. The workflow
-emits the non-secret release descriptor as an artifact
-(`release.json`: `asrsub_image` / `git_sha` / `build_time` — no secrets).
+and publishes a release identified by the full Git SHA and its registry content
+digest. The SHA tag is a lookup label for CI and development; the production
+approval records the immutable
+`ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` reference. A mutable tag or
+registry lookup is never a production identity. The workflow emits the
+non-secret release descriptor as an artifact (`release.json`:
+`asrsub_image` / `git_sha` / `build_time` — no secrets).
 
 `build.sh` remains for local/dev builds only: it tags the same
 `ghcr.io/bedasrv/asrsub:<git-sha>` scheme (override the registry with
@@ -145,32 +177,55 @@ emits the non-secret release descriptor as an artifact
 locally, and **never pushes**. It never runs `docker compose down`,
 `docker rmi`, or `docker builder prune`.
 
-- Never *deploys* a mutable `latest` tag: no production default references it (CI publishes one as a convenience alias, nothing pins it).
+- Never deploy a mutable `latest` tag or a SHA tag alone. Production accepts only the approved full `@sha256:` image reference.
 - Retains volumes: `/home/user/.config/asr-pipeline`, `/home/user/.cache/asr-pipeline`, and the host media directory.
 - Single `orchestrator` service: the daemon serves the dashboard at `/` and the API at `/api2/*`; there is no separate dashboard replica (a read-only state mount used to restart-loop with `EROFS`).
 - Release descriptor contains only `ASRSUB_IMAGE` / `GIT_SHA` / `BUILD_TIME` — no secrets.
 
-## Deploy (explicit, immutable, pull-based)
+## External signer boundary
 
-Deploy fails closed if `ASRSUB_IMAGE` is not set to an immutable
-`ghcr.io/bedasrv/asrsub:<git-sha>` tag:
+`tools/signer_argv_policy.json` is a non-secret, repository-side contract for
+the external release signer. Its two commands must be executed from the
+repository root, with `/usr/bin/python3` invoking `tools/asrsub-env`, and with
+the private key supplied only through the listed inherited file descriptor.
+The bundle and approval commands retain the relative `release/` layout and
+write production-mode artifacts only after their own validation. The wrapper
+creates a private per-invocation target/cache root; it does not receive the
+caller environment or copy Cargo state for signer commands.
+
+This repository does not launch those signer commands, hand off a production
+private key, or claim production signing evidence. The release workflow is
+image-only and contains no signing-key handoff. Key opening, release inputs,
+external signer execution, trust-anchor installation, and target evidence
+remain external deployment prerequisites.
+
+## Deploy (systemd-owned, explicit, immutable)
+
+Production deployment is owned by systemd and the checked-in fixed-path
+adapters. The recovery unit must pass before Docker or runtime reconciliation
+can start. The adapter reads the authenticated release transaction, verifies the
+rendered Compose hash and `@sha256:` image identity, pulls only that digest,
+and starts Compose with the fixed project and `/dev/null` environment file using
+`up -d --no-build --pull=never`. It does not accept caller-selected Compose files, `.env` files, override files,
+Docker contexts, proxies, or mutable tags.
 
 ```bash
-export ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha>
-CONTROL_API_KEY="$(cat /home/user/.config/asr-pipeline/secrets/control_api_key)"
-docker compose config                    # review secrets, mounts, and resolved ASRSUB_IMAGE
-# Drain first: recreating mid-pass discards the item in flight.
-curl -sf -X POST -H "X-API-Key: $CONTROL_API_KEY" http://127.0.0.1:8085/pause
-curl -sf http://127.0.0.1:8085/status | jq '{current, last_pass}'   # wait for current: null
-docker compose pull                      # fetch the exact image from GHCR
-docker compose up -d --no-build          # start/restart without deleting volumes, never building
-docker compose ps
-curl -sf http://127.0.0.1:8085/health | jq .     # liveness (process up)
-curl -sf http://127.0.0.1:8085/ready  | jq .     # readiness (media/providers/state)
+# These are the fixed systemd entrypoints; systemd owns their invocation.
+/usr/local/libexec/asrsub/asrsub-recover --preflight
+/usr/local/libexec/asrsub/asrsub-runtime --reconcile
 ```
 
-The pause is only for the drain: the replacement container boots unpaused
-(there is no paused-boot yet — see `HEALTH.md`), so nothing needs resuming.
+A missing approval, trust anchor, rendered Compose file, StateFs root, runtime
+inventory member, or Docker executable blocks with a non-zero status. This
+checkout has not executed a production rollout and does not fabricate a signed
+bundle or target evidence.
+
+For local or fixture-only checks, keep using the explicit `--test-seam` or
+fixture harnesses. Do not run bare `docker compose config`: it can resolve
+`env_file` values into output. A non-production development check may use
+`docker compose pull`, but that command is not the production deployment path.
+
+## Readiness verification
 
 A ready deployment answers `200` on `/ready`; a `503` names the failing
 local check (`checks.media_root`, `checks.providers`, `checks.state_dir`)
@@ -182,8 +237,6 @@ scripts/deploy_smoke.sh                      # defaults to http://127.0.0.1:8085
 BASE_URL=http://127.0.0.1:8085 scripts/deploy_smoke.sh
 ```
 
-Without `ASRSUB_IMAGE`, `docker compose config` and `docker compose up` will error:
-`ASRSUB_IMAGE must be set to immutable release tag (e.g. asrsub:<git-sha> — see docs/DEPLOY.md / .release.env)`.
 
 ## Reverse proxy & firewall (port 8085)
 
@@ -257,31 +310,29 @@ reads the sources in the **opposite** order — `PIPE_TOKEN`, then
 and `<config dir>/secrets/control_api_key` — so a client whose environment
 holds a stale `PIPE_TOKEN` sends a token the daemon will not accept.
 
-## Rollback (immutable: pull previous SHA)
+## Rollback (approved digest, systemd-owned)
+
+Read the previous release descriptor and approval transaction. A previous SHA
+tag such as `ghcr.io/bedasrv/asrsub:<previous-40-char-sha>` is only a lookup
+label; it must resolve to a newly authenticated immutable digest before use.
+Do not point production Compose at a tag.
 
 ```bash
-docker images | grep asrsub
-# Inspect the previous release descriptor (CI artifact: release.json).
-# Set the explicit previous immutable tag and redeploy:
-ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<previous-40-char-sha> docker compose pull
-ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<previous-40-char-sha> docker compose up -d --no-build
+# The recovery gate and runtime reconcile consume the approved previous digest.
+/usr/local/libexec/asrsub/asrsub-recover --preflight
+/usr/local/libexec/asrsub/asrsub-runtime --reconcile
 ```
 
-Do NOT use `docker tag ... :latest` — the mutable latest tag is intentionally absent from the immutable release flow (always use explicit `ghcr.io/bedasrv/asrsub:<sha>`).
+Do NOT use `docker tag ... :latest` — the mutable latest tag is intentionally
+absent from the production flow.
 
 ## Paused Startup
 
 Not implemented at boot: the daemon always starts unpaused (no `paused`
 file, no `PAUSED=1` handling — those belonged to the retired Python
-daemon). To hold the backlog for inspection after boot:
-
-```bash
-ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> docker compose up -d --no-build
-# then immediately pause via:
-curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/pause
-# ...inspect...
-curl -X POST -H "X-API-Key: $(cat /home/user/.config/asr-pipeline/secrets/control_api_key)" http://127.0.0.1:8085/resume
-```
+daemon). The systemd-owned runtime starts only after the authenticated
+reconciliation gate passes. Do not manually start a mutable image to hold the
+backlog.
 
 ## Notes
 

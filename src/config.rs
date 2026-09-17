@@ -154,6 +154,9 @@ const ENV_ALLOWLIST: &[&str] = &[
     "UPLOAD_CONCURRENCY",
     "LLM_PER_ENDPOINT_CONCURRENCY",
     "LLM_TIMEOUT_S",
+    "LLM_CONNECT_TIMEOUT_S",
+    "LLM_READ_TIMEOUT_S",
+    "TRANSLATION_TIMEOUT_S",
     "WHISPER_CONCURRENCY",
     "WHISPER_TIMEOUT_S",
     "TMP_DIR",
@@ -234,6 +237,7 @@ impl RawConfig {
                 map.insert(k, v);
             }
         }
+        crate::feature_modules::discord_config::filter_reserved(&mut map);
         Self(map)
     }
 }
@@ -1115,6 +1119,9 @@ impl Config {
         self.raw
             .iter()
             .map(|(k, v)| {
+                if crate::feature_modules::discord_config::is_reserved_key(k) {
+                    return (k.clone(), "***".to_string());
+                }
                 let secret = HINTS.iter().any(|h| k.to_uppercase().contains(h));
                 let shown = if secret {
                     "***".to_string()
@@ -1551,6 +1558,9 @@ pub const FIELDS: &[Field] = &[
 pub const ENV_ONLY_KEYS: &[&str] = &[
     "LLM_PER_ENDPOINT_CONCURRENCY",
     "LLM_TIMEOUT_S",
+    "LLM_CONNECT_TIMEOUT_S",
+    "LLM_READ_TIMEOUT_S",
+    "TRANSLATION_TIMEOUT_S",
     "WHISPER_CONCURRENCY",
     "WHISPER_TIMEOUT_S",
     "JIMAKU_BASE_URL",
@@ -1630,6 +1640,12 @@ pub fn write_overrides(pairs: &[(String, String)]) -> anyhow::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+    if pairs
+        .iter()
+        .any(|(key, _)| crate::feature_modules::discord_config::is_reserved_key(key))
+    {
+        anyhow::bail!("DISCORD_WEBHOOK_URL is reserved and cannot be written");
+    }
     let path = cfg_dir().join("config.overrides.json");
     crate::state::ensure_parent(&path)?;
     let lock_file = crate::state::open_lock(&path)?;
@@ -2929,5 +2945,68 @@ mod tests {
             Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
             None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
         }
+    }
+
+    #[test]
+    fn reserved_discord_key_is_filtered() {
+        let mut map = HashMap::from([
+            (
+                " discord_webhook_url ".to_string(),
+                "not retained".to_string(),
+            ),
+            ("SONARR_URL".to_string(), "http://sonarr".to_string()),
+        ]);
+        crate::feature_modules::discord_config::filter_reserved(&mut map);
+        assert!(!map
+            .keys()
+            .any(|key| crate::feature_modules::discord_config::is_reserved_key(key)));
+        assert_eq!(
+            map.get("SONARR_URL").map(String::as_str),
+            Some("http://sonarr")
+        );
+    }
+
+    #[test]
+    fn reserved_discord_write_is_atomic() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prior = std::env::var_os("ASRSUB_CONFIG_DIR");
+        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+        let path = dir.path().join("config.overrides.json");
+        std::fs::write(&path, b"{\"SAFE\":\"before\"}\n").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            write_overrides(&[("DISCORD_WEBHOOK_URL".to_string(), "redacted".to_string())])
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        match prior {
+            Some(value) => std::env::set_var("ASRSUB_CONFIG_DIR", value),
+            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+        }
+    }
+
+    #[test]
+    fn runtime_secret_bytes_are_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        std::fs::write(
+            &path,
+            b"https://discord.com/api/webhooks/12345678901234567/token",
+        )
+        .unwrap();
+        assert!(crate::feature_modules::discord_config::read_runtime_secret(&path).is_ok());
+        std::fs::write(
+            &path,
+            b" https://discord.com/api/webhooks/12345678901234567/token\n",
+        )
+        .unwrap();
+        assert!(crate::feature_modules::discord_config::read_runtime_secret(&path).is_err());
+        std::fs::write(
+            &path,
+            b"https://discord.com/api/webhooks/12345678901234567/token?wait=true",
+        )
+        .unwrap();
+        assert!(crate::feature_modules::discord_config::read_runtime_secret(&path).is_err());
     }
 }

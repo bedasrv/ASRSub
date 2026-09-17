@@ -1,0 +1,334 @@
+#!/usr/bin/python3
+"""Run ASRSub commands in a private, invocation-scoped environment.
+
+The signer policy invokes this wrapper with an explicit interpreter and key FD.
+Signer commands never copy host Cargo state.  Cargo commands may receive a
+symlink-safe copy of the public registry/git caches inside the private root.
+"""
+from __future__ import annotations
+
+import errno
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+SCRATCH_PARENT = Path("/tmp/agent-scratch")
+PUBLIC_CARGO_ROOT = Path("/home/user/.cargo")
+FORBIDDEN_ENV_FRAGMENTS = (
+    "ASR",
+    "BAZARR",
+    "DISCORD",
+    "DOCKER",
+    "JELLYFIN",
+    "JIMAKU",
+    "KEY",
+    "PASSWORD",
+    "PIPELINE",
+    "PROVIDER",
+    "PROXY",
+    "SECRET",
+    "SONARR",
+    "TOKEN",
+    "CREDENTIAL",
+    "AWS_",
+    "GH_",
+    "GITHUB_",
+    "NPM_",
+)
+CARGO_COMMANDS = frozenset({"cargo", "rustc", "rustup"})
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _lstat_directory_components(path: Path, *, name: str) -> os.stat_result:
+    path = Path(os.fspath(path))
+    if not path.is_absolute():
+        raise SystemExit(f"asrsub-env: {name} must be absolute")
+    current = Path(path.anchor)
+    final: os.stat_result | None = None
+    for part in path.parts:
+        if part == path.anchor:
+            continue
+        current /= part
+        try:
+            st = os.lstat(current)
+        except OSError as exc:
+            raise SystemExit(f"asrsub-env: cannot inspect {name}: {exc}") from exc
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise SystemExit(f"asrsub-env: {name} contains an unsafe component")
+        if st.st_mode & (stat.S_ISUID | stat.S_ISGID):
+            raise SystemExit(f"asrsub-env: {name} contains a special-mode directory")
+        final = st
+    if final is None:
+        raise SystemExit(f"asrsub-env: {name} is invalid")
+    return final
+
+
+def _validate_scratch_parent(parent: Path, *, allow_root_sticky: bool = False) -> Path:
+    st = _lstat_directory_components(parent, name="scratch parent")
+    if st.st_uid != os.getuid() and not (allow_root_sticky and st.st_uid == 0):
+        raise SystemExit("asrsub-env: scratch parent is not trusted")
+    mode = stat.S_IMODE(st.st_mode)
+    # A user-owned private directory is safe.  A root-owned fallback must be
+    # sticky (normally /tmp), so another user cannot replace our child.
+    if mode & 0o077 and not mode & stat.S_ISVTX:
+        raise SystemExit("asrsub-env: scratch parent has an untrusted mode")
+    return parent
+
+
+def _secure_scratch_parent() -> Path:
+    parent = SCRATCH_PARENT
+    try:
+        if not parent.exists():
+            _lstat_directory_components(parent.parent, name="scratch parent")
+            try:
+                os.mkdir(parent, 0o700)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise SystemExit(f"asrsub-env: cannot create scratch parent: {exc}") from exc
+        return _validate_scratch_parent(parent)
+    except SystemExit:
+        # Some hosted runners pre-create /tmp/agent-scratch with ownership or
+        # mode that this user cannot trust.  Use its already-validated parent;
+        # tempfile.mkdtemp() still creates a fresh mode-0700 child per call.
+        return _validate_scratch_parent(parent.parent, allow_root_sticky=True)
+
+
+def _mkdir_private(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700, parents=False, exist_ok=False)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise SystemExit(f"asrsub-env: cannot create private directory: {exc}") from exc
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise SystemExit(f"asrsub-env: cannot inspect private directory: {exc}") from exc
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise SystemExit("asrsub-env: private directory is unsafe")
+    os.chmod(path, 0o700)
+
+
+def _open_source_directory(path: Path) -> int | None:
+    """Open a cache tree by directory FDs so no source component can pivot."""
+    try:
+        current = os.open(os.path.sep, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    except OSError as exc:
+        raise SystemExit(f"asrsub-env: cannot open Cargo cache root: {exc}") from exc
+    try:
+        for part in path.parts:
+            if part == path.anchor:
+                continue
+            try:
+                child = os.open(part, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=current)
+            except FileNotFoundError:
+                os.close(current)
+                return None
+            except OSError as exc:
+                raise SystemExit(f"asrsub-env: Cargo cache path is unsafe: {exc}") from exc
+            try:
+                st = os.fstat(child)
+                if not stat.S_ISDIR(st.st_mode):
+                    raise SystemExit("asrsub-env: Cargo cache path is not a directory")
+            except Exception:
+                os.close(child)
+                raise
+            os.close(current)
+            current = child
+        return current
+    except Exception:
+        try:
+            os.close(current)
+        except OSError:
+            pass
+        raise
+
+
+def _copy_public_tree(source: Path, destination: Path) -> None:
+    """Copy public Cargo cache data without following any source link."""
+    source_fd = _open_source_directory(source)
+    if source_fd is None:
+        return
+    _mkdir_private(destination)
+
+    def visit(directory_fd: int, target: Path) -> None:
+        try:
+            entries = list(os.scandir(directory_fd))
+        except OSError as exc:
+            raise SystemExit(f"asrsub-env: cannot enumerate Cargo cache: {exc}") from exc
+        for entry in entries:
+            destination_path = target / entry.name
+            try:
+                if entry.is_symlink():
+                    raise SystemExit("asrsub-env: symlink in Cargo cache is not trusted")
+                if entry.is_dir(follow_symlinks=False):
+                    child_fd = os.open(entry.name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=directory_fd)
+                    try:
+                        child_stat = os.fstat(child_fd)
+                        if not stat.S_ISDIR(child_stat.st_mode):
+                            raise SystemExit("asrsub-env: Cargo cache directory changed")
+                        _mkdir_private(destination_path)
+                        visit(child_fd, destination_path)
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise SystemExit("asrsub-env: special Cargo cache entry is not trusted")
+                member_fd = os.open(entry.name, os.O_RDONLY | O_NOFOLLOW, dir_fd=directory_fd)
+                destination_fd = -1
+                try:
+                    member_stat = os.fstat(member_fd)
+                    if not stat.S_ISREG(member_stat.st_mode):
+                        raise SystemExit("asrsub-env: Cargo cache member is not regular")
+                    destination_fd = os.open(
+                        destination_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_NOFOLLOW,
+                        0o600,
+                    )
+                    copied = 0
+                    while True:
+                        block = os.read(member_fd, 1024 * 1024)
+                        if not block:
+                            break
+                        copied += len(block)
+                        view = memoryview(block)
+                        while view:
+                            written = os.write(destination_fd, view)
+                            view = view[written:]
+                    if os.fstat(member_fd).st_size != copied:
+                        raise SystemExit("asrsub-env: Cargo cache member changed while copied")
+                    os.fchmod(destination_fd, 0o600)
+                    os.fsync(destination_fd)
+                finally:
+                    os.close(member_fd)
+                    if destination_fd >= 0:
+                        os.close(destination_fd)
+            except SystemExit:
+                raise
+            except OSError as exc:
+                raise SystemExit(f"asrsub-env: cannot copy Cargo cache: {exc}") from exc
+
+    try:
+        visit(source_fd, destination)
+    finally:
+        os.close(source_fd)
+
+
+def _prepare_cargo_cache(root: Path, *, copy_public_cache: bool) -> Path:
+    cargo_home = root / "cargo-home"
+    _mkdir_private(cargo_home)
+    if copy_public_cache:
+        for name in ("registry", "git"):
+            _copy_public_tree(PUBLIC_CARGO_ROOT / name, cargo_home / name)
+    return cargo_home
+
+
+def _validate_pass_fd(fd: int) -> None:
+    if fd not in (3, 4):
+        raise SystemExit("asrsub-env: --pass-fd must be 3 or 4")
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:  # pragma: no cover - exercised by the fixture runner
+        raise SystemExit(f"asrsub-env: invalid pass fd: {exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit("asrsub-env: pass fd is not a regular file")
+    os.set_inheritable(fd, False)
+
+
+def _needs_cargo_cache(argv: list[str]) -> bool:
+    return bool(argv) and Path(argv[0]).name in CARGO_COMMANDS
+
+
+def _environment(root: Path, pass_fd: int | None, *, cargo_home: Path, target_root: Path) -> dict[str, str]:
+    env = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/home/user/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin",
+        "HOME": str(root / "home"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_STATE_HOME": str(root / "state"),
+        "CARGO_HOME": str(cargo_home),
+        "CARGO_TARGET_DIR": str(target_root),
+        "RUSTUP_HOME": "/home/user/.rustup",
+        "RUSTUP_TOOLCHAIN": "stable",
+        "TMPDIR": str(root / "tmp"),
+    }
+    if pass_fd is not None:
+        env["ASRSUB_SIGNING_FD"] = str(pass_fd)
+    return env
+
+
+def main(argv: list[str]) -> int:
+    pass_fd: int | None = None
+    if argv[:1] == ["--pass-fd"]:
+        if len(argv) < 3:
+            raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
+        try:
+            pass_fd = int(argv[1])
+        except ValueError as exc:
+            raise SystemExit("asrsub-env: invalid pass fd") from exc
+        _validate_pass_fd(pass_fd)
+        argv = argv[2:]
+    if not argv:
+        raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
+
+    parent = _secure_scratch_parent()
+    try:
+        root = Path(tempfile.mkdtemp(prefix="asrsub-env-", dir=parent))
+    except OSError as exc:
+        raise SystemExit(f"asrsub-env: cannot create invocation root: {exc}") from exc
+    try:
+        os.chmod(root, 0o700)
+        for name in ("home", "config", "cache", "state", "tmp", "target"):
+            _mkdir_private(root / name)
+        cargo_home = _prepare_cargo_cache(root, copy_public_cache=_needs_cargo_cache(argv))
+        target_root = root / "target"
+        env = _environment(root, pass_fd, cargo_home=cargo_home, target_root=target_root)
+        for key in env:
+            if any(fragment in key.upper() for fragment in FORBIDDEN_ENV_FRAGMENTS):
+                if key not in {"ASRSUB_SIGNING_FD", "CARGO_TARGET_DIR"}:
+                    raise SystemExit(f"asrsub-env: forbidden environment key {key}")
+
+        pass_fds = (pass_fd,) if pass_fd is not None else ()
+        proc = subprocess.Popen(
+            argv,
+            env=env,
+            cwd=os.getcwd(),
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            close_fds=True,
+            pass_fds=pass_fds,
+            start_new_session=False,
+        )
+        if pass_fd is not None:
+            try:
+                os.close(pass_fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+            pass_fd = None
+        return proc.wait()
+    finally:
+        if pass_fd is not None:
+            try:
+                os.close(pass_fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+        shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        raise SystemExit(130)
