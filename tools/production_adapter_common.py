@@ -310,7 +310,7 @@ def _mount_identity(path: Path) -> tuple[int | None, str | None]:
     return best[0], best[1]
 
 
-def filesystem_identity(path: Path, *, name: str) -> dict[str, Any]:
+def filesystem_identity(path: Path, *, name: str, allow_unobservable_mount: bool = False) -> dict[str, Any]:
     path = require_absolute(path, name=name)
     ensure_no_symlink(path, name=name, allow_missing=False)
     try:
@@ -327,9 +327,17 @@ def filesystem_identity(path: Path, *, name: str) -> dict[str, Any]:
     if identity["device"] <= 0 or identity["inode"] <= 0:
         raise AdapterError(f"{name} has unusable filesystem identity")
     if mount_id is None or mount_id <= 0:
-        raise AdapterError(f"{name} has no observable mount identity")
+        if not allow_unobservable_mount:
+            raise AdapterError(f"{name} has no observable mount identity")
+        # Test-seam receipts are explicitly ineligible for production
+        # evidence.  Keep their identity shape useful for fixture assertions
+        # without weakening the default production check above.
+        identity["mount_id"] = identity["device"]
+        identity["filesystem"] = "fixture"
     if not filesystem:
-        raise AdapterError(f"{name} has no observable filesystem type")
+        if not allow_unobservable_mount:
+            raise AdapterError(f"{name} has no observable filesystem type")
+        identity["filesystem"] = "fixture"
     return identity
 
 

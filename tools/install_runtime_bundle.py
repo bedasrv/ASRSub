@@ -893,7 +893,11 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             _validate_target(target, runtime_members, target_mode=target_mode, uid=uid, gid=gid)
             if systemd_members:
                 _validate_installed_systemd(systemd_root, members, uid=systemd_uid, gid=systemd_gid)
-            target_identity = filesystem_identity(target, name="bundle target")
+            target_identity = filesystem_identity(
+                target,
+                name="bundle target",
+                allow_unobservable_mount=test_seam,
+            )
             _finalize_systemd_install(systemd_installed)
             systemd_installed = []
             systemd_created_directories = []

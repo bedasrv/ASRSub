@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import runpy
 import subprocess
 import tempfile
 import shutil
@@ -119,9 +120,17 @@ class TestEnvironmentWrapper(unittest.TestCase):
             cwd=REPO, env=env, capture_output=True, text=True, check=True,
         )
         lines = result.stdout.splitlines()
-        self.assertRegex(lines[0], r"^/tmp/agent-scratch/asrsub-env-[^/]+/target")
+        self.assertRegex(lines[0], r"^/tmp/(?:agent-scratch/)?asrsub-env-[^/]+/target")
         self.assertEqual(lines[1], "")
         self.assertNotIn("fixture-value", result.stderr)
+
+    def test_falls_back_to_secure_parent_when_preferred_parent_is_unusable(self):
+        module = runpy.run_path(str(REPO / "tools/asrsub-env"))
+        with tempfile.TemporaryDirectory(prefix="asrsub-env-parent-") as directory:
+            blocked = Path(directory) / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            module["_secure_scratch_parent"].__globals__["SCRATCH_PARENT"] = blocked
+            self.assertEqual(module["_secure_scratch_parent"](), Path(directory))
 
     def test_each_invocation_has_private_nonshared_target_and_cache(self):
         values = []

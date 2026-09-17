@@ -381,6 +381,25 @@ print(json.dumps({"Id": "sha256:" + "a" * 64, "RepoDigests": ["ghcr.io/bedasrv/a
 
 
 class TestProductionStateFs(AdapterTestCase):
+    def test_test_seam_uses_explicit_fixture_identity_without_mountinfo(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            common = __import__("production_adapter_common")
+        finally:
+            sys.path.pop(0)
+        path = self.root / "identity"
+        path.mkdir()
+        with mock.patch.object(common, "_mount_identity", return_value=(None, None)):
+            with self.assertRaises(common.AdapterError):
+                common.filesystem_identity(path, name="strict fixture")
+            identity = common.filesystem_identity(
+                path,
+                name="test fixture",
+                allow_unobservable_mount=True,
+            )
+        self.assertGreater(identity["mount_id"], 0)
+        self.assertEqual(identity["filesystem"], "fixture")
+
     def test_statefs_rejects_traversal_and_symlink_and_emits_real_identity(self):
         state = self.root / "state"
         evidence = self.root / "evidence"

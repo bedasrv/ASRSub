@@ -170,6 +170,7 @@ def _collect_tree(
     required_files: set[str] | frozenset[str] | None = None,
     required_dirs: set[str] | frozenset[str] | None = None,
     tolerate_unrelated_unsafe: bool = False,
+    allow_unobservable_mount: bool = False,
 ) -> dict[str, Any]:
     root = ensure_existing_directory(require_absolute(root, name=label), name=label)
     required_file_set = set(required_files or ())
@@ -198,7 +199,11 @@ def _collect_tree(
                     "mode": stat.S_IMODE(st.st_mode),
                     "uid": st.st_uid,
                     "gid": st.st_gid,
-                    "identity": filesystem_identity(path, name=f"{label} directory"),
+                    "identity": filesystem_identity(
+                        path,
+                        name=f"{label} directory",
+                        allow_unobservable_mount=allow_unobservable_mount,
+                    ),
                 }
             )
         for name in files:
@@ -219,7 +224,11 @@ def _collect_tree(
                     "uid": st.st_uid,
                     "gid": st.st_gid,
                     "sha256": sha256_file(path, name=f"{label} member"),
-                    "identity": filesystem_identity(path, name=f"{label} member"),
+                    "identity": filesystem_identity(
+                        path,
+                        name=f"{label} member",
+                        allow_unobservable_mount=allow_unobservable_mount,
+                    ),
                 }
             )
     entries.sort(key=lambda entry: entry["path"])
@@ -243,7 +252,11 @@ def _collect_tree(
         raise AdapterError(f"{label} has no observable regular files")
     return {
         "root": os.fspath(root),
-        "root_identity": filesystem_identity(root, name=label),
+        "root_identity": filesystem_identity(
+            root,
+            name=label,
+            allow_unobservable_mount=allow_unobservable_mount,
+        ),
         "observed": True,
         "entries": entries,
         "directories": directory_entries,
@@ -365,7 +378,11 @@ def _manifest_value(
 
 def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected_hash: str, release_sha: str, *, production: bool) -> dict[str, Any]:
     if not production and args.bundle_receipt is None:
-        evidence = _collect_tree(runtime_artifacts, label="runtime bundle")
+        evidence = _collect_tree(
+            runtime_artifacts,
+            label="runtime bundle",
+            allow_unobservable_mount=not production,
+        )
         if args.bundle_manifest is not None:
             manifest = read_json(require_absolute(args.bundle_manifest, name="bundle manifest"), name="bundle manifest")
             if not isinstance(manifest, dict):
@@ -412,6 +429,7 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
         label="installed runtime artifacts",
         exact_files=EXPECTED_INSTALLED_RUNTIME_MEMBERS,
         exact_dirs=frozenset(),
+        allow_unobservable_mount=not production,
     )
     if production:
         if receipt.get("target_identity") != tree["root_identity"]:
@@ -490,6 +508,7 @@ def _systemd_evidence(
         required_files=EXPECTED_SYSTEMD_FILES if production else None,
         required_dirs=EXPECTED_SYSTEMD_DIRECTORIES if production else None,
         tolerate_unrelated_unsafe=production,
+        allow_unobservable_mount=not production,
     )
     if production:
         root_stat = os.lstat(root)
@@ -535,6 +554,7 @@ def _state_evidence(root: Path, *, production: bool) -> dict[str, Any]:
         label="deployment state root",
         exact_files=EXPECTED_STATE_FILES if production else None,
         exact_dirs=EXPECTED_STATE_DIRECTORIES if production else None,
+        allow_unobservable_mount=not production,
     )
     if production:
         root_stat = os.lstat(root)
@@ -611,6 +631,7 @@ def _cgroup_evidence(root: Path, *, production: bool) -> dict[str, Any]:
         exact_dirs=None,
         required_files=EXPECTED_CGROUP_FILES if production else None,
         tolerate_unrelated_unsafe=production,
+        allow_unobservable_mount=not production,
     )
     identity = evidence["root_identity"]
     controllers: set[str] = set()

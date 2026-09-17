@@ -69,25 +69,35 @@ def _lstat_directory_components(path: Path, *, name: str) -> os.stat_result:
     return final
 
 
-def _secure_scratch_parent() -> Path:
-    parent = SCRATCH_PARENT
-    if not parent.exists():
-        _lstat_directory_components(parent.parent, name="scratch parent")
-        try:
-            os.mkdir(parent, 0o700)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise SystemExit(f"asrsub-env: cannot create scratch parent: {exc}") from exc
+def _validate_scratch_parent(parent: Path, *, allow_root_sticky: bool = False) -> Path:
     st = _lstat_directory_components(parent, name="scratch parent")
-    if st.st_uid != os.getuid():
-        raise SystemExit("asrsub-env: scratch parent is not owned by the invoking user")
+    if st.st_uid != os.getuid() and not (allow_root_sticky and st.st_uid == 0):
+        raise SystemExit("asrsub-env: scratch parent is not trusted")
     mode = stat.S_IMODE(st.st_mode)
-    # A user-owned sticky parent is safe for random private children, as is a
-    # private 0700-style parent.  A writable non-sticky shared directory is not.
+    # A user-owned private directory is safe.  A root-owned fallback must be
+    # sticky (normally /tmp), so another user cannot replace our child.
     if mode & 0o077 and not mode & stat.S_ISVTX:
         raise SystemExit("asrsub-env: scratch parent has an untrusted mode")
     return parent
+
+
+def _secure_scratch_parent() -> Path:
+    parent = SCRATCH_PARENT
+    try:
+        if not parent.exists():
+            _lstat_directory_components(parent.parent, name="scratch parent")
+            try:
+                os.mkdir(parent, 0o700)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise SystemExit(f"asrsub-env: cannot create scratch parent: {exc}") from exc
+        return _validate_scratch_parent(parent)
+    except SystemExit:
+        # Some hosted runners pre-create /tmp/agent-scratch with ownership or
+        # mode that this user cannot trust.  Use its already-validated parent;
+        # tempfile.mkdtemp() still creates a fresh mode-0700 child per call.
+        return _validate_scratch_parent(parent.parent, allow_root_sticky=True)
 
 
 def _mkdir_private(path: Path) -> None:

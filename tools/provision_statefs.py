@@ -160,7 +160,15 @@ def _validate_admission(path: Path) -> dict[str, Any]:
     return value
 
 
-def _validate_tree(root: Path, *, uid: int, gid: int, directory_mode: int, file_mode: int) -> list[dict[str, Any]]:
+def _validate_tree(
+    root: Path,
+    *,
+    uid: int,
+    gid: int,
+    directory_mode: int,
+    file_mode: int,
+    allow_unobservable_mount: bool = False,
+) -> list[dict[str, Any]]:
     expected_dirs = set(_STATE_DIRECTORIES)
     expected_files = set(_STATE_FILES)
     actual_dirs: set[str] = set()
@@ -188,7 +196,11 @@ def _validate_tree(root: Path, *, uid: int, gid: int, directory_mode: int, file_
         expected_mode = directory_mode if relative in expected_dirs else file_mode
         if stat.S_IMODE(st.st_mode) != expected_mode or st.st_uid != uid or st.st_gid != gid:
             raise AdapterError(f"StateFs metadata mismatch: {relative}")
-        identity = filesystem_identity(path, name="StateFs entry")
+        identity = filesystem_identity(
+            path,
+            name="StateFs entry",
+            allow_unobservable_mount=allow_unobservable_mount,
+        )
         entries.append(
             {
                 "path": relative,
@@ -231,8 +243,16 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     root_existed = state_root.exists()
     ensure_directory(state_root, mode=directory_mode, uid=uid, gid=gid, name="state root")
     ensure_directory(evidence_root, mode=directory_mode, uid=uid, gid=gid, name="evidence root")
-    root_identity = filesystem_identity(state_root, name="state root")
-    evidence_identity = filesystem_identity(evidence_root, name="evidence root")
+    root_identity = filesystem_identity(
+        state_root,
+        name="state root",
+        allow_unobservable_mount=test_seam,
+    )
+    evidence_identity = filesystem_identity(
+        evidence_root,
+        name="evidence root",
+        allow_unobservable_mount=test_seam,
+    )
     if not test_seam and root_identity["filesystem"] not in ALLOWED_FILESYSTEMS:
         raise AdapterError("state root filesystem is not an approved filesystem")
     if not test_seam and evidence_identity["filesystem"] not in ALLOWED_FILESYSTEMS:
@@ -271,8 +291,19 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
                 )
         admission = state_root / "deployment-admission" / "admission.json"
         _validate_admission(admission)  # read and preserve; never reset an existing file
-        entries = _validate_tree(root=state_root, uid=uid, gid=gid, directory_mode=directory_mode, file_mode=file_mode)
-        if filesystem_identity(state_root, name="state root") != root_identity:
+        entries = _validate_tree(
+            root=state_root,
+            uid=uid,
+            gid=gid,
+            directory_mode=directory_mode,
+            file_mode=file_mode,
+            allow_unobservable_mount=test_seam,
+        )
+        if filesystem_identity(
+            state_root,
+            name="state root",
+            allow_unobservable_mount=test_seam,
+        ) != root_identity:
             raise AdapterError("state root identity changed during provisioning")
         _fsync_directory(state_root / "discord-notifications")
         _fsync_directory(state_root / "deployment-admission")
