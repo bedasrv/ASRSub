@@ -61,6 +61,8 @@
     {"path":"src/process.rs","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/main.rs","src/asr.rs","src/ladder.rs","src/pipeline.rs","src/episode.rs","src/sim.rs"],"max_direct_production_importers":6,"waiver":"none"},
     {"path":"src/pipeline_commit.rs","owner_task":"core-task-2","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":["src/episode.rs","src/pipeline.rs"],"max_direct_production_importers":2,"waiver":"none"},
     {"path":"tools/asrsub-env","owner_task":"core-pre-task","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/asrsub_signer_supervisor.c","owner_task":"option-a-signer-supervisor","max_lines":500,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tools/build_signer_supervisors.sh","owner_task":"option-a-signer-supervisor","max_lines":200,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/signer_argv_policy.json","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":128,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/check_file_budgets.py","owner_task":"core-pre-task","max_lines":1000,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/fixtures/platform/file-budgets.json","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
@@ -135,6 +137,7 @@
     {"path":"tests/test_production_adapter_corrections.py","owner_task":"exact-commit-corrective-revision","max_lines":600,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/test_rollout_receipt_contract.py","owner_task":"exact-commit-corrective-revision","max_lines":250,"max_delta_from_baseline":160,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tests/test_final_bundle_contract.py","owner_task":"exact-commit-corrective-revision","max_lines":500,"max_delta_from_baseline":448,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
+    {"path":"tests/test_signer_supervisors.py","owner_task":"option-a-signer-supervisor","max_lines":700,"max_delta_from_baseline":null,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/create_approval.py","owner_task":"exact-commit-corrective-revision","max_lines":500,"max_delta_from_baseline":512,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/deploy_docker.py","owner_task":"exact-commit-corrective-revision","max_lines":600,"max_delta_from_baseline":64,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
     {"path":"tools/install_runtime_bundle.py","owner_task":"exact-commit-corrective-revision","max_lines":1100,"max_delta_from_baseline":512,"allowed_direct_production_importers":[],"max_direct_production_importers":0,"waiver":"none"},
@@ -198,6 +201,9 @@
     {"task":"exact-commit-corrective-revision","path":"tools/production_adapter_common.py","role":"modify"},
     {"task":"exact-commit-corrective-revision","path":"tools/production_entrypoint.py","role":"modify"},
     {"task":"exact-commit-corrective-revision","path":"tools/record_rollout.py","role":"modify"},
-    {"task":"exact-commit-corrective-revision","path":"tools/signer_argv_policy.json","role":"modify"}
+    {"task":"exact-commit-corrective-revision","path":"tools/signer_argv_policy.json","role":"modify"},
+    {"task":"option-a-signer-supervisor","path":"tools/asrsub_signer_supervisor.c","role":"create"},
+    {"task":"option-a-signer-supervisor","path":"tools/build_signer_supervisors.sh","role":"create"},
+    {"task":"option-a-signer-supervisor","path":"tests/test_signer_supervisors.py","role":"create"}
   ]
 }

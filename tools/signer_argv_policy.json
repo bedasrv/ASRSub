@@ -3,7 +3,15 @@
   "version": 2,
   "working_directory": "repository-root",
   "cwd": ".",
+  "supervisor": {
+    "source": "tools/asrsub_signer_supervisor.c",
+    "build": "tools/build_signer_supervisors.sh",
+    "install_directory": "/usr/local/sbin"
+  },
   "bundle": {
+    "supervisor": "/usr/local/sbin/asrsub-bundle-signer",
+    "role_token": "asrsub-bundle-signing-key",
+    "private_key_source": "/etc/asrsub/signing/bundle-signing-key.pem",
     "launcher": "tools/asrsub-env",
     "target_fd": 3,
     "command": [
@@ -30,6 +38,9 @@
     ]
   },
   "approval": {
+    "supervisor": "/usr/local/sbin/asrsub-approval-signer",
+    "role_token": "asrsub-approval-key",
+    "private_key_source": "/etc/asrsub/signing/approval-key.pem",
     "launcher": "tools/asrsub-env",
     "target_fd": 4,
     "command": [
