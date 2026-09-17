@@ -24,21 +24,26 @@
 //! how many episodes are queued. Every remote call has a deadline so one hung
 //! free-tier endpoint cannot stall the sweep.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
+
+#[path = "pipeline_reports.rs"]
+mod pipeline_reports;
+#[path = "pipeline_targets.rs"]
+mod pipeline_targets;
+pub(crate) use pipeline_reports::{reduce_target_outcomes, PassOutcome};
+use pipeline_targets::movie_original_lang;
+#[allow(unused_imports)]
+pub(crate) use pipeline_targets::TargetKey;
+pub(crate) use pipeline_targets::{verified_targets, VerifiedTarget};
 
 use crate::bazarr::Bazarr;
 use crate::config::Config;
-use crate::feature_modules::discord_text::SafeDisplayText;
-use crate::feature_modules::discord_types::BoundedReports;
 use crate::feature_modules::discord_types::{
-    AggregateDisposition, BoundedTargets, EpisodeKind, EpisodeRunReport, EpisodeRunResult,
-    FailureClass, ItemFailure, ReportConstructionError, TargetLanguage, TargetRunResult,
-    TargetStatus,
+    AggregateDisposition, BoundedReports, EpisodeRunResult, TargetStatus,
 };
 use crate::feature_modules::process::ToolPaths;
 use crate::glossary::Glossary;
@@ -70,119 +75,6 @@ pub struct PassStats {
     pub done: usize,
     pub failed: usize,
     pub skipped: usize,
-}
-
-pub(crate) struct PassOutcome {
-    stats: PassStats,
-    reports: BoundedReports,
-    omitted_reports: u64,
-}
-
-impl PassOutcome {
-    pub(crate) fn new(stats: PassStats, reports: BoundedReports, omitted_reports: u64) -> Self {
-        Self {
-            stats,
-            reports,
-            omitted_reports,
-        }
-    }
-    pub(crate) fn stats(&self) -> &PassStats {
-        &self.stats
-    }
-    pub(crate) fn reports(&self) -> &BoundedReports {
-        &self.reports
-    }
-    pub(crate) fn omitted_reports(&self) -> u64 {
-        self.omitted_reports
-    }
-    pub(crate) fn into_parts(self) -> (PassStats, BoundedReports, u64) {
-        (self.stats, self.reports, self.omitted_reports)
-    }
-}
-
-pub(crate) fn reduce_target_outcomes(
-    kind: EpisodeKind,
-    episode_id: i64,
-    title: SafeDisplayText,
-    season: Option<u32>,
-    episode: Option<u32>,
-    targets: Vec<TargetRunResult>,
-    item_failure: Option<ItemFailure>,
-) -> Result<EpisodeRunReport, ReportConstructionError> {
-    let targets = BoundedTargets::try_from(targets)?;
-    let completed = targets
-        .as_slice()
-        .iter()
-        .filter(|target| matches!(target.status(), TargetStatus::Completed { .. }))
-        .count();
-    let warning = targets.as_slice().iter().any(|target| {
-        matches!(
-            target.status(),
-            TargetStatus::Completed { warning: Some(_) }
-        )
-    });
-    let aggregate = if completed == targets.as_slice().len() && item_failure.is_none() {
-        if warning {
-            AggregateDisposition::CompleteWithWarning
-        } else {
-            AggregateDisposition::Complete
-        }
-    } else if completed > 0 {
-        AggregateDisposition::Partial
-    } else {
-        AggregateDisposition::Failed
-    };
-    EpisodeRunReport::try_new(
-        kind,
-        episode_id,
-        title,
-        season,
-        episode,
-        targets,
-        item_failure,
-        aggregate,
-    )
-}
-
-fn bound_pass_reports(
-    reports: Vec<EpisodeRunReport>,
-) -> Result<(BoundedReports, u64), ReportConstructionError> {
-    BoundedReports::from_reports(reports)
-}
-
-fn failure_report_for_candidate(candidate: &Candidate) -> Option<EpisodeRunReport> {
-    let kind = if candidate.is_movie {
-        EpisodeKind::Movie
-    } else {
-        EpisodeKind::Series
-    };
-    let title = SafeDisplayText::sanitize(&candidate.series_title)
-        .or_else(|_| SafeDisplayText::sanitize("?"))
-        .ok()?;
-    let targets = candidate
-        .missing
-        .iter()
-        .map(|language| {
-            TargetRunResult::try_new(
-                TargetLanguage::parse(language).ok()?,
-                TargetStatus::Failed {
-                    class: FailureClass::Unknown,
-                },
-                None,
-            )
-            .ok()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    reduce_target_outcomes(
-        kind,
-        candidate.episode_id,
-        title,
-        None,
-        None,
-        targets,
-        Some(ItemFailure::Unknown),
-    )
-    .ok()
 }
 
 pub struct Pipeline {
@@ -290,7 +182,7 @@ impl Pipeline {
         stats.processed = caps.len();
         if caps.is_empty() {
             let (reports, omitted) =
-                bound_pass_reports(Vec::new()).expect("empty report collector");
+                pipeline_reports::bound_pass_reports(Vec::new()).expect("empty report collector");
             return (stats, reports, omitted);
         }
         let sem = Arc::new(Semaphore::new(self.cfg.episode_concurrency.max(1)));
@@ -349,13 +241,14 @@ impl Pipeline {
                     stats.failed += 1;
                     let kind = if cand.is_movie { "movie" } else { "series" };
                     self.append_state(eid, None, "error", "", kind).await;
-                    if let Some(report) = failure_report_for_candidate(&cand) {
+                    if let Some(report) = pipeline_reports::failure_report_for_candidate(&cand) {
                         reports.push(report);
                     }
                 }
             }
         }
-        let (reports, omitted) = bound_pass_reports(reports).expect("bounded report collector");
+        let (reports, omitted) =
+            pipeline_reports::bound_pass_reports(reports).expect("bounded report collector");
         (stats, reports, omitted)
     }
 
@@ -580,112 +473,6 @@ impl Pipeline {
     }
 }
 
-/// Radarr's `originalLanguage` for a movie (Bazarr passes the Radarr payload
-/// through when it is present). Accepts the usual `{id, name}` object or a
-/// bare string; absent/blank degrades to `None` — never a pass failure. Same
-/// parser the Sonarr series listing uses (`crate::lang::original_language`).
-fn movie_original_lang(m: &serde_json::Value) -> Option<String> {
-    crate::lang::original_language(m.get("originalLanguage")?)
-}
-
-/// A target admitted by a matching, digest-verified registry/state pair.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedTarget {
-    pub(crate) target_path: PathBuf,
-    pub(crate) artifact_sha256: [u8; 32],
-}
-
-pub(crate) type TargetKey = (String, i64, String);
-
-fn parse_digest(value: Option<&serde_json::Value>) -> Option<[u8; 32]> {
-    let text = value?.as_str()?;
-    if text.len() != 64 {
-        return None;
-    }
-    let mut digest = [0u8; 32];
-    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return None;
-    }
-    for (index, pair) in pairs.iter().enumerate() {
-        digest[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(digest)
-}
-
-fn digest_file(path: &Path) -> Option<[u8; 32]> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Some(hasher.finalize().into())
-}
-
-fn registry_kind(row: &state::RegistryRow) -> String {
-    row.extra
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .unwrap_or("series")
-        .to_string()
-}
-
-fn state_kind(row: &state::StateEntry) -> String {
-    row.kind.as_deref().unwrap_or("series").to_string()
-}
-
-/// Return only targets whose registry and done-state rows form one exact
-/// identity and whose recorded artifact digest matches the bytes on disk.
-pub(crate) fn verified_targets(
-    registry_rows: &[state::RegistryRow],
-    state_rows: &[state::StateEntry],
-) -> std::collections::HashMap<TargetKey, VerifiedTarget> {
-    let done: Vec<(TargetKey, [u8; 32])> = state_rows
-        .iter()
-        .filter(|row| row.status.as_deref() == Some("done"))
-        .filter_map(|row| {
-            Some((
-                (
-                    state_kind(row),
-                    row.episode_id?,
-                    normalize_lang(row.language.as_deref().unwrap_or("")),
-                ),
-                parse_digest(row.extra.get("artifact_sha256")),
-            ))
-        })
-        .filter_map(|(key, digest)| Some((key, digest?)))
-        .collect();
-
-    registry_rows
-        .iter()
-        .filter_map(|row| {
-            let target_path = PathBuf::from(row.target_path.as_deref()?);
-            if !target_path.is_file() {
-                return None;
-            }
-            let key = (
-                registry_kind(row),
-                row.episode_id?,
-                normalize_lang(row.lang.as_deref().unwrap_or("")),
-            );
-            let artifact_sha256 = parse_digest(row.extra.get("artifact_sha256"))?;
-            if digest_file(&target_path) != Some(artifact_sha256) {
-                return None;
-            }
-            if !done.iter().any(|(state_key, state_digest)| {
-                state_key == &key && state_digest == &artifact_sha256
-            }) {
-                return None;
-            }
-            Some((
-                key,
-                VerifiedTarget {
-                    target_path,
-                    artifact_sha256,
-                },
-            ))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,7 +674,7 @@ mod tests {
         let reports = (0..=crate::feature_modules::discord_types::MAX_PASS_REPORTS as i64)
             .map(report)
             .collect::<Vec<_>>();
-        let (bounded, omitted) = bound_pass_reports(reports).unwrap();
+        let (bounded, omitted) = pipeline_reports::bound_pass_reports(reports).unwrap();
         let outcome = PassOutcome::new(PassStats::default(), bounded, omitted);
 
         assert_eq!(outcome.reports().len(), 128);
