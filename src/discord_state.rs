@@ -1,8 +1,6 @@
 #![allow(dead_code)]
 //! Notification state store capability boundary.
 
-use std::path::PathBuf;
-
 use super::discord_state_lane::StateLaneHandle;
 use super::discord_state_schema::NotificationStateError;
 
@@ -13,29 +11,6 @@ pub(crate) trait NotificationStateStore: Send + Sync {
 pub(crate) trait NotificationStateStoreFactory: Send + Sync {
     fn open_for_daemon(&self) -> Result<Box<dyn NotificationStateStore>, NotificationStateError>;
     fn backend_token(&self) -> &'static str;
-}
-
-#[derive(Clone)]
-pub(crate) struct LocalStateStoreFactory {
-    state_file: PathBuf,
-}
-
-impl LocalStateStoreFactory {
-    pub(crate) fn new(state_file: PathBuf) -> Self {
-        Self { state_file }
-    }
-}
-
-impl NotificationStateStoreFactory for LocalStateStoreFactory {
-    fn open_for_daemon(&self) -> Result<Box<dyn NotificationStateStore>, NotificationStateError> {
-        Ok(Box::new(super::discord_state_local::LocalStateStore::open(
-            &self.state_file,
-        )?))
-    }
-
-    fn backend_token(&self) -> &'static str {
-        "local-statefs"
-    }
 }
 
 #[cfg(test)]

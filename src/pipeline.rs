@@ -359,21 +359,18 @@ impl Pipeline {
         (stats, reports, omitted)
     }
 
-    pub(crate) async fn run_pass_outcome(&self, _tools: &ToolPaths) -> PassOutcome {
+    pub(crate) async fn run_pass_outcome(&self) -> PassOutcome {
         let (stats, reports, omitted_reports) = self.run_pass_legacy().await;
         PassOutcome::new(stats, reports, omitted_reports)
     }
 
     pub async fn run_pass(&self) -> PassStats {
-        self.run_pass_outcome(&ToolPaths::production())
-            .await
-            .into_parts()
-            .0
+        self.run_pass_outcome().await.into_parts().0
     }
 
     #[cfg(test)]
-    pub(crate) async fn run_pass_with_tools(&self, tools: &ToolPaths) -> PassStats {
-        self.run_pass_outcome(tools).await.into_parts().0
+    pub(crate) async fn run_pass_with_tools(&self, _tools: &ToolPaths) -> PassStats {
+        self.run_pass_outcome().await.into_parts().0
     }
 
     /// Resolve operator retries into same-pass candidates (see `run_pass`).

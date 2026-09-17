@@ -833,7 +833,7 @@ fi
             .and_then(|row| row.source.as_deref()),
         Some("contradiction")
     );
-    let outcome = pipe.run_pass_outcome(&pipe.tools).await;
+    let outcome = pipe.run_pass_outcome().await;
     let (stats, reports, omitted) = outcome.into_parts();
     assert_eq!(
         (stats.scanned, stats.processed, stats.done, stats.failed),
@@ -866,7 +866,7 @@ fi
     }));
 
     // A later pass must not promote the installed-but-unadmitted id sidecar.
-    let retry = pipe.run_pass_outcome(&pipe.tools).await;
+    let retry = pipe.run_pass_outcome().await;
     let (retry_stats, retry_reports, retry_omitted) = retry.into_parts();
     assert_eq!(
         (

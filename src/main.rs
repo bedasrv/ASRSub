@@ -630,7 +630,7 @@ async fn daemon_loop(
             }
         }
         *app_state.current.lock().await = Some("pass".to_string());
-        let outcome = pipe.run_pass_outcome(&pipe.tools).await;
+        let outcome = pipe.run_pass_outcome().await;
         let (stats, reports, omitted_reports) = outcome.into_parts();
         *app_state.current.lock().await = None;
         {
@@ -709,16 +709,6 @@ async fn daemon_with_store_factory<
         None => crate::feature_modules::discord_coordinator::start_with_lane(Some(lane)),
     };
     daemon_loop(providers_file, Some(notifier)).await
-}
-
-fn build_daemon_dependencies_with_factory<
-    F: crate::feature_modules::discord_state::NotificationStateStoreFactory + 'static,
->(
-    factory: F,
-) -> Result<Box<dyn crate::feature_modules::discord_state::NotificationStateStore>> {
-    factory
-        .open_for_daemon()
-        .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))
 }
 
 async fn sleep_or_wake(st: &Arc<api::AppState>, secs: u64) {
