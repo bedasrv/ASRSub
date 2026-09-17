@@ -400,6 +400,16 @@ class TestProductionStateFs(AdapterTestCase):
         self.assertGreater(identity["mount_id"], 0)
         self.assertEqual(identity["filesystem"], "fixture")
 
+    def test_mount_identity_matches_root_mountpoint_descendants(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        try:
+            common = __import__("production_adapter_common")
+        finally:
+            sys.path.pop(0)
+        mountinfo = "29 1 0:1 / / rw,relatime - ext4 /dev/root rw\n"
+        with mock.patch.object(common.Path, "read_text", return_value=mountinfo):
+            self.assertEqual(common._mount_identity(Path("/var/lib/asrsub/state")), (29, "ext4"))
+
     def test_statefs_rejects_traversal_and_symlink_and_emits_real_identity(self):
         state = self.root / "state"
         evidence = self.root / "evidence"

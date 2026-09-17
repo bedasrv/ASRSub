@@ -300,7 +300,7 @@ def _mount_identity(path: Path) -> tuple[int | None, str | None]:
             continue
         mountpoint = _decode_mount_field(fields[4])
         prefix = mountpoint.rstrip("/") or "/"
-        if target != prefix and not target.startswith(prefix + "/"):
+        if target != prefix and not target.startswith(prefix.rstrip("/") + "/"):
             continue
         if len(prefix) <= best[2]:
             continue
