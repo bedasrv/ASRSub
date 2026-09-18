@@ -34,6 +34,7 @@ BACKUP_SCHEMA = "asrsub-simple-backup-v2"
 DEFAULT_TIMEOUT = 900.0
 MAX_TIMEOUT = 3600.0
 SSH_TRANSPORT_GRACE = 30.0
+SSH_REAPER_TIMEOUT = SSH_TRANSPORT_GRACE
 PORT_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 DEFAULT_PROJECT_DIRECTORY = "/opt/mediastack/asrsub"
 DEFAULT_COMPOSE_FILE = "compose.yaml"
@@ -355,14 +356,19 @@ class SSHResult:
 
 
 def _reap_timed_out_ssh(process: subprocess.Popen[Any]) -> None:
-    """Drain and reap a timed-out SSH child without interrupting the remote job."""
+    """Drain a timed-out SSH child for a bounded grace period without killing it."""
     try:
-        # The remote script has a finite deadline.  Keeping both pipes drained
-        # lets SSH finish cleanly without making the caller wait for recovery.
-        process.communicate()
+        # The remote script has a finite deadline.  Keep both pipes drained for
+        # only the explicit transport grace period; never interrupt a remote
+        # apply or rollback after the target may have started mutating files.
+        process.communicate(timeout=SSH_REAPER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # The child may still be completing a remote mutation.  Returning from
+        # the daemon reaper is safer than killing it or blocking indefinitely.
+        return
     except Exception:
         try:
-            process.wait()
+            process.wait(timeout=SSH_REAPER_TIMEOUT)
         except Exception:
             pass
 
@@ -646,7 +652,7 @@ BACKUP_SCHEMA = "asrsub-simple-backup-v2"
 PENDING_SCHEMA = "asrsub-simple-pending-v1"
 DEFAULT_TIMEOUT = 900.0
 MAX_TIMEOUT = 3600.0
-READINESS_TIMEOUT = 180.0
+READINESS_TIMEOUT = 60.0
 FORBIDDEN = frozenset({"down", "prune", "rm", "restart", "systemctl", "daemon-reload"})
 EXPECTED_LISTENER_PROCESS = "asrsub"
 MANAGED_ENV_KEYS = frozenset({"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"})
@@ -1288,17 +1294,19 @@ def backup_root(payload):
     if not project_info.get("present") or project_info.get("symlink") or not project_info.get("directory"):
         raise RemoteFailure("rollback project directory is unsafe")
     root = project / ".asrsub-rollback"
-    if not os.path.lexists(root) or root.is_symlink() or not root.is_dir():
+    if not os.path.lexists(root):
         raise RemoteFailure("rollback directory is unavailable or unsafe")
+    require_path(root, directory=True, role="rollback")
     return root
 
 
 def read_backup_record(payload, backup):
     backup = Path(backup)
-    if not backup.is_dir() or backup.is_symlink():
-        raise RemoteFailure("rollback backup is unavailable or unsafe")
+    require_path(backup, directory=True, role="rollback")
+    metadata_path = backup / "metadata.json"
+    require_path(metadata_path, directory=False, role="project_file")
     try:
-        record = json.loads((backup / "metadata.json").read_text(encoding="utf-8"))
+        record = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RemoteFailure("rollback metadata is invalid") from exc
     compose_name = payload.get("compose_file", "compose.yaml")
@@ -1322,8 +1330,8 @@ def read_backup_record(payload, backup):
         raise RemoteFailure("rollback metadata is not a complete immutable backup contract")
     saved_compose = backup / record["compose_file"]
     saved_env = backup / record["env_file"]
-    require_path(saved_compose, directory=False)
-    require_path(saved_env, directory=False)
+    require_path(saved_compose, directory=False, role="project_file")
+    require_path(saved_env, directory=False, role="project_file")
     try:
         compose_bytes = saved_compose.read_bytes()
         env_bytes = saved_env.read_bytes()
@@ -1462,10 +1470,13 @@ def create_backup(payload, preflight):
     project, compose, env = project_paths(payload)
     root = project / ".asrsub-rollback"
     if os.path.lexists(root):
-        if root.is_symlink() or not root.is_dir():
-            raise RemoteFailure("rollback root is not a real directory")
+        require_path(root, directory=True, role="rollback")
     else:
-        root.mkdir(mode=0o700)
+        try:
+            root.mkdir(mode=0o700)
+        except OSError as exc:
+            raise RemoteFailure("rollback root could not be created") from exc
+        require_path(root, directory=True, role="rollback")
     identity = preflight.get("_identity")
     if not isinstance(identity, dict):
         raise RemoteFailure("previous container identity is unavailable for rollback")
@@ -1493,6 +1504,7 @@ def create_backup(payload, preflight):
         suffix += 1
         backup = root / (name + "-" + str(suffix))
     backup.mkdir(mode=0o700)
+    require_path(backup, directory=True, role="rollback")
     atomic_bytes(backup / payload["compose_file"], compose_bytes, 0o600)
     atomic_bytes(backup / payload["env_file"], env_bytes, 0o600)
     record = {

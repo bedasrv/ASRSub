@@ -725,7 +725,8 @@ class TestRemoteRollbackSelection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
             root = project / ".asrsub-rollback"
-            root.mkdir(parents=True)
+            root.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700)
             contract = [
                 {
                     "source": "/home/user/.config/asr-pipeline",
@@ -735,7 +736,7 @@ class TestRemoteRollbackSelection(unittest.TestCase):
             ]
             for name, valid in (("20260101T000000Z", True), ("20260102T000000Z", False), ("20260103T000000Z", True)):
                 backup = root / name
-                backup.mkdir()
+                backup.mkdir(mode=0o700)
                 compose = b"previous compose\n"
                 env = b"WEBHOOK_PORT=8085\n"
                 (backup / "compose.yaml").write_bytes(compose)
@@ -754,6 +755,8 @@ class TestRemoteRollbackSelection(unittest.TestCase):
                     "env_sha256": hashlib.sha256(env).hexdigest(),
                 }
                 (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
+                for filename in ("compose.yaml", ".env", "metadata.json"):
+                    (backup / filename).chmod(0o600)
             payload = {"project_directory": str(project)}
             self.assertEqual(remote["latest_backup"](payload).name, "20260103T000000Z")
 
@@ -943,6 +946,60 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
             remote["clear_pending"](payload)
             self.assertFalse(marker.exists())
 
+    def test_readiness_budget_matches_runbook_and_embedded_remote_program(self):
+        remote = load_remote_namespace()
+        text = (ROOT / "docs" / "DEPLOY.md").read_text(encoding="utf-8")
+        self.assertIn("waits a bounded 60 seconds for both `/health` and `/ready`", text)
+        self.assertEqual(remote["READINESS_TIMEOUT"], 60.0)
+
+    def test_rollback_root_and_backup_files_use_role_aware_nofollow_validation(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            backup = self._complete_backup(remote, project, "20260101T000000Z")
+            root = project / ".asrsub-rollback"
+
+            root.chmod(0o755)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["backup_root"](payload)
+            root.chmod(0o700)
+
+            backup.chmod(0o755)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["read_backup_record"](payload, backup)
+            backup.chmod(0o700)
+
+            original_metadata = remote["metadata"]
+
+            def foreign_owner(path):
+                info = original_metadata(path)
+                if Path(path).name in {
+                    root.name,
+                    backup.name,
+                    "compose.yaml",
+                    ".env",
+                    "metadata.json",
+                }:
+                    info["uid"] = os.geteuid() + 1
+                return info
+
+            remote["metadata"] = foreign_owner
+            try:
+                with self.assertRaises(remote["RemoteFailure"]):
+                    remote["backup_root"](payload)
+                with self.assertRaises(remote["RemoteFailure"]):
+                    remote["read_backup_record"](payload, backup)
+            finally:
+                remote["metadata"] = original_metadata
+
     def test_timeout_is_finite_positive_bounded_and_remote_budget_is_forwarded(self):
         deploy = load_tool()
         for value in (0, -1, float("nan"), float("inf"), deploy.MAX_TIMEOUT + 1):
@@ -986,7 +1043,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
 
     def test_stream_ssh_timeout_keeps_recovery_required_and_reaps_pipes_without_killing(self):
         deploy = load_tool()
-        reaped = threading.Event()
+        reaper_called = threading.Event()
 
         class FakeProcess:
             def __init__(self):
@@ -994,16 +1051,17 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
                 self.stdout = mock.Mock()
                 self.stderr = mock.Mock()
                 self.returncode = None
-                self.calls = 0
+                self.calls = []
                 self.killed = False
 
             def communicate(self, _input=None, timeout=None):
-                self.calls += 1
+                self.calls.append(timeout)
                 if timeout is not None:
+                    if len(self.calls) == 1:
+                        raise deploy.subprocess.TimeoutExpired(["ssh"], timeout)
+                    reaper_called.set()
                     raise deploy.subprocess.TimeoutExpired(["ssh"], timeout)
-                self.returncode = 0
-                reaped.set()
-                return "", ""
+                raise AssertionError("timed-out SSH reaper must use a finite timeout")
 
             def kill(self):
                 self.killed = True
@@ -1012,8 +1070,11 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         with mock.patch.object(deploy.subprocess, "Popen", return_value=process):
             with self.assertRaises(deploy.RecoveryRequired):
                 deploy.stream_ssh(["ssh"], "script", 0.01)
-        self.assertTrue(reaped.wait(1.0))
+        self.assertTrue(reaper_called.wait(1.0))
         self.assertFalse(process.killed)
+        self.assertEqual(process.calls[0], 0.01)
+        self.assertEqual(process.calls[1], deploy.SSH_REAPER_TIMEOUT)
+        self.assertLessEqual(process.calls[1], deploy.SSH_TRANSPORT_GRACE)
         process.stdin.close.assert_called_once_with()
 
     def test_secret_env_denylist_covers_common_credential_names_but_allows_provider_path(self):
@@ -1150,9 +1211,10 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
     @staticmethod
     def _complete_backup(remote, project, name):
         root = project / ".asrsub-rollback"
-        root.mkdir(exist_ok=True)
+        root.mkdir(mode=0o700, exist_ok=True)
+        root.chmod(0o700)
         backup = root / name
-        backup.mkdir()
+        backup.mkdir(mode=0o700)
         compose = b"previous compose\n"
         env = b"WEBHOOK_PORT=8085\n"
         (backup / "compose.yaml").write_bytes(compose)
@@ -1178,6 +1240,8 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
             "webhook_port": "8085",
         }
         (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
+        for filename in ("compose.yaml", ".env", "metadata.json"):
+            (backup / filename).chmod(0o600)
         return backup
 
 
