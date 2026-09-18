@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import types
 import unittest
 from pathlib import Path
@@ -843,6 +844,160 @@ class TestProductionRollout(AdapterTestCase):
         self.assertNotIn("Path(__file__)", entrypoint)
         for name in ("production_adapter_common.py", "deploy_docker.py"):
             self.assertIn(name, entrypoint)
+
+    def test_fresh_runtime_preflight_keeps_closed_inventory_without_pycache(self):
+        runtime = self.root / "runtime"
+        runtime.mkdir()
+        for name in ("production_entrypoint.py", "production_adapter_common.py"):
+            (runtime / name).write_bytes((ROOT / "tools" / name).read_bytes())
+
+        probe = textwrap.dedent(
+            """
+            import hashlib
+            import json
+            import os
+            import sys
+            import runpy
+            from pathlib import Path
+
+            runtime = Path(sys.argv[1]).resolve()
+            sys.path.insert(0, str(runtime))
+            assert not sys.dont_write_bytecode
+
+            class ModuleNamespace:
+                def __init__(self, values):
+                    object.__setattr__(self, "values", values)
+
+                def __getattr__(self, name):
+                    return self.values[name]
+
+                def __setattr__(self, name, value):
+                    self.values[name] = value
+
+            production_entrypoint = ModuleNamespace(
+                runpy.run_path(str(runtime / "production_entrypoint.py"), run_name="production_entrypoint")["main"].__globals__
+            )
+
+            runtime_members = production_entrypoint.EXPECTED_INSTALLED_RUNTIME_MEMBERS
+            for name in runtime_members:
+                path = runtime / name
+                if not path.exists():
+                    path.write_bytes(f"runtime-member:{name}\\n".encode())
+                path.chmod(production_entrypoint.RUNTIME_MEMBER_MODES[name])
+
+            systemd_root = runtime.parent / "systemd"
+            systemd_root.mkdir()
+            (systemd_root / "docker.service.d").mkdir()
+            for member in production_entrypoint.EXPECTED_SYSTEMD_MEMBERS:
+                relative = member.removeprefix("systemd/")
+                path = systemd_root / relative
+                path.write_bytes(f"systemd-member:{relative}\\n".encode())
+                path.chmod(production_entrypoint.SYSTEMD_MEMBER_MODES[member])
+            systemd_root.chmod(0o755)
+            (systemd_root / "docker.service.d").chmod(0o755)
+
+            deploy_state = runtime.parent / "deploy-state"
+            evidence = deploy_state / "evidence"
+            deploy_state.mkdir()
+            evidence.mkdir()
+            manifest_path = deploy_state / "bundle-manifest.json"
+            receipt_path = evidence / "runtime-bundle-install.json"
+            compose = runtime / "compose.yaml"
+            state_root = runtime.parent / "state"
+            state_root.mkdir()
+
+            production_entrypoint.RUNTIME_ROOT = runtime
+            production_entrypoint.SYSTEMD_ROOT = systemd_root
+            production_entrypoint.ENTRYPOINT = runtime / "production_entrypoint.py"
+            production_entrypoint.ADAPTER_COMMON = runtime / "production_adapter_common.py"
+            production_entrypoint.DOCKER_ADAPTER = runtime / "deploy_docker.py"
+            production_entrypoint.COMPOSE_FILE = compose
+            production_entrypoint.STATE_ROOT = state_root
+            production_entrypoint.DEPLOY_STATE_ROOT = deploy_state
+            production_entrypoint.EVIDENCE_ROOT = evidence
+            production_entrypoint.BUNDLE_MANIFEST = manifest_path
+            production_entrypoint.INSTALL_RECEIPT = receipt_path
+            production_entrypoint.PRODUCTION_UID = os.getuid()
+            production_entrypoint.PRODUCTION_GID = os.getgid()
+            production_entrypoint.SYSTEMD_UID = os.getuid()
+            production_entrypoint.SYSTEMD_GID = os.getgid()
+            production_entrypoint._REQUIRED_ARTIFACTS = (
+                ("runtime entrypoint", production_entrypoint.ENTRYPOINT, False),
+                ("runtime adapter common module", production_entrypoint.ADAPTER_COMMON, False),
+                ("runtime Docker adapter", production_entrypoint.DOCKER_ADAPTER, False),
+                ("runtime root", runtime, True),
+                ("rendered Compose", compose, False),
+                ("bundle manifest", manifest_path, False),
+                ("install receipt", receipt_path, False),
+            )
+            production_entrypoint._validate_host_metadata = lambda: None
+            production_entrypoint._verify_detached = lambda **_: None
+
+            manifest_members = []
+            for name in sorted(runtime_members):
+                path = runtime / name
+                manifest_members.append(
+                    {
+                        "path": name,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "mode": f"{production_entrypoint.RUNTIME_MEMBER_MODES[name]:04o}",
+                        "install_root": "runtime",
+                    }
+                )
+            for member in sorted(production_entrypoint.EXPECTED_SYSTEMD_MEMBERS):
+                relative = member.removeprefix("systemd/")
+                path = systemd_root / relative
+                manifest_members.append(
+                    {
+                        "path": member,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "mode": f"{production_entrypoint.SYSTEMD_MEMBER_MODES[member]:04o}",
+                        "install_root": "systemd",
+                    }
+                )
+            manifest = {
+                "schema": "runtime-bundle-manifest-v1",
+                "signing_mode": "production",
+                "release_sha": "1" * 40,
+                "members": manifest_members,
+            }
+            manifest_bytes = production_entrypoint.canonical_json(manifest)
+            manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+            manifest_path.write_bytes(manifest_bytes + b"\\n")
+            manifest_path.chmod(0o600)
+            production_entrypoint._approved_transaction = lambda _hash, compose_sha256: {
+                "image_digest": "ghcr.io/bedasrv/asrsub@sha256:" + "a" * 64,
+                "release_sha": manifest["release_sha"],
+                "compose_sha256": compose_sha256,
+            }
+            receipt = {
+                "schema": "runtime-bundle-install-receipt-v1",
+                "dry_run": False,
+                "evidence_eligible": True,
+                "record_authority": production_entrypoint.INSTALL_RECEIPT_AUTHORITY,
+                "target_root": str(runtime),
+                "systemd_root": str(systemd_root),
+                "release_sha": manifest["release_sha"],
+                "manifest_sha256": manifest_hash,
+                "members": manifest_members,
+                "target_identity": production_entrypoint.filesystem_identity(runtime, name="runtime"),
+            }
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            receipt_path.chmod(0o600)
+            raise SystemExit(production_entrypoint.main(["recover", "--preflight"]))
+            """
+        )
+        environment = os.environ.copy()
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        result = subprocess.run(
+            [PYTHON, "-I", "-c", probe, str(runtime)],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((runtime / "__pycache__").exists(), result.stderr)
 
     def test_production_preflight_requires_signed_manifest_and_install_receipt(self):
         entrypoint = (ROOT / "tools" / "production_entrypoint.py").read_text(encoding="utf-8")
