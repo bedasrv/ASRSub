@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -65,7 +68,7 @@ class TestSimpleDeployCommands(unittest.TestCase):
             "config",
             "-q",
         )
-        self.assertEqual(base[:2], ["docker", "compose"])
+        self.assertEqual(base[:4], ["/usr/bin/docker", "--context", "default", "compose"])
         self.assertIn("--project-directory", base)
         self.assertIn("--env-file", base)
         self.assertIn("-f", base)
@@ -262,6 +265,37 @@ class TestPortOwnership(unittest.TestCase):
         self.assertEqual(result["status"], "unrelated")
         self.assertEqual(result["process_name"], "python")
 
+    def test_parser_requires_the_active_container_pid_not_only_the_process_name(self):
+        output = (
+            'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* '
+            'users:(("asrsub",pid=1234,fd=7))\n'
+        )
+        for parser in (load_tool().parse_port_ownership, load_remote_namespace()["parse_port_ownership"]):
+            with self.subTest(parser=parser):
+                self.assertEqual(parser(output, "8085", expected_pid=1234)["status"], "owned")
+                self.assertEqual(parser(output, "8085", expected_pid=9999)["status"], "unrelated")
+
+
+class TestMediaMountSafety(unittest.TestCase):
+    def test_media_mount_accepts_an_nfs_parent_but_rejects_root_and_local_filesystems(self):
+        remote = load_remote_namespace()
+        accepted = remote["parse_media_mount"](
+            "/mnt/nas/share nfs4 nas.example:/exports/media\n",
+            "/mnt/nas/share/media",
+        )
+        self.assertEqual(accepted["target"], "/mnt/nas/share")
+        self.assertEqual(accepted["fstype"], "nfs4")
+        with self.assertRaises(remote["RemoteFailure"]):
+            remote["parse_media_mount"](
+                "/ ext4 /dev/root\n",
+                "/mnt/nas/share/media",
+            )
+        with self.assertRaises(remote["RemoteFailure"]):
+            remote["parse_media_mount"](
+                "/mnt/nas/share ext4 /dev/sdb1\n",
+                "/mnt/nas/share/media",
+            )
+
 
 class TestComposeTemplateContract(unittest.TestCase):
     def test_simple_template_contains_only_the_approved_runtime_shape(self):
@@ -430,6 +464,8 @@ class TestDeployPhases(unittest.TestCase):
             remote["checked"] = lambda argv, label, **kwargs: (
                 'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("asrsub",pid=1,fd=1))\n'
                 if argv[0] == "ss"
+                else "/mnt/nas/share nfs4 nas.example:/exports/media\n"
+                if argv[0] == "findmnt"
                 else "ok\n"
             )
             remote["active_container"] = lambda value: ("container-id", {})
@@ -475,6 +511,72 @@ class TestRemoteFilesystemSafety(unittest.TestCase):
             rollback_root.write_text("not a directory", encoding="utf-8")
             with self.assertRaises(remote["RemoteFailure"]):
                 remote["create_backup"](payload, preflight)
+
+    def test_managed_paths_reject_symlinked_parents_and_unsafe_modes_or_owners(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "real"
+            real.mkdir()
+            project = real / "project"
+            project.mkdir(mode=0o700)
+            link = root / "link"
+            link.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["project_paths"](
+                    {
+                        "project_directory": str(link / "project"),
+                        "compose_file": "compose.yaml",
+                        "env_file": ".env",
+                    }
+                )
+
+            compose = project / "compose.yaml"
+            compose.write_text("services: {}\n", encoding="utf-8")
+            env = project / ".env"
+            env.write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
+            project.chmod(0o777)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["require_path"](project, directory=True, role="project")
+            project.chmod(0o700)
+            compose.chmod(0o666)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["require_path"](compose, directory=False, role="project_file")
+            compose.chmod(0o600)
+
+            rollback = project / ".asrsub-rollback"
+            rollback.mkdir(mode=0o755)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["require_path"](rollback, directory=True, role="rollback")
+            rollback.chmod(0o700)
+
+            original_metadata = remote["metadata"]
+            remote["metadata"] = lambda path: {
+                "present": True,
+                "symlink": False,
+                "regular": True,
+                "directory": False,
+                "mode": 0o600,
+                "uid": os.geteuid() + 1,
+                "gid": os.getegid(),
+            }
+            try:
+                with self.assertRaises(remote["RemoteFailure"]):
+                    remote["require_path"](compose, directory=False, role="project_file")
+            finally:
+                remote["metadata"] = original_metadata
+
+    def test_atomic_bytes_rejects_a_symlinked_parent_component(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "real"
+            real.mkdir()
+            link = root / "link"
+            link.symlink_to(real, target_is_directory=True)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["atomic_bytes"](link / "target", b"replacement", 0o600)
+            self.assertFalse((real / "target").exists())
 
 
 class TestRollbackContracts(unittest.TestCase):
@@ -634,6 +736,10 @@ class TestRemoteRollbackSelection(unittest.TestCase):
             for name, valid in (("20260101T000000Z", True), ("20260102T000000Z", False), ("20260103T000000Z", True)):
                 backup = root / name
                 backup.mkdir()
+                compose = b"previous compose\n"
+                env = b"WEBHOOK_PORT=8085\n"
+                (backup / "compose.yaml").write_bytes(compose)
+                (backup / ".env").write_bytes(env)
                 record = {
                     "schema": "asrsub-simple-backup-v2",
                     "verified": valid,
@@ -642,6 +748,10 @@ class TestRemoteRollbackSelection(unittest.TestCase):
                     "previous_image": VALID_IMAGE,
                     "previous_repo_digest": VALID_IMAGE,
                     "previous_mount_contract": contract if valid else [],
+                    "compose_file": "compose.yaml",
+                    "env_file": ".env",
+                    "compose_sha256": hashlib.sha256(compose).hexdigest(),
+                    "env_sha256": hashlib.sha256(env).hexdigest(),
                 }
                 (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
             payload = {"project_directory": str(project)}
@@ -662,13 +772,30 @@ class TestRollbackSelection(unittest.TestCase):
                 (newest_verified, True, "ghcr.io/bedasrv/asrsub:mutable"),
             ):
                 path.mkdir()
+                compose = b"previous compose\n"
+                env = b"WEBHOOK_PORT=8085\n"
+                (path / "compose.yaml").write_bytes(compose)
+                (path / ".env").write_bytes(env)
                 (path / "metadata.json").write_text(
                     json.dumps(
                         {
-                            "schema": "asrsub-simple-backup-v1",
+                            "schema": "asrsub-simple-backup-v2",
                             "verified": verified,
                             "created_at": path.name,
                             "previous_image": image,
+                            "previous_repo_digest": VALID_IMAGE,
+                            "backup_kind": "legacy",
+                            "previous_mount_contract": [
+                                {
+                                    "source": "/home/user/.config/asr-pipeline",
+                                    "destination": "/home/user/.config/asr-pipeline",
+                                    "rw": True,
+                                }
+                            ],
+                            "compose_file": "compose.yaml",
+                            "env_file": ".env",
+                            "compose_sha256": hashlib.sha256(compose).hexdigest(),
+                            "env_sha256": hashlib.sha256(env).hexdigest(),
                         }
                     ),
                     encoding="utf-8",
@@ -677,6 +804,381 @@ class TestRollbackSelection(unittest.TestCase):
                 deploy.select_latest_verified_backup([old, newest_unverified, newest_verified]),
                 old,
             )
+
+
+class TestDeploymentHardeningContracts(unittest.TestCase):
+    def test_compose_identifiers_reject_option_injection_and_unsafe_names(self):
+        deploy = load_tool()
+        for value in ("--remove-orphans", "--build", "bad/name", "bad name", "", "."):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                deploy.validate_compose_identifier(value, "service")
+        with self.assertRaises(ValueError):
+            deploy.DeploymentConfig(
+                target="target.example",
+                expected_hostname="target-host",
+                service="--remove-orphans",
+            )
+        with self.assertRaises(ValueError):
+            deploy.DeploymentConfig(
+                target="target.example",
+                expected_hostname="target-host",
+                project_name="--build",
+            )
+
+    def test_remote_revalidates_service_and_project_before_building_argv(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "--remove-orphans",
+                "project_name": "asrsub",
+            }
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["compose_argv"](payload, "up", "-d", payload["service"])
+            payload["service"] = "orchestrator"
+            payload["project_name"] = "--build"
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["compose_argv"](payload, "up", "-d", payload["service"])
+
+    def test_remote_docker_argv_is_pinned_to_default_context(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            argv = remote["compose_argv"](payload, "config", "-q")
+        self.assertEqual(argv[:4], ["/usr/bin/docker", "--context", "default", "compose"])
+
+    def test_remote_subprocess_environment_excludes_interpolation_and_proxy_overrides(self):
+        remote = load_remote_namespace()
+        captured = {}
+        original_run = remote["subprocess"].run
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = list(argv)
+            captured.update(kwargs)
+            return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+        forbidden = {
+            "DOCKER_HOST": "tcp://attacker.invalid",
+            "DOCKER_CONTEXT": "attacker",
+            "COMPOSE_FILE": "/tmp/attacker.yaml",
+            "COMPOSE_PROJECT_NAME": "attacker",
+            "ASRSUB_IMAGE": "tagged",
+            "WEBHOOK_PORT": "1",
+            "NAS_MEDIA_PREFIX": "/tmp/media",
+            "PROVIDER_KEYS_FILE": "/tmp/keys",
+            "HTTP_PROXY": "http://attacker.invalid",
+            "HTTPS_PROXY": "http://attacker.invalid",
+        }
+        try:
+            remote["subprocess"].run = fake_run
+            with mock.patch.dict(os.environ, forbidden, clear=False):
+                remote["checked"](["/usr/bin/docker", "version"], "Docker version")
+        finally:
+            remote["subprocess"].run = original_run
+        self.assertEqual(captured["env"]["PATH"], "/usr/bin:/bin")
+        self.assertTrue(set(captured["env"]).issubset({"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES"}))
+        self.assertTrue(set(forbidden).isdisjoint(captured["env"]))
+
+    def test_mutating_lock_contends_and_is_not_deleted(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {"project_directory": str(project), "compose_file": "compose.yaml", "env_file": ".env"}
+            lock_path = project / ".asrsub-deploy.lock"
+            with remote["mutation_lock"](payload, timeout=0.2):
+                self.assertTrue(lock_path.is_file())
+                with self.assertRaises(remote["RemoteFailure"]):
+                    with remote["mutation_lock"](payload, timeout=0.05):
+                        pass
+            self.assertTrue(lock_path.is_file())
+
+    def test_pending_marker_blocks_later_deploy_and_selects_referenced_backup(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            backup = self._complete_backup(remote, project, "20260101T000000Z")
+            remote["write_pending"](payload, backup, "deploy", candidate_image=VALID_IMAGE)
+            self.assertEqual(remote["latest_backup"](payload), backup)
+            with self.assertRaises(remote["RecoveryRequired"]):
+                remote["ensure_no_pending"](payload)
+            self.assertTrue(remote["pending_marker_path"](payload).is_file())
+
+    def test_pending_marker_is_cleared_only_after_explicit_recovery_success(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            backup = self._complete_backup(remote, project, "20260101T000000Z")
+            remote["write_pending"](payload, backup, "rollback")
+            marker = remote["pending_marker_path"](payload)
+            self.assertTrue(marker.is_file())
+            remote["clear_pending"](payload)
+            self.assertFalse(marker.exists())
+
+    def test_timeout_is_finite_positive_bounded_and_remote_budget_is_forwarded(self):
+        deploy = load_tool()
+        for value in (0, -1, float("nan"), float("inf"), deploy.MAX_TIMEOUT + 1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                deploy._validate_timeout(value)
+        self.assertGreater(deploy.DEFAULT_TIMEOUT, 120.0)
+        calls = []
+
+        def fake_runner(command, script, timeout):
+            calls.append((command, script, timeout))
+            return deploy.SSHResult(0, '{"ok":true}\n', "")
+
+        config = deploy.DeploymentConfig(
+            target="target.example",
+            expected_hostname="target-host",
+            timeout=12.5,
+        )
+        deploy.run_remote(config, "status", runner=fake_runner)
+        self.assertEqual(calls[0][2], config.timeout + deploy.SSH_TRANSPORT_GRACE)
+        encoded = calls[0][1].split("PAYLOAD_B64 = ", 1)[1].splitlines()[0]
+        payload = json.loads(base64.b64decode(eval(encoded)).decode("utf-8"))
+        self.assertEqual(payload["timeout"], config.timeout)
+
+    def test_remote_checked_clamps_subprocess_timeout_to_deadline(self):
+        remote = load_remote_namespace()
+        captured = {}
+        original_run = remote["subprocess"].run
+
+        def fake_run(argv, **kwargs):
+            captured.update(kwargs)
+            return mock.Mock(returncode=0, stdout="ok", stderr="")
+
+        try:
+            remote["subprocess"].run = fake_run
+            deadline = time.monotonic() + 0.4
+            remote["checked"](["true"], "bounded", timeout=60, deadline=deadline)
+        finally:
+            remote["subprocess"].run = original_run
+        self.assertGreater(captured["timeout"], 0)
+        self.assertLessEqual(captured["timeout"], 0.4)
+
+    def test_stream_ssh_timeout_keeps_recovery_required_and_reaps_pipes_without_killing(self):
+        deploy = load_tool()
+        reaped = threading.Event()
+
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = mock.Mock()
+                self.stdout = mock.Mock()
+                self.stderr = mock.Mock()
+                self.returncode = None
+                self.calls = 0
+                self.killed = False
+
+            def communicate(self, _input=None, timeout=None):
+                self.calls += 1
+                if timeout is not None:
+                    raise deploy.subprocess.TimeoutExpired(["ssh"], timeout)
+                self.returncode = 0
+                reaped.set()
+                return "", ""
+
+            def kill(self):
+                self.killed = True
+
+        process = FakeProcess()
+        with mock.patch.object(deploy.subprocess, "Popen", return_value=process):
+            with self.assertRaises(deploy.RecoveryRequired):
+                deploy.stream_ssh(["ssh"], "script", 0.01)
+        self.assertTrue(reaped.wait(1.0))
+        self.assertFalse(process.killed)
+        process.stdin.close.assert_called_once_with()
+
+    def test_secret_env_denylist_covers_common_credential_names_but_allows_provider_path(self):
+        deploy = load_tool()
+        forbidden = (
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "ENCRYPTION_KEY",
+            "AUTHORIZATION",
+            "ACCESS_TOKEN",
+            "SESSION_COOKIE",
+            "TLS_CERTIFICATE",
+            "CLIENT_CREDENTIALS",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for key in forbidden:
+                source = Path(directory) / f"{key}.env"
+                source.write_text(f"{key}=placeholder-only\n", encoding="utf-8")
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    deploy.build_candidate_env(
+                        source,
+                        image=VALID_IMAGE,
+                        webhook_port="8085",
+                        nas_media_prefix="/mnt/nas/share/media",
+                    )
+            source = Path(directory) / "managed.env"
+            source.write_text("PROVIDER_KEYS_FILE=/home/user/.config/asr-pipeline/secrets/provider_keys.env\n", encoding="utf-8")
+            env_text = deploy.build_candidate_env(
+                source,
+                image=VALID_IMAGE,
+                webhook_port="8085",
+                nas_media_prefix="/mnt/nas/share/media",
+            )
+        self.assertIn("PROVIDER_KEYS_FILE=", env_text)
+
+    def test_backup_refuses_to_copy_an_active_env_with_secret_key(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "compose.yaml").write_text("legacy", encoding="utf-8")
+            (project / ".env").write_text("AWS_ACCESS_KEY_ID=placeholder-only\n", encoding="utf-8")
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "webhook_port": "8085",
+                "nas_media_prefix": "/mnt/nas/share/media",
+            }
+            preflight = {
+                "active_image": VALID_IMAGE,
+                "previous_immutable_repo_digest": VALID_IMAGE,
+                "image_id": "image-id",
+                "port": "8085",
+                "_identity": {
+                    "config_image": "ghcr.io/bedasrv/asrsub:legacy",
+                    "repo_digests": [VALID_IMAGE],
+                    "mounts": [
+                        {
+                            "Source": "/home/user/.config/asr-pipeline",
+                            "Destination": "/home/user/.config/asr-pipeline",
+                            "RW": True,
+                        }
+                    ],
+                },
+            }
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["create_backup"](payload, preflight)
+
+    def test_rollback_selection_skips_newest_incomplete_or_malformed_metadata(self):
+        remote = load_remote_namespace()
+        deploy = load_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            older = self._complete_backup(remote, project, "20260101T000000Z")
+            root = project / ".asrsub-rollback"
+            newest = root / "20260103T000000Z"
+            newest.mkdir()
+            (newest / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "asrsub-simple-backup-v2",
+                        "verified": True,
+                        "created_at": "20260103T000000Z",
+                        "backup_kind": "legacy",
+                        "previous_image": VALID_IMAGE,
+                        "previous_repo_digest": VALID_IMAGE,
+                        "compose_file": "compose.yaml",
+                        "env_file": ".env",
+                        "compose_sha256": "0" * 64,
+                        "env_sha256": "0" * 64,
+                        "previous_mount_contract": [
+                            {
+                                "source": "/home/user/.config/asr-pipeline",
+                                "destination": "/home/user/.config/asr-pipeline",
+                                "rw": "false",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(remote["latest_backup"](payload), older)
+            self.assertEqual(deploy.select_latest_verified_backup([older, newest]), older)
+
+    def test_rollback_metadata_requires_boolean_rw_and_matching_hashes(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+            }
+            backup = self._complete_backup(remote, project, "20260101T000000Z")
+            metadata_path = backup / "metadata.json"
+            record = json.loads(metadata_path.read_text(encoding="utf-8"))
+            record["previous_mount_contract"][0]["rw"] = "false"
+            metadata_path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["restore_backup"](payload, backup)
+
+    @staticmethod
+    def _complete_backup(remote, project, name):
+        root = project / ".asrsub-rollback"
+        root.mkdir(exist_ok=True)
+        backup = root / name
+        backup.mkdir()
+        compose = b"previous compose\n"
+        env = b"WEBHOOK_PORT=8085\n"
+        (backup / "compose.yaml").write_bytes(compose)
+        (backup / ".env").write_bytes(env)
+        record = {
+            "schema": "asrsub-simple-backup-v2",
+            "verified": True,
+            "created_at": name,
+            "backup_kind": "legacy",
+            "previous_image": VALID_IMAGE,
+            "previous_repo_digest": VALID_IMAGE,
+            "compose_file": "compose.yaml",
+            "env_file": ".env",
+            "compose_sha256": hashlib.sha256(compose).hexdigest(),
+            "env_sha256": hashlib.sha256(env).hexdigest(),
+            "previous_mount_contract": [
+                {
+                    "source": "/home/user/.config/asr-pipeline",
+                    "destination": "/home/user/.config/asr-pipeline",
+                    "rw": True,
+                }
+            ],
+            "webhook_port": "8085",
+        }
+        (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
+        return backup
 
 
 if __name__ == "__main__":
