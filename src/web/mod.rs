@@ -108,13 +108,19 @@ mod tests {
 
     fn test_app() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let prior_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
-        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
-        let cfg = crate::config::Config::load().unwrap();
-        match prior_dir {
-            Some(value) => std::env::set_var("ASRSUB_CONFIG_DIR", value),
-            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
-        }
+        let cfg = {
+            let _guard = crate::config::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let prior_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
+            std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
+            let cfg = crate::config::Config::load().unwrap();
+            match prior_dir {
+                Some(value) => std::env::set_var("ASRSUB_CONFIG_DIR", value),
+                None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
+            }
+            cfg
+        };
         let http = reqwest::Client::new();
         let pool = crate::providers::ProviderPool::new(
             crate::providers::ProvidersFile {
