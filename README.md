@@ -84,11 +84,15 @@ ships inside the Docker image (see `docs/DEPLOY.md`).
 ## Optional Discord notifications
 
 The long-running daemon may send one bounded log-style digest through the
-optional webhook file at `/run/secrets/discord_webhook`. The URL is validated
-at this boundary; missing, empty, malformed, or inaccessible input disables
-notifications without stopping subtitle processing. The reserved
-`DISCORD_WEBHOOK_URL` key remains rejected from configuration files, process
-environment merging, API/dashboard writes, and masked output.
+optional container-side webhook file at `/run/secrets/discord_webhook`. For a
+host-local one-shot smoke test, run
+`python3 scripts/test_discord_webhook.py --live`; it reads the protected
+`~/.config/asr-pipeline/secrets/discord_webhook` file without starting the
+daemon or a pipeline pass. The URL is validated at this boundary; missing,
+empty, malformed, or inaccessible input disables notifications without stopping
+subtitle processing. The reserved `DISCORD_WEBHOOK_URL` key remains rejected
+from configuration files, process-environment merging, and API/dashboard
+writes.
 
 A meaningful pass is admitted with one bounded nonblocking `try_send` into an
 in-memory queue. The notifier renders the reports and makes exactly one
@@ -100,10 +104,10 @@ bot, gateway, listener, command, interaction, or inbound Discord control plane,
 and does not change the existing authenticated inbound `/webhook` route.
 
 Render and transport failures emit only a generic local classification; URL,
-payload, response-body, path, and credential values are not logged. Local
-notifier tests use deterministic in-process fakes for meaningful, idle,
-omitted-report, render-failure, and transport-failure cases. No live Discord
-request or deployment validation is claimed here.
+payload, response-body, path, and credential values are not logged. Automated
+notifier tests use deterministic in-process fakes and local mock HTTP only. The
+live smoke helper is explicitly opt-in and deployment validation remains
+unverified.
 
 The repository's `pipeline.env.example` remains non-secret and intentionally
 contains no Discord URL, token, enable flag, or outbound webhook setting.

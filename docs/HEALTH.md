@@ -85,10 +85,14 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
 ### Notification boundary (daemon-only outbound)
 
 - **Optional daemon feature:** the long-running daemon reads one protected,
-  optional `/run/secrets/discord_webhook` file. The existing strict webhook
-  grammar validates the URL; a missing or malformed secret disables outbound
-  notification without failing the pipeline. The value is not accepted from
-  config/API/dashboard writes or ordinary process configuration.
+  optional container-side `/run/secrets/discord_webhook` file. For a host-local
+  one-shot smoke test, run
+  `python3 scripts/test_discord_webhook.py --live`; it reads the protected
+  `~/.config/asr-pipeline/secrets/discord_webhook` file without starting the
+  daemon or a pipeline pass. The existing strict webhook grammar validates the
+  URL; a missing or malformed secret disables outbound notification without
+  failing the pipeline. The value is not accepted from config/API/dashboard
+  writes or ordinary process configuration.
 - **Best effort:** a meaningful pass is admitted with one bounded,
   nonblocking `try_send` into a small in-memory Tokio queue. The notifier
   renders the bounded reports and performs exactly one webhook POST, then
@@ -105,9 +109,8 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
   do not change pipeline counters, `LastPass`, readiness, API responses, or
   dashboard behavior.
 - **Local evidence:** deterministic notifier tests use an in-process fake
-  transport for meaningful, idle, omitted-report, render-failure, and
-  transport-failure cases. No live Discord request or deployment validation is
-  claimed here.
+  transport and local mock HTTP. The live smoke helper is explicitly opt-in;
+  deployment validation remains unverified.
 
 ### 1. Local State Directory
 

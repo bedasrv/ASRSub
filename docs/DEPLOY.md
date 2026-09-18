@@ -308,6 +308,36 @@ secret values and the deploy tool accepts no secret argument.
 The operator must enforce `chmod 600` on each present secret file and `chmod 700`
 on the secret directory without displaying its contents.
 
+### Host-local webhook smoke test
+
+The repository includes a separate, explicit smoke test for one disposable
+webhook. This test does not start ASRSub, run a pipeline pass, or verify a
+Compose secret mount. It sends one direct HTTP POST to the webhook endpoint.
+
+The default smoke-test input is separate from the deployment input:
+
+- Host-local smoke test: `~/.config/asr-pipeline/secrets/discord_webhook`
+- Compose deployment: `/var/lib/asrsub/runtime-secrets/discord_webhook`, mounted
+  in the container as `/run/secrets/discord_webhook`
+
+For the host-local test, store the rotated webhook URL in the default file.
+Use a protected directory with mode `0700` and a file with mode `0600`. The file
+must contain one exact URL line without leading or trailing whitespace. Do not
+place the URL in a command argument, shell history, source file, or test output.
+
+Run the helper only when a real delivery is intended:
+
+```bash
+python3 scripts/test_discord_webhook.py --live
+```
+
+Without `--live`, the helper sends nothing. The helper rejects symlinks, unsafe
+permissions, unsupported URL forms, redirects, and proxies. It prints only a
+success status or a generic failure category. A 2xx response proves that the
+webhook endpoint accepted the test request; it does not prove a daemon
+deployment or a production cutover. Rotate or delete the disposable webhook
+after the test according to the secret-management policy.
+
 The preflight reads secret-file metadata with `lstat`; it does not open or read
 secret values. The remote script never includes secret file contents, resolved
 Compose config, raw Docker output, or raw SSH stderr in its result. Operators
