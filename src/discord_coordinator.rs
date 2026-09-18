@@ -39,17 +39,13 @@ pub(crate) fn start_with_lane(
 ) -> (CoordinatorHandle, tokio::task::JoinHandle<()>) {
     let (sender, mut receiver) = mpsc::channel(NOTIFIER_QUEUE_CAPACITY);
     let handle = tokio::spawn(async move {
-        let now = || {
-            ClockSample::new(
-                BootId::parse("00000000-0000-0000-0000-000000000000").expect("fixed boot id"),
-                0,
-                0,
-                true,
-            )
-        };
         while let Some(work) = receiver.recv().await {
-            if let (Some(lane), NotifierWork::Pass { reports, .. }) = (&lane, work) {
-                let _ = lane.enqueue(reports, now());
+            let now = sample_clock();
+            if let Some(lane) = &lane {
+                let _ = lane.retry_blocked(now.clone());
+                if let NotifierWork::Pass { reports, .. } = work {
+                    let _ = lane.enqueue(reports, now);
+                }
             }
         }
     });
@@ -63,10 +59,16 @@ pub(crate) fn start_with_dependencies(
     let (sender, mut receiver) = mpsc::channel(NOTIFIER_QUEUE_CAPACITY);
     let handle = tokio::spawn(async move {
         while let Some(work) = receiver.recv().await {
-            if let NotifierWork::Pass { reports, .. } = work {
-                let now = sample_clock();
-                let _ = lane.enqueue(reports, now.clone());
-                let _ = deliver_once(&lane, transport.as_ref(), now).await;
+            let now = sample_clock();
+            let _ = lane.retry_blocked(now.clone());
+            match work {
+                NotifierWork::Pass { reports, .. } => {
+                    let _ = lane.enqueue(reports, now.clone());
+                    let _ = deliver_once(&lane, transport.as_ref(), now).await;
+                }
+                NotifierWork::Tick => {
+                    let _ = deliver_once(&lane, transport.as_ref(), now).await;
+                }
             }
         }
     });
@@ -160,10 +162,21 @@ mod tests {
             true,
         )
     }
+    fn far_future_clock() -> ClockSample {
+        ClockSample::new(
+            BootId::parse("00000000-0000-0000-0000-000000000000").unwrap(),
+            u64::MAX,
+            u64::MAX,
+            true,
+        )
+    }
     fn report() -> EpisodeRunReport {
+        report_for_id(1)
+    }
+    fn report_for_id(episode_id: i64) -> EpisodeRunReport {
         EpisodeRunReport::try_new(
             EpisodeKind::Movie,
-            1,
+            episode_id,
             SafeDisplayText::sanitize("movie").unwrap(),
             None,
             None,
@@ -178,6 +191,18 @@ mod tests {
             AggregateDisposition::Complete,
         )
         .unwrap()
+    }
+
+    fn acknowledge_due(state: &StateLaneHandle) {
+        let view = state.inspect_due(clock()).unwrap().into_view().unwrap();
+        let payload = super::super::discord_state_schema::PayloadBytes::try_from_bytes(Box::from(
+            &b"payload"[..],
+        ))
+        .unwrap();
+        let reserved = state.reserve_rendered(clock(), view, payload).unwrap();
+        state
+            .acknowledge(reserved.reservation_id(), reserved.payload_sha256())
+            .unwrap();
     }
 
     #[tokio::test]
@@ -218,6 +243,52 @@ mod tests {
         drop(handle);
         join.await.unwrap();
         assert!(state.inspect_due(clock()).unwrap().into_view().is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_tick_delivers_persisted_due_state() {
+        let state = lane();
+        let (reports, _) = BoundedReports::from_reports([report()]).unwrap();
+        state.enqueue(reports, clock()).unwrap();
+        let transport = Arc::new(super::super::discord_transport::FakeTransport::scripted(
+            vec![DeliveryResult::Accepted],
+        ));
+        let (handle, join) = start_with_dependencies(state.clone(), transport.clone());
+        assert!(handle.try_send(NotifierWork::Tick).is_ok());
+        drop(handle);
+        join.await.unwrap();
+        assert!(state.inspect_due(clock()).unwrap().into_view().is_none());
+        assert_eq!(transport.payload_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_blocked_before_admitting_later_pass() {
+        let state = lane();
+        let (bulk, _) = BoundedReports::from_reports((0..128).map(report_for_id)).unwrap();
+        state.enqueue(bulk, clock()).unwrap();
+        let (blocked, _) = BoundedReports::from_reports([report_for_id(1000)]).unwrap();
+        state.enqueue(blocked, clock()).unwrap();
+        acknowledge_due(&state);
+
+        let transport = Arc::new(super::super::discord_transport::FakeTransport::scripted(
+            vec![DeliveryResult::Accepted],
+        ));
+        let (handle, join) = start_with_dependencies(state.clone(), transport.clone());
+        let (later, _) = BoundedReports::from_reports((1..=128).map(report_for_id)).unwrap();
+        handle
+            .try_send(NotifierWork::Pass {
+                reports: later,
+                omitted_reports: 0,
+            })
+            .unwrap();
+        drop(handle);
+        join.await.unwrap();
+
+        assert_eq!(transport.payload_count(), 1);
+        let now = far_future_clock();
+        assert_eq!(state.retry_blocked(now.clone()).unwrap().promoted(), 1);
+        let view = state.inspect_due(now).unwrap().into_view().unwrap();
+        assert_eq!(view.reports().iter().next().unwrap().episode_id(), 128);
     }
 
     #[tokio::test]
