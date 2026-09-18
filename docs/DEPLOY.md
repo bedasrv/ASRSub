@@ -223,16 +223,18 @@ tag.
 
 Rollback checks the hostname before writes and selects the most recent verified
 backup whose metadata includes a `backup_kind`, previous immutable repo digest,
-and saved previous mount contract. It atomically restores that Compose/env pair
-and runs `docker compose ... up -d --no-build --pull=never orchestrator`. It
-does not pull, retag, prune, stop first, or use a mutable tag. A `simple` backup
-must restore the exact digest in `Config.Image`, and its repo digest must also
-match. A `legacy` backup may restore a tag when the local `RepoDigests` contains
-the recorded digest; its verification explicitly reports
-`config_reference: legacy/tag` and `repo_digest_matched:true`. Both kinds must
-match the saved previous mount contract and pass health/readiness. If no
-verified immutable backup contract exists, it exits non-zero without changing
-the active files.
+and saved previous mount contract. It atomically restores that Compose/env pair.
+For a `simple` backup, the saved `.env` and metadata restore the previous
+`ASRSUB_IMAGE` digest; a `legacy` backup may retain a tag only when its local
+`RepoDigests` match the recorded digest. It then runs
+`docker compose ... up -d --no-build --pull=never orchestrator`. It does not
+pull, retag, prune, stop first, or use a mutable tag. A `simple` backup must
+restore the exact digest in `Config.Image`, and its repo digest must also match.
+Its verification reports `config_reference: legacy/tag` and
+`repo_digest_matched:true` only for the legacy/tag case. Both kinds must match
+the saved previous mount contract and pass health/readiness. If no verified
+immutable backup contract exists, it exits non-zero without changing the active
+files.
 
 ## 5. Health gates and automatic recovery
 

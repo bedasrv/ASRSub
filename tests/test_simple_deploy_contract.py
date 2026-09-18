@@ -171,6 +171,53 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
         self.assertIn("ASRSUB_IMAGE=" + VALID_IMAGE, env_text)
         self.assertNotIn("placeholder-only", env_text)
 
+    def test_env_source_rejects_webhook_secret_keys(self):
+        deploy = load_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            for key in ("DISCORD_WEBHOOK_URL", "WEBHOOK_URL"):
+                source = Path(directory) / f"{key}.env"
+                source.write_text(f"{key}=placeholder-only\n", encoding="utf-8")
+                with self.subTest(key=key), self.assertRaisesRegex(
+                    ValueError, "secret-bearing env key is not accepted"
+                ):
+                    deploy.build_candidate_env(
+                        source,
+                        image=VALID_IMAGE,
+                        webhook_port="8085",
+                        nas_media_prefix="/mnt/nas/share/media",
+                    )
+
+    def test_env_source_retains_explicitly_managed_non_secret_keys(self):
+        deploy = load_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "managed.env"
+            source.write_text(
+                "ASRSUB_IMAGE=ignored\n"
+                "WEBHOOK_PORT=ignored\n"
+                "NAS_MEDIA_PREFIX=ignored\n"
+                "PROVIDER_KEYS_FILE=/non-secret/provider_keys.env\n",
+                encoding="utf-8",
+            )
+            env_text = deploy.build_candidate_env(
+                source,
+                image=VALID_IMAGE,
+                webhook_port="8085",
+                nas_media_prefix="/mnt/nas/share/media",
+            )
+
+        self.assertEqual(
+            env_text,
+            "\n".join(
+                (
+                    f"ASRSUB_IMAGE={VALID_IMAGE}",
+                    "WEBHOOK_PORT=8085",
+                    "NAS_MEDIA_PREFIX=/mnt/nas/share/media",
+                    "PROVIDER_KEYS_FILE=/home/user/.config/asr-pipeline/secrets/provider_keys.env",
+                    "",
+                )
+            ),
+        )
+
 
 class TestDeployPayloadContract(unittest.TestCase):
     def test_payload_fields_decode_to_the_original_compose_and_env_bytes(self):

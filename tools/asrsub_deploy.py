@@ -40,7 +40,7 @@ MANAGED_ENV_KEYS = frozenset(
     {"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"}
 )
 SENSITIVE_ENV_KEY = re.compile(
-    r"(?:API_KEY|PASSWORD|TOKEN|SECRET|PRIVATE_KEY|WEBHOOK)$|^CONTROL_API_KEY$"
+    r"(?:^|_)(?:API_KEY|PASSWORD|TOKEN|SECRET|PRIVATE_KEY|WEBHOOK|CREDENTIALS?)(?:_|$)"
 )
 FORBIDDEN_COMMAND_TOKENS = frozenset(
     {"down", "prune", "rm", "restart", "systemctl", "daemon-reload"}
