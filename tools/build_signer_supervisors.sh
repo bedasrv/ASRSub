@@ -85,6 +85,8 @@ check_test_destination() {
 }
 
 if [[ "$OUTPUT_OVERRIDE" == 0 || "$OUTPUT_DIR" == "/usr/local/sbin" ]]; then
+    [[ "${ASRSUB_ALLOW_HOST_INSTALL:-}" == "1" ]] || fail \
+        "host installation is disabled; set ASRSUB_ALLOW_HOST_INSTALL=1 only on an isolated target"
     check_production_destination
 else
     check_test_destination

@@ -302,6 +302,11 @@ class TestRealAsrsubEnvBoundary(unittest.TestCase):
 
 
 def privileged_command(*args, check=True):
+    if os.environ.get("ASRSUB_ALLOW_HOST_SIGNER_TESTS") != "1":
+        raise RuntimeError(
+            "host signer integration is disabled; set "
+            "ASRSUB_ALLOW_HOST_SIGNER_TESTS=1 only on an isolated target"
+        )
     prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
     return subprocess.run(prefix + list(args), check=check, capture_output=True, text=True)
 
@@ -319,6 +324,11 @@ def non_root_identity():
 class TestSignerExecutionBoundary(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if os.environ.get("ASRSUB_ALLOW_HOST_SIGNER_TESTS") != "1":
+            raise unittest.SkipTest(
+                "host signer integration disabled; set "
+                "ASRSUB_ALLOW_HOST_SIGNER_TESTS=1 only on an isolated target"
+            )
         if os.geteuid() != 0 and privileged_command("true", check=False).returncode != 0:
             raise RuntimeError("root-owned fixed-key integration needs root or passwordless sudo")
         cls.fixed_root = Path("/etc/asrsub")
