@@ -68,7 +68,6 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | `TRANSLATE_CHUNK` | Lines per LLM request (default 10) |
 | `MAX_CUE_MS` | Max cue duration in ms (default 8000) |
 | `PROVIDERS_FILE` | Path to `asrsub_providers.json` |
-| `CONTROL_API_KEY_FILE` | Control-token secret (`/run/secrets/control_api_key` in compose) |
 
 Remote endpoints, models, and keys live in `asrsub_providers.json`
 (LLM list sorted fastest-first with per-endpoint limits + breakers).
@@ -101,7 +100,7 @@ There is no durable notification state, outbox, replay, reservation,
 acknowledgement, retry, or scheduled tick. `asrsub run-once` does not read the
 webhook secret or send a request. Discord is a destination only: this adds no
 bot, gateway, listener, command, interaction, or inbound Discord control plane,
-and does not change the existing authenticated inbound `/webhook` route.
+and does not change the existing inbound `/webhook` route.
 
 Render and transport failures emit only a generic local classification; URL,
 payload, response-body, path, and credential values are not logged. Automated
@@ -120,7 +119,9 @@ the whole model list already *is* the fallback list.)
 
 ## Control API
 
-GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
+The daemon serves its API and dashboard without in-process user authentication.
+Access control is provided externally by Pomerium/Pocket ID over HTTPS; the
+repository does not implement a replacement authentication layer.
 
 - `/` and `/ui/status` server-rendered operator dashboard (embedded; no
   runtime asset directory). `/ui/overview` remains a compatibility alias.
@@ -128,12 +129,9 @@ GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
 - `/ui/library` (with `q`, `scope`, `sort`, and `dir` filters),
   `/ui/activity`, `/ui/provenance`, and `/ui/settings`
 - `/ui/control/{action}`, `/ui/episode/{id|m:id|e:id}/{action}`, and
-  `/ui/config` use authenticated POST/redirect/GET. A successful mutation
-  returns `303 See Other`; failures return a complete HTML page with the
-  original `401`, `400`, `404`, or `500` status.
-  The small embedded browser asset keeps the control key in `sessionStorage`
-  and sends it only as `X-API-Key`; it never places the key in a form body,
-  URL, cookie, or redirect.
+  `/ui/config` use POST/redirect/GET. A successful mutation returns `303 See
+  Other`; failures return a complete HTML page with its `400`, `404`, or `500`
+  status.
 - `/health` liveness · `/ready` readiness (media/providers/state) · `/status` daemon state · `/config` masked config
 - `/pause` `/resume` `/run-once` `/wake` control · `/webhook` Tdarr wake + embedded-sub extract
 - `/api2/status /health /ready /config /provenance /wanted /library /activity /exclusions`

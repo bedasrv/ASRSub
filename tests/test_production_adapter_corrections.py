@@ -62,7 +62,7 @@ class ProductionCorrectionTest(unittest.TestCase):
             json.dumps(
                 {
                     "schema": "approval-v1",
-                    "signing_mode": "production",
+                    "integrity_mode": "unsigned",
                     "release_sha": SHA,
                     "image_digest": "a" * 64,
                     "approved_docker_socket": "default",
@@ -121,20 +121,17 @@ class ProductionCorrectionTest(unittest.TestCase):
                     "mode": f"{mode:04o}",
                 }
             )
-        manifest = {"schema": "runtime-bundle-manifest-v1", "signing_mode": "test-seam", "release_sha": SHA, "members": members}
+        manifest = {"schema": "runtime-bundle-manifest-v1", "integrity_mode": "unsigned", "release_sha": SHA, "members": members}
         manifest_path = bundle / "manifest.json"
         manifest_path.write_bytes(
             json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         )
         approval = self.root / "approval.json"
-        approval.write_text('{"schema":"approval-v1","signing_mode":"test-seam"}\n', encoding="utf-8")
-        verifier = self.root / "verifier"
-        verifier.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        verifier.chmod(0o755)
-        return bundle, manifest_path, approval, verifier
+        approval.write_text('{"schema":"approval-v1","integrity_mode":"unsigned"}\n', encoding="utf-8")
+        return bundle, manifest_path, approval
 
     def test_installer_failure_restores_runtime_and_systemd_without_receipt(self):
-        bundle, manifest, approval, verifier = self._full_test_bundle()
+        bundle, manifest, approval = self._full_test_bundle()
         target = self.root / "installed"
         target.mkdir(mode=0o755)
         (target / "old-runtime").write_text("old-runtime\n", encoding="utf-8")
@@ -156,11 +153,6 @@ class ProductionCorrectionTest(unittest.TestCase):
             target_root=target,
             output=output,
             systemd_root=systemd,
-            verify_command=verifier,
-            approval_signature=None,
-            approval_public_key=None,
-            bundle_signature=None,
-            bundle_public_key=None,
             image_digest=None,
             compose_sha256=None,
             compose_template_sha256=None,
@@ -267,7 +259,7 @@ class ProductionCorrectionTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
         self.assertEqual((output.stat().st_uid, output.stat().st_gid), (os.getuid(), os.getgid()))
 
-    def test_preflight_metadata_checks_reject_wrong_modes_and_trust_anchors(self):
+    def test_preflight_metadata_checks_reject_wrong_modes(self):
         uid = os.getuid()
         gid = os.getgid()
         paths = {
@@ -276,15 +268,13 @@ class ProductionCorrectionTest(unittest.TestCase):
             "deploy": self.root / "deploy",
             "evidence": self.root / "evidence",
             "systemd": self.root / "systemd",
-            "trust": self.root / "trust",
             "dropin": self.root / "systemd" / "docker.service.d",
         }
-        for name, mode in (("runtime", 0o755), ("state", 0o700), ("deploy", 0o700), ("evidence", 0o700), ("systemd", 0o755), ("trust", 0o700), ("dropin", 0o755)):
+        for name, mode in (("runtime", 0o755), ("state", 0o700), ("deploy", 0o700), ("evidence", 0o700), ("systemd", 0o755), ("dropin", 0o755)):
             paths[name].mkdir(parents=True, exist_ok=True, mode=mode)
             paths[name].chmod(mode)
         files = {
             "docker": self.root / "docker",
-            "openssl": self.root / "openssl",
             "approval": paths["deploy"] / "approval.json",
             "manifest": paths["deploy"] / "bundle-manifest.json",
             "image": paths["deploy"] / "approved-image.json",
@@ -292,20 +282,14 @@ class ProductionCorrectionTest(unittest.TestCase):
         }
         for path in files.values():
             path.write_text("{}\n", encoding="utf-8")
-            path.chmod(0o755 if path in {files["docker"], files["openssl"]} else 0o600)
-        for name, mode in (("approval.sig", 0o600), ("approval-key.pub", 0o644), ("bundle-manifest.sig", 0o600), ("bundle-signing-key.pub", 0o644)):
-            path = paths["trust"] / name
-            path.write_text("key\n", encoding="utf-8")
-            path.chmod(mode)
+            path.chmod(0o755 if path == files["docker"] else 0o600)
         replacements = {
             "RUNTIME_ROOT": paths["runtime"],
             "STATE_ROOT": paths["state"],
             "DEPLOY_STATE_ROOT": paths["deploy"],
             "EVIDENCE_ROOT": paths["evidence"],
             "SYSTEMD_ROOT": paths["systemd"],
-            "TRUST_ROOT": paths["trust"],
             "DOCKER": files["docker"],
-            "OPENSSL": files["openssl"],
             "APPROVAL": files["approval"],
             "BUNDLE_MANIFEST": files["manifest"],
             "APPROVED_IMAGE": files["image"],
@@ -314,20 +298,16 @@ class ProductionCorrectionTest(unittest.TestCase):
             "PRODUCTION_GID": gid,
             "SYSTEMD_UID": uid,
             "SYSTEMD_GID": gid,
-            "TRUST_UID": uid,
-            "TRUST_GID": gid,
         }
         real_ensure_regular_file = self.entrypoint.ensure_regular_file
+
         def seam_ensure_regular_file(path, *, mode, uid, gid, name):
             return real_ensure_regular_file(path, mode=mode, uid=os.getuid() if uid == 0 else uid, gid=os.getgid() if gid == 0 else gid, name=name)
+
         replacements["ensure_regular_file"] = mock.Mock(side_effect=seam_ensure_regular_file)
         with mock.patch.multiple(self.entrypoint, **replacements):
             self.entrypoint._validate_host_metadata()
             paths["runtime"].chmod(0o700)
-            with self.assertRaises(self.entrypoint.AdapterError):
-                self.entrypoint._validate_host_metadata()
-            paths["runtime"].chmod(0o755)
-            paths["trust"].joinpath("approval.sig").chmod(0o644)
             with self.assertRaises(self.entrypoint.AdapterError):
                 self.entrypoint._validate_host_metadata()
 
@@ -384,139 +364,7 @@ class ProductionCorrectionTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(json.loads(output.read_text(encoding="utf-8"))["status"])
 
-    def test_signing_tools_use_real_key_fds_in_test_seams(self):
-        key = self.root / "key.pem"
-        public = self.root / "key.pub"
-        subprocess.run(
-            ["/usr/bin/openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(key)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["/usr/bin/openssl", "pkey", "-in", str(key), "-pubout", "-out", str(public)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        runtime = self.root / "runtime"
-        systemd = self.root / "systemd"
-        runtime.mkdir()
-        systemd.mkdir()
-        for name in self.installer.EXPECTED_INSTALLED_RUNTIME_MEMBERS:
-            path = runtime / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("release:" + name + "\n", encoding="utf-8")
-            path.chmod(self.installer.RUNTIME_MEMBER_MODES[name])
-        for name in self.installer.EXPECTED_SYSTEMD_MEMBERS:
-            path = systemd / name.removeprefix("systemd/")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("unit:" + name + "\n", encoding="utf-8")
-            path.chmod(0o644)
-        bundle = self.root / "bundle"
-        manifest = self.root / "bundle-manifest.json"
-        signature = self.root / "bundle-manifest.sig"
-        key_fd = os.open(key, os.O_RDONLY)
-        try:
-            result = subprocess.run(
-                [
-                    PYTHON,
-                    str(ROOT / "tools" / "package_bundle.py"),
-                    "--test-seam",
-                    "--runtime-source-root",
-                    str(runtime),
-                    "--systemd-source-root",
-                    str(systemd),
-                    "--output-root",
-                    str(bundle),
-                    "--manifest-output",
-                    str(manifest),
-                    "--signature-output",
-                    str(signature),
-                    "--release-sha",
-                    SHA,
-                    "--key-fd",
-                    str(key_fd),
-                ],
-                cwd=ROOT,
-                pass_fds=(key_fd,),
-                capture_output=True,
-                text=True,
-            )
-        finally:
-            os.close(key_fd)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue((bundle / "compose.yaml").is_file())
-        manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
-        self.assertEqual(manifest_value["schema"], "runtime-bundle-manifest-v1")
-        self.assertEqual(manifest_value["signing_mode"], "test-seam")
-        self.assertEqual(
-            {item["path"] for item in manifest_value["members"]},
-            set(self.installer.EXPECTED_INSTALLED_RUNTIME_MEMBERS) | set(self.installer.EXPECTED_SYSTEMD_MEMBERS),
-        )
-        verify = subprocess.run(
-            ["/usr/bin/openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(signature), str(manifest)],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(verify.returncode, 0, verify.stderr)
-        approval = self.root / "approval-input.json"
-        approval.write_bytes(
-            json.dumps(
-                {
-                    "schema": "approval-v1",
-                    "signing_mode": "test-seam",
-                    "generation": 1,
-                    "release_sha": SHA,
-                    "bundle_sha256": "b" * 64,
-                    "image_digest": "a" * 64,
-                    "compose_sha256": "c" * 64,
-                    "compose_template_sha256": "d" * 64,
-                    "notifications_enabled": False,
-                    "approved_docker_socket": "default",
-                    "approved_state_root": "/var/lib/asrsub/state",
-                    "created_epoch_ns": 0,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-            + b"\n"
-        )
-        approval_out = self.root / "approval.json"
-        approval_sig = self.root / "approval.sig"
-        key_fd = os.open(key, os.O_RDONLY)
-        try:
-            result = subprocess.run(
-                [
-                    PYTHON,
-                    str(ROOT / "tools" / "create_approval.py"),
-                    "--test-seam",
-                    "--canonical-approval-bytes",
-                    str(approval),
-                    "--approval-manifest",
-                    str(approval_out),
-                    "--approval-signature",
-                    str(approval_sig),
-                    "--approval-key-fd",
-                    str(key_fd),
-                ],
-                cwd=ROOT,
-                pass_fds=(key_fd,),
-                capture_output=True,
-                text=True,
-            )
-        finally:
-            os.close(key_fd)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(approval_out.read_text(encoding="utf-8"))["signing_mode"], "test-seam")
-        verify = subprocess.run(
-            ["/usr/bin/openssl", "dgst", "-sha256", "-verify", str(public), "-signature", str(approval_sig), str(approval_out)],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(verify.returncode, 0, verify.stderr)
-
-    def test_production_signing_rejects_missing_release_inputs_and_key(self):
+    def test_production_tools_require_explicit_inputs(self):
         for tool in ("package_bundle.py", "create_approval.py"):
             result = subprocess.run(
                 [PYTHON, str(ROOT / "tools" / tool), "--production"],

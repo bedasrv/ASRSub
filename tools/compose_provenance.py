@@ -11,7 +11,6 @@ MOUNTS = [
     ("/mnt/nas/share/media", "/mnt/nas/share/media", "bind", False),
     ("/mnt/nas/share/media", "/media", "bind", True),
     ("/var/lib/asrsub/runtime-secrets/discord_webhook", "/run/secrets/discord_webhook", "secret", True),
-    ("/var/lib/asrsub/runtime-secrets/control_key", "/run/secrets/control_api_key", "secret", True),
     ("/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children", "/run/asrsub/children-cgroup", "cgroup", False),
     ("/usr/local/libexec/asrsub/asrsub", "/usr/local/bin/asrsub", "bind", True),
     ("/var/lib/asrsub/egress-policy/egress-policy.json", "/run/asrsub/egress-policy.json", "bind", True),

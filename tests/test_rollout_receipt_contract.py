@@ -56,7 +56,7 @@ class TestRolloutReceipt(unittest.TestCase):
                 json.dumps(
                     {
                         "schema": "approval-v1",
-                        "signing_mode": "production",
+                        "integrity_mode": "unsigned",
                         "generation": 1,
                         "release_sha": SHA,
                         "bundle_sha256": "b" * 64,

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.harness import canonical, require_regular, run_selector
 
 ROOT = Path(__file__).resolve().parent
-PROTECTED = ("DISCORD_WEBHOOK_URL", "CONTROL_API_KEY", "CONTROL_API_KEY_FILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "DOCKER_HOST")
+PROTECTED = ("DISCORD_WEBHOOK_URL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "DOCKER_HOST")
 HELPERS = ("asr::probe_media", "asr::extract_audio", "asr::transcribe_pieces", "ladder::convert", "main::extract_embedded::ffprobe", "main::extract_embedded::ffmpeg")
 CALLERS = ("asr_child_tests::transcribe_cmd_uses_fixed_tool_paths", "asr_child_tests::webhook_extract_uses_fixed_tool_paths")
 
@@ -60,7 +60,6 @@ def _run(binary: Path, providers: Path, evidence: Path, preload: Path) -> subpro
     Path(env["HOME"]).mkdir(mode=0o700)
     env["LD_PRELOAD"] = str(preload)
     env["DISCORD_WEBHOOK_URL"] = "must-not-be-observed"
-    env["CONTROL_API_KEY"] = "must-not-be-observed"
     return subprocess.run([str(binary), "--config-dir", str(config), "--providers-file", str(providers), "run-once"], env=env, text=True, capture_output=True, timeout=30)
 
 def _receipt(binary: Path, providers: Path, evidence: Path, preload: Path, result: subprocess.CompletedProcess[str], observed: str) -> dict:

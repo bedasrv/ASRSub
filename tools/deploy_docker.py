@@ -233,8 +233,8 @@ def _read_approval_binding(*, digest: str, release_sha: str, compose_sha256: str
     value = read_json(APPROVAL_PATH, name="approved deployment transaction")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
         raise AdapterError("approved deployment transaction has an unsupported schema")
-    if value.get("signing_mode") != "production":
-        raise AdapterError("approved deployment transaction signing mode is not production")
+    if value.get("integrity_mode") != "unsigned":
+        raise AdapterError("approved deployment transaction integrity mode is not unsigned")
     if value.get("release_sha") != release_sha or value.get("image_digest") != digest.rsplit(":", 1)[-1]:
         raise AdapterError("approved deployment transaction does not bind the requested image")
     if compose_sha256 is not None and value.get("compose_sha256") != compose_sha256:
@@ -244,13 +244,13 @@ def _read_approval_binding(*, digest: str, release_sha: str, compose_sha256: str
 
 
 def _production_preflight(*, digest: str, release_sha: str) -> dict[str, Any]:
-    """Require the same signed fixed-path authorization as the entrypoint."""
+    """Require the same fixed-path unsigned preflight authorization as the entrypoint."""
     try:
         from production_entrypoint import preflight  # type: ignore
 
         approved = preflight()
     except (AdapterError, ImportError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AdapterError("production Docker operation requires a successful signed preflight") from exc
+        raise AdapterError("production Docker operation requires a successful preflight") from exc
     if not isinstance(approved, dict):
         raise AdapterError("production preflight returned an invalid authorization")
     if approved.get("image_digest") != digest or approved.get("release_sha") != release_sha:

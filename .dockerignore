@@ -19,7 +19,7 @@ episodes/
 ground_truth/
 # Operator secrets must never reach the build context. The Dockerfile copies
 # only explicit paths, so this is defence in depth: the providers file holds
-# live API keys, and the config/secrets dirs hold provider and control keys.
+# live API keys, and the config/secrets dirs hold provider credentials.
 asrsub_providers.json
 config.overrides.json
 *.env

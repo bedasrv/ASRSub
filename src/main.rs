@@ -595,11 +595,9 @@ async fn daemon_loop(
 
     // Control API server.
     let app = api::router(app_state.clone());
-    // Webhook route shares the port: tdarr POST /webhook wakes + extracts.
-    // Authenticated like every other control POST — an unauthenticated caller
-    // must not be able to trigger ffmpeg runs, media-dir writes, or
-    // wake-induced API spend. OPS: the Tdarr/Sonarr notification must send
-    // X-API-Key (or X-Control-Key) == CONTROL_API_KEY.
+    // Webhook route shares the port: Tdarr POST /webhook wakes + extracts.
+    // User access control is external to this daemon: Pomerium/Pocket ID and
+    // HTTPS protect the upstream deployment.
     let webhook_inflight: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>> =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let app = app.route(
@@ -607,16 +605,10 @@ async fn daemon_loop(
         axum::routing::post({
             let st = app_state.clone();
             let inflight = webhook_inflight.clone();
-            move |headers: axum::http::HeaderMap, body: String| {
+            move |body: String| {
                 let st = st.clone();
                 let inflight = inflight.clone();
                 async move {
-                    if !api::check_token(&st.cfg, &headers) {
-                        return (
-                            axum::http::StatusCode::UNAUTHORIZED,
-                            axum::response::Json(serde_json::json!({"error": "unauthorized"})),
-                        );
-                    }
                     handle_webhook(st, inflight, &body).await;
                     (
                         axum::http::StatusCode::OK,

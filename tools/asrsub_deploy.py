@@ -48,7 +48,6 @@ DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
 DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
 DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
 DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
-DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
 DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
@@ -341,7 +340,6 @@ def _looks_sensitive_path(path: Path) -> bool:
     parts = [part.lower() for part in path.parts]
     forbidden_fragments = ("secret", "credential", "password", "private_key", "provider_key")
     return any(fragment in part for part in parts for fragment in forbidden_fragments) or path.name.lower() in {
-        "control_api_key",
         "discord_webhook",
     }
 
@@ -412,9 +410,7 @@ def validate_template_text(text: str) -> None:
         DEFAULT_CACHE_SOURCE,
         DEFAULT_STATE_SOURCE,
         DEFAULT_RUNTIME_SECRETS_SOURCE,
-        DEFAULT_CONTROL_KEY_PATH,
         DEFAULT_PROVIDER_KEYS_FILE,
-        SECRETS_CONTAINER_PATH + "/control_api_key",
         SECRETS_CONTAINER_PATH + "/discord_webhook",
     )
     if any(value not in text for value in required):
@@ -772,7 +768,6 @@ DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
 DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
 DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
 DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
-DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
 DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
@@ -1223,7 +1218,6 @@ def expected_mounts(payload):
         (media, prefix, True),
         (media, MEDIA_CONTAINER_PATH, False),
         (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
-        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_api_key", False),
     ]
 
 
@@ -1283,7 +1277,6 @@ def legacy_mounts_match(identity, payload):
         (DEFAULT_STATE_SOURCE, STATE_CONTAINER_PATH, True),
         (media, payload["nas_media_prefix"], True),
         (media, MEDIA_CONTAINER_PATH, False),
-        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_api_key", False),
     }
     optional = {
         (
@@ -1329,16 +1322,12 @@ def collect(payload, *, strict):
     ):
         paths[name] = require_path(path, directory=True)
     secret_metadata = {
-        "control_key": metadata(Path(DEFAULT_CONTROL_KEY_PATH)),
         "discord_webhook": metadata(Path(DEFAULT_RUNTIME_SECRETS_SOURCE) / "discord_webhook"),
         "provider_keys.env": metadata(Path(DEFAULT_PROVIDER_KEYS_FILE)),
     }
     if strict:
         if paths["secrets"]["mode"] & 0o077:
             raise RemoteFailure("secret directory permissions are too broad")
-        control = secret_metadata["control_key"]
-        if not control.get("present") or not control.get("regular") or control.get("symlink") or control.get("mode", 0) & 0o077:
-            raise RemoteFailure("control secret metadata is not safe")
         for name in ("discord_webhook", "provider_keys.env"):
             optional = secret_metadata[name]
             if optional.get("present") and (not optional.get("regular") or optional.get("symlink") or optional.get("mode", 0) & 0o077):

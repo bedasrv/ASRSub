@@ -1,1 +1,1 @@
-# Fixture placeholder for the signed installed Docker adapter.
+# Fixture placeholder for the validated installed Docker adapter.

@@ -75,11 +75,9 @@ pub(crate) fn layout(
             body {
                 header class="top" {
                     h1 { "ASRSub" }
-                    span class="muted" { "control API " code { (cfg.webhook_port) } }
+                    span class="muted" { "HTTP " code { (cfg.webhook_port) } }
                     span class="spacer" {}
-                    span id="key-state" aria-live="polite" { "no key" }
-                    input id="ctl-key" type="password" placeholder="control key" autocomplete="off";
-                    button class="btn" type="button" data-key-action="unlock" { "Unlock" }
+                    span class="muted" { "Access via Pomerium / Pocket ID" }
                 }
                 nav class="tabs" aria-label="Operator pages" {
                     (nav_link(active, "status", "/ui/status", "Status"))
@@ -136,18 +134,18 @@ pub(crate) async fn status_page(s: &Arc<AppState>, flash: Option<(&str, bool)>) 
                 }
                 div class="row-actions mt-m" {
                     @if paused {
-                        form method="post" action="/ui/control/resume" data-authenticated {
+                        form method="post" action="/ui/control/resume" {
                             button class="btn primary" type="submit" { "Resume" }
                         }
                     } @else {
-                        form method="post" action="/ui/control/pause" data-authenticated {
+                        form method="post" action="/ui/control/pause" {
                             button class="btn" type="submit" { "Pause" }
                         }
                     }
-                    form method="post" action="/ui/control/run-once" data-authenticated {
+                    form method="post" action="/ui/control/run-once" {
                         button class="btn" type="submit" { "Run once" }
                     }
-                    form method="post" action="/ui/control/wake" data-authenticated {
+                    form method="post" action="/ui/control/wake" {
                         button class="btn" type="submit" { "Wake" }
                     }
                 }
@@ -223,22 +221,22 @@ pub(crate) async fn library_page(
                                     td class="muted" { (row.done) }
                                     td {
                                         div class="row-actions" {
-                                            form method="post" action=(data::ep_action_url(&row.aid, "retry", &query_string)) data-authenticated {
+                                            form method="post" action=(data::ep_action_url(&row.aid, "retry", &query_string)) {
                                                 button class="btn" type="submit" { "Retry" }
                                             }
-                                            form method="post" action=(data::ep_action_url(&row.aid, "skip", &query_string)) data-authenticated {
+                                            form method="post" action=(data::ep_action_url(&row.aid, "skip", &query_string)) {
                                                 button class="btn" type="submit" { "Skip" }
                                             }
                                             @if row.excluded {
-                                                form method="post" action=(data::ep_action_url(&row.aid, "unexclude", &query_string)) data-authenticated {
+                                                form method="post" action=(data::ep_action_url(&row.aid, "unexclude", &query_string)) {
                                                     button class="btn" type="submit" { "Unexclude" }
                                                 }
                                             } @else {
-                                                form method="post" action=(data::ep_action_url(&row.aid, "exclude", &query_string)) data-authenticated {
+                                                form method="post" action=(data::ep_action_url(&row.aid, "exclude", &query_string)) {
                                                     button class="btn" type="submit" { "Exclude" }
                                                 }
                                             }
-                                            form method="post" action=(data::ep_action_url(&row.aid, "delete", &query_string)) data-authenticated {
+                                            form method="post" action=(data::ep_action_url(&row.aid, "delete", &query_string)) {
                                                 button class="btn danger" type="submit" { "Delete" }
                                             }
                                         }
@@ -370,7 +368,7 @@ pub(crate) fn settings_page(cfg: &Config, message: Option<(bool, String)>) -> St
                 @if let Some((ok, text)) = &message {
                     div class=(if *ok { "banner ok" } else { "banner err" }) role="alert" { (text) }
                 }
-                form method="post" action="/ui/config" data-authenticated {
+                form method="post" action="/ui/config" {
                     @for (group_id, group_title) in FIELD_GROUPS {
                         @if FIELDS.iter().any(|field| field.group == *group_id) {
                             fieldset {

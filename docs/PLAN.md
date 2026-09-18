@@ -51,8 +51,8 @@ merge into `main` when their track is done and verified.
    env keys in `~/.config/asr-pipeline/pipeline.env` (BAZARR_URL, BAZARR_API_KEY,
    SONARR_URL, SONARR_API_KEY, ASR_URL, TRANSLATE_BASE, TRANSLATE_MODEL,
    (default Gemma model: `/home/user/Documents/Tools/llama-cpp-turboquant/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf`),
-   CONTROL_API_KEY, TARGET_LANGS, MAX_EPS_PER_RUN). Signatures may change ONLY
-   with a note in the merge commit.
+   TARGET_LANGS, MAX_EPS_PER_RUN). User access control is external via
+   Pomerium/Pocket ID over HTTPS; the daemon does not authenticate users.
 5. **Never commit**: pipeline.env, state.jsonl, refine_state.jsonl, last_error.json,
    error_history/, __pycache__, .venv, selfheal_fix_spec_r*.md.
 

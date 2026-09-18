@@ -36,11 +36,11 @@ relocated. The config mount continues to own the ordinary application ledgers
 `subtitle_registry.jsonl`, and related files); the separate StateFs mount owns
 Discord notification state. The runtime-secrets directory is bound read-only
 to `/run/secrets` so its optional webhook remains available at
-`/run/secrets/discord_webhook`; the existing `control_key` file is additionally
-projected at `/run/secrets/control_api_key`, and `CONTROL_API_KEY_FILE` points
-to that fixed daemon interface. The provider key file is the optional
+`/run/secrets/discord_webhook`. The provider key file is the optional
 `/var/lib/asrsub/config/provider_keys.env` Compose `env_file`. The template
-contains no secret values and no top-level Compose `secrets:` file.
+contains no secret values and no top-level Compose `secrets:` file. User access
+control is external via Pomerium/Pocket ID over HTTPS; the daemon does not
+implement user authentication.
 
 The no-migration contract is exact: preflight accepts the candidate mount set
 or the known hardened legacy mount set only. It rejects an unsafe or unknown
@@ -64,8 +64,8 @@ The operator machine needs Python 3 and an SSH client. The target needs:
   owns the ordinary application ledgers), `/var/lib/asrsub/cache`, and
   `/var/lib/asrsub/state` (the production Discord StateFs) as real directories;
 - the mounted `/mnt/nas/share/media` directory;
-- `/var/lib/asrsub/runtime-secrets` as a real directory, with the required
-  `control_key` file and optional `discord_webhook` file;
+- `/var/lib/asrsub/runtime-secrets` as a real directory; if present, its
+  `discord_webhook` file remains optional;
 - the optional `/var/lib/asrsub/config/provider_keys.env` file;
 - an existing healthy service for a deploy backup. A deployment without
   resolvable provider keys will not be ready.
@@ -186,11 +186,10 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding=
 
 Before any target write, the streamed remote script verifies the target
 hostname and runs the pre-apply safety checks. The first simple deployment may
-start from the target's **known hardened legacy Compose shape** (for example, a
-`/var/lib/asrsub/runtime-secrets/control_key` source projected at
-`/run/secrets/control_api_key`, with the production StateFs mounted at
-`/var/lib/asrsub/state`), as long as the current service is owned, healthy,
-safely provisioned, and has a recoverable previous repo digest. The preflight
+start from the target's **known hardened legacy Compose shape** (for example, with
+its production StateFs mounted at `/var/lib/asrsub/state`), as long as the
+current service is owned, healthy, safely provisioned, and has a recoverable
+previous repo digest. The preflight
 rejects an unsafe or unknown legacy layout before this point. It then:
 
 1. creates a timestamped `.asrsub-rollback/<timestamp>/` backup containing the
@@ -300,10 +299,9 @@ secret values and the deploy tool accepts no secret argument.
 
 | Input | Host location | Required metadata |
 | --- | --- | --- |
-| Control API key | `/var/lib/asrsub/runtime-secrets/control_key` | runtime-secrets directory `0700`, file `0600`, root/owner-controlled |
 | Optional Discord webhook | `/var/lib/asrsub/runtime-secrets/discord_webhook` | if present, file `0600`; absence disables it |
 | Provider key env file | `/var/lib/asrsub/config/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
-| Container projection | `/run/secrets` plus `/run/secrets/control_api_key` | read-only parent bind keeps the optional webhook path; the control key is projected at the daemon's fixed interface |
+| Container projection | `/run/secrets` | read-only parent bind keeps the optional webhook path |
 
 The operator must enforce `chmod 600` on each present secret file and `chmod 700`
 on the secret directory without displaying its contents.
@@ -487,8 +485,9 @@ The host-network service listens on `WEBHOOK_PORT` (default 8085). A reverse
 proxy must reach `http://<asrsub-host>:8085`; allow proxy-host to target-host
 TCP 8085. Use `/health` for liveness and `/ready` for readiness. These probes
 are unauthenticated and must not require SSO. A public 302 only proves the
-proxy's login path; verify the upstream path separately. Do not expose the
-control API key or provider values while testing the route.
+proxy's login path; verify the upstream path separately. The reverse proxy
+supplies external access control for operator routes. Do not expose provider
+values while testing the route.
 
 ## Existing application notes
 

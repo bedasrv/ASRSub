@@ -2,7 +2,7 @@ name: Release
 
 # The only path that publishes images. Every push to main builds the image
 # once and pushes the full-40-character git SHA digest to GHCR. Production
-# deploys bind the exact image digest through the signed approval manifest.
+# deploys bind the exact image digest through the validated approval manifest.
 # NOTE: the image name is hardcoded lowercase — github.repository would
 # expand to bedasrv/ASRSub, which GHCR rejects (must be lowercase).
 

@@ -9,10 +9,8 @@ the implementation has been assembled.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -111,15 +109,6 @@ def structural(repo: Path, manifest: dict) -> None:
         if key in task_keys or key[1] not in paths or item.get("role") not in TASK_ROLES:
             fail(f"invalid/duplicate task file {key}")
         task_keys.add(key)
-
-    policy = repo / "tools/signer_argv_policy.json"
-    if policy.exists():
-        expected = hashlib.sha256(policy.read_bytes()).hexdigest()
-        # The policy's bytes, rather than a hand-maintained digest, are the
-        # source of truth.  This check also makes accidental non-UTF8 changes
-        # visible before a later signer gate.
-        if len(expected) != 64:
-            fail("signer policy hash calculation failed")
 
 
 def full(repo: Path, manifest: dict) -> None:

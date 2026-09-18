@@ -108,23 +108,12 @@ mod tests {
 
     fn test_app() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let key_path = dir.path().join("control_api_key");
-        std::fs::write(&key_path, "boundary-key\n").unwrap();
-        let _guard = crate::config::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         let prior_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
-        let prior_key_file = std::env::var_os("CONTROL_API_KEY_FILE");
         std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
-        std::env::set_var("CONTROL_API_KEY_FILE", &key_path);
         let cfg = crate::config::Config::load().unwrap();
         match prior_dir {
             Some(value) => std::env::set_var("ASRSUB_CONFIG_DIR", value),
             None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
-        }
-        match prior_key_file {
-            Some(value) => std::env::set_var("CONTROL_API_KEY_FILE", value),
-            None => std::env::remove_var("CONTROL_API_KEY_FILE"),
         }
         let http = reqwest::Client::new();
         let pool = crate::providers::ProviderPool::new(
@@ -173,7 +162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_episode_query_keeps_auth_boundary() {
+    async fn malformed_episode_query_still_returns_bad_request_without_local_user_authentication() {
         let (app, _dir) = test_app();
         let base = serve(app).await;
         let client = reqwest::Client::new();
@@ -182,13 +171,13 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
         let body = response_text(response).await;
-        assert!(body.contains("Wrong or missing control key."));
+        assert!(body.contains("Library filters could not be decoded."));
     }
 
     #[tokio::test]
-    async fn unauthorized_valid_episode_query_preserves_library_filters() {
+    async fn valid_episode_query_is_processed_without_local_user_authentication() {
         let (app, _dir) = test_app();
         let base = serve(app).await;
         let response = reqwest::Client::new()
@@ -196,26 +185,10 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body = response_text(response).await;
         assert!(body.contains("name=\"q\" value=\"needle\""));
         assert!(body.contains("option value=\"active\" selected"));
-    }
-
-    #[tokio::test]
-    async fn authenticated_malformed_episode_query_is_a_complete_bad_request() {
-        let (app, _dir) = test_app();
-        let base = serve(app).await;
-        let response = reqwest::Client::new()
-            .post(format!("{base}/ui/episode/1/retry?q=first&q=second"))
-            .header("X-API-Key", "boundary-key")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-        let body = response_text(response).await;
-        assert!(body.contains("Library filters could not be decoded."));
-        assert!(!body.contains("Failed to deserialize"));
     }
 
     #[tokio::test]
@@ -224,7 +197,6 @@ mod tests {
         let base = serve(app).await;
         let response = reqwest::Client::new()
             .post(format!("{base}/ui/config"))
-            .header("X-API-Key", "boundary-key")
             .header("Content-Type", "application/json")
             .body("{\"MAX_EPS_PER_RUN\":4}")
             .send()

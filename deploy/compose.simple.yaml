@@ -8,7 +8,6 @@ services:
     restart: unless-stopped
     environment:
       TZ: Asia/Jakarta
-      CONTROL_API_KEY_FILE: /run/secrets/control_api_key
       WEBHOOK_PORT: "${WEBHOOK_PORT:?WEBHOOK_PORT must be set}"
       NAS_MEDIA_PREFIX: "${NAS_MEDIA_PREFIX:?NAS_MEDIA_PREFIX must be set}"
     env_file:
@@ -47,14 +46,8 @@ services:
         bind: { propagation: rprivate, create_host_path: false }
       # The parent bind exposes the optional
       # /var/lib/asrsub/runtime-secrets/discord_webhook at
-      # /run/secrets/discord_webhook without a direct optional-file bind;
-      # the control file below has a fixed name. Neither secret value is read
-      # or copied by the deployment tool.
-      - type: bind
-        source: /var/lib/asrsub/runtime-secrets/control_key
-        target: /run/secrets/control_api_key
-        read_only: true
-        bind: { propagation: rprivate, create_host_path: false }
+      # /run/secrets/discord_webhook without a direct optional-file bind.
+      # The deployment tool never reads or copies secret values.
     command: ["daemon"]
     healthcheck:
       test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:${WEBHOOK_PORT:?WEBHOOK_PORT must be set}/ready"]

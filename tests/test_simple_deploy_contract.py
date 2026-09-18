@@ -149,7 +149,7 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
     def test_default_candidate_env_does_not_read_secret_files(self):
         deploy = load_tool()
         with tempfile.TemporaryDirectory() as directory:
-            secret = Path(directory) / "control_api_key"
+            secret = Path(directory) / "unrelated_secret_sentinel"
             secret.write_text("placeholder-only", encoding="utf-8")
             with mock.patch.object(
                 Path,
@@ -317,7 +317,6 @@ class TestComposeTemplateContract(unittest.TestCase):
             "/home/user/.cache/asr-pipeline",
             "/mnt/nas/share/media",
             "/run/secrets",
-            "/run/secrets/control_api_key",
             "/var/lib/asrsub/state",
             "/run/secrets/discord_webhook",
         ):
@@ -326,7 +325,7 @@ class TestComposeTemplateContract(unittest.TestCase):
         self.assertNotIn("egress-policy", text)
         self.assertNotIn("/usr/local/libexec", text)
         self.assertNotRegex(text, r"(?m)^secrets:\s*$")
-        self.assertNotIn("control_api_key:", text)
+        self.assertEqual(text.count("/run/secrets/"), 1)
         self.assertNotIn("discord_webhook:", text)
 
     def test_config_mount_keeps_application_ledgers_and_statefs_stays_separate(self):
@@ -383,7 +382,7 @@ class TestDeployDocumentationContract(unittest.TestCase):
             "/ready",
             "automatic rollback",
             "rollback status",
-            "/var/lib/asrsub/runtime-secrets/control_key",
+            "Pomerium/Pocket ID",
             "chmod 600",
             "never print or read secret values",
             "docker compose down",
@@ -460,11 +459,6 @@ class TestDeployPhases(unittest.TestCase):
                     {
                         "Source": "/mnt/nas/share/media",
                         "Destination": "/media",
-                        "RW": False,
-                    },
-                    {
-                        "Source": "/var/lib/asrsub/runtime-secrets/control_key",
-                        "Destination": "/run/secrets/control_api_key",
                         "RW": False,
                     },
                     {
@@ -636,12 +630,6 @@ class TestRollbackContracts(unittest.TestCase):
                     "RW": True,
                     "Mode": "rw",
                 },
-                {
-                    "Source": "/var/lib/asrsub/runtime-secrets/control_key",
-                    "Destination": "/run/secrets/control_key",
-                    "RW": False,
-                    "Propagation": "rprivate",
-                },
             ]
             preflight = {
                 "active_image": VALID_IMAGE,
@@ -663,11 +651,6 @@ class TestRollbackContracts(unittest.TestCase):
                         "source": "/var/lib/asrsub/config",
                         "destination": "/home/user/.config/asr-pipeline",
                         "rw": True,
-                    },
-                    {
-                        "source": "/var/lib/asrsub/runtime-secrets/control_key",
-                        "destination": "/run/secrets/control_key",
-                        "rw": False,
                     },
                 ],
             )

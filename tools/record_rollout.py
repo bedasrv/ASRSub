@@ -49,15 +49,6 @@ PRODUCTION_BUNDLE_RECEIPT = PRODUCTION_EVIDENCE_ROOT / "runtime-bundle-install.j
 PRODUCTION_STATEFS_RECEIPT = PRODUCTION_EVIDENCE_ROOT / "statefs-provision" / "statefs-provision-receipt.json"
 PRODUCTION_BUNDLE_MANIFEST = Path("/var/lib/asrsub/deploy-state/bundle-manifest.json")
 PRODUCTION_APPROVAL = Path("/var/lib/asrsub/deploy-state/approval.json")
-PRODUCTION_TRUST_ROOT = Path("/var/lib/asrsub/deploy-state/trust")
-PRODUCTION_TRUST_UID = 0
-PRODUCTION_TRUST_GID = 0
-PRODUCTION_TRUST_FILES = {
-    "approval.sig": 0o600,
-    "approval-key.pub": 0o644,
-    "bundle-manifest.sig": 0o600,
-    "bundle-signing-key.pub": 0o644,
-}
 ALLOWED_STATEFS = frozenset({"ext4", "xfs", "btrfs", "zfs"})
 REQUIRED_CGROUP_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 EXPECTED_RUNTIME_MEMBERS = frozenset(
@@ -320,13 +311,13 @@ def _manifest_value(
     *,
     expected_hash: str,
     release_sha: str,
-    signing_mode: str = "production",
+    integrity_mode: str = "unsigned",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     value = read_json(require_absolute(path, name="bundle manifest"), name="bundle manifest")
     if not isinstance(value, dict) or value.get("schema") not in {"runtime-bundle-manifest-v1", "bundle-manifest-v1"}:
         raise AdapterError("bundle manifest schema is invalid")
-    if value.get("signing_mode") != signing_mode:
-        raise AdapterError(f"bundle manifest signing mode is not {signing_mode}")
+    if value.get("integrity_mode") != integrity_mode:
+        raise AdapterError(f"bundle manifest integrity mode is not {integrity_mode}")
     if value.get("release_sha") != release_sha:
         raise AdapterError("bundle manifest release SHA does not match")
     if hashlib.sha256(canonical_json(value)).hexdigest() != expected_hash:
@@ -423,7 +414,7 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
     if {item.get("target", item.get("path")) for item in runtime_members} != EXPECTED_INSTALLED_RUNTIME_MEMBERS:
         raise AdapterError("bundle receipt inventory does not match the closed runtime inventory")
     if {item.get("path") for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
-        raise AdapterError("bundle receipt systemd inventory does not match the signed inventory")
+        raise AdapterError("bundle receipt systemd inventory does not match the expected inventory")
     tree = _collect_tree(
         runtime_artifacts,
         label="installed runtime artifacts",
@@ -439,16 +430,16 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             raise AdapterError("installed runtime root metadata is not approved")
         if any(entry["uid"] != 1000 or entry["gid"] != 1000 for entry in tree["entries"]):
             raise AdapterError("installed runtime member ownership is not approved")
-    signed_runtime_members = runtime_members
+    validated_runtime_members = runtime_members
     if production and args.bundle_manifest is not None:
-        _, signed_manifest_members = _manifest_value(
+        _, manifest_members = _manifest_value(
             args.bundle_manifest,
             expected_hash=expected_hash,
             release_sha=release_sha,
-            signing_mode="production",
+            integrity_mode="unsigned",
         )
-        signed_runtime_members = [item for item in signed_manifest_members if item.get("install_root", "runtime") == "runtime"]
-    expected_by_path = {item.get("target", item.get("path")): item for item in signed_runtime_members}
+        validated_runtime_members = [item for item in manifest_members if item.get("install_root", "runtime") == "runtime"]
+    expected_by_path = {item.get("target", item.get("path")): item for item in validated_runtime_members}
     for entry in tree["entries"]:
         expected = expected_by_path.get(entry["path"])
         if expected is None:
@@ -465,7 +456,7 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             args.bundle_manifest,
             expected_hash=expected_hash,
             release_sha=release_sha,
-            signing_mode="production" if production else "test-seam",
+            integrity_mode="unsigned",
         )
 
         def member_key(item: dict[str, Any]) -> tuple[str, str, int, str]:
@@ -487,7 +478,7 @@ def _bundle_evidence(args: argparse.Namespace, runtime_artifacts: Path, expected
             return path, install_root, mode_value, digest
 
         if sorted(member_key(item) for item in manifest_members) != sorted(member_key(item) for item in members):
-            raise AdapterError("installed bundle receipt members do not match the signed manifest")
+            raise AdapterError("installed bundle receipt members do not match the validated manifest")
     tree["bundle_sha256"] = expected_hash
     tree["source_receipt"] = os.fspath(args.bundle_receipt)
     tree["systemd_members"] = systemd_members
@@ -528,21 +519,21 @@ def _systemd_evidence(
         if expected_members is not None:
             for member in expected_members:
                 if not isinstance(member, dict):
-                    raise AdapterError("signed systemd member is invalid")
+                    raise AdapterError("validated systemd member is invalid")
                 raw_path = member.get("path")
                 target = member.get("target")
                 if not isinstance(target, str):
                     if not isinstance(raw_path, str) or not raw_path.startswith("systemd/"):
-                        raise AdapterError("signed systemd member path is invalid")
+                        raise AdapterError("validated systemd member path is invalid")
                     target = raw_path.removeprefix("systemd/")
                 entry = observed_by_path.get(target)
                 if entry is None or entry["sha256"] != member.get("sha256"):
-                    raise AdapterError(f"systemd artifact is not bound to the signed member: {target}")
+                    raise AdapterError(f"systemd artifact is not bound to the validated member: {target}")
                 raw_mode = member.get("mode")
                 try:
                     expected_mode = int(raw_mode, 8) if isinstance(raw_mode, str) else int(raw_mode)
                 except (TypeError, ValueError) as exc:
-                    raise AdapterError("signed systemd member mode is invalid") from exc
+                    raise AdapterError("validated systemd member mode is invalid") from exc
                 if expected_mode != entry["mode"]:
                     raise AdapterError(f"systemd artifact mode is not bound: {target}")
     return observed
@@ -760,8 +751,8 @@ def _approval_evidence(path: Path, *, release_sha: str, image_digest: str, bundl
     value = read_json(require_absolute(path, name="rollout approval"), name="rollout approval")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
         raise AdapterError("rollout approval has an unsupported schema")
-    if value.get("signing_mode") != "production":
-        raise AdapterError("rollout approval signing mode is not production")
+    if value.get("integrity_mode") != "unsigned":
+        raise AdapterError("rollout approval integrity mode is not unsigned")
     if value.get("release_sha") != release_sha or value.get("bundle_sha256") != bundle_sha:
         raise AdapterError("rollout approval release or bundle binding does not match")
     if value.get("image_digest") != image_digest.rsplit(":", 1)[-1]:
@@ -771,38 +762,16 @@ def _approval_evidence(path: Path, *, release_sha: str, image_digest: str, bundl
     generation = value.get("generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation <= 0:
         raise AdapterError("rollout approval generation is invalid")
-    return {"schema": "approval-v1", "signing_mode": "production", "generation": value.get("generation"), "release_sha": release_sha, "bundle_sha256": bundle_sha, "image_ref": image_digest, "image_digest": image_digest.rsplit(":", 1)[-1], "approved_docker_socket": "default", "approved_state_root": os.fspath(PRODUCTION_STATE_ROOT)}
+    return {"schema": "approval-v1", "integrity_mode": "unsigned", "generation": value.get("generation"), "release_sha": release_sha, "bundle_sha256": bundle_sha, "image_ref": image_digest, "image_digest": image_digest.rsplit(":", 1)[-1], "approved_docker_socket": "default", "approved_state_root": os.fspath(PRODUCTION_STATE_ROOT)}
 
 
-def _trust_evidence() -> dict[str, Any]:
-    ensure_directory_metadata(
-        PRODUCTION_TRUST_ROOT,
-        mode=0o700,
-        uid=PRODUCTION_TRUST_UID,
-        gid=PRODUCTION_TRUST_GID,
-        name="production trust directory",
-    )
-    try:
-        names = {entry.name for entry in PRODUCTION_TRUST_ROOT.iterdir()}
-    except OSError as exc:
-        raise AdapterError("cannot enumerate production trust directory") from exc
-    if names != set(PRODUCTION_TRUST_FILES):
-        raise AdapterError("production trust directory inventory is not closed")
-    entries = []
-    for name, mode in sorted(PRODUCTION_TRUST_FILES.items()):
-        path = PRODUCTION_TRUST_ROOT / name
-        ensure_regular_file(path, mode=mode, uid=PRODUCTION_TRUST_UID, gid=PRODUCTION_TRUST_GID, name=f"production trust artifact {name}")
-        entries.append({"path": name, "mode": mode, "uid": PRODUCTION_TRUST_UID, "gid": PRODUCTION_TRUST_GID, "sha256": sha256_file(path, name=f"production trust artifact {name}")})
-    return {"root": os.fspath(PRODUCTION_TRUST_ROOT), "mode": 0o700, "uid": PRODUCTION_TRUST_UID, "gid": PRODUCTION_TRUST_GID, "entries": entries}
-
-
-def _require_signed_preflight(*, release_sha: str, image_digest: str) -> None:
+def _require_preflight(*, release_sha: str, image_digest: str) -> None:
     try:
         from production_entrypoint import preflight  # type: ignore
 
         approved = preflight()
     except (AdapterError, ImportError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AdapterError("production rollout requires a successful signed preflight") from exc
+        raise AdapterError("production rollout requires a successful preflight") from exc
     if not isinstance(approved, dict) or approved.get("release_sha") != release_sha or approved.get("image_digest") != image_digest:
         raise AdapterError("production rollout authorization does not match the observed release")
 
@@ -848,7 +817,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             raise AdapterError("production approval path is not fixed")
         if require_absolute(args.output, name="rollout receipt output") != PRODUCTION_ROLLOUT_OUTPUT:
             raise AdapterError("production rollout output path is not fixed")
-        _require_signed_preflight(release_sha=release_sha, image_digest=image_digest)
+        _require_preflight(release_sha=release_sha, image_digest=image_digest)
     if args.collect_transaction_cgroup or args.collect_target_evidence:
         raise AdapterError("unused evidence collection flags are not accepted")
 
@@ -867,10 +836,8 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     health = _health_evidence(args.health_evidence, production=not test_seam)
     process = _process_evidence(args.process_pid, production=not test_seam, cgroup_root=require_absolute(args.cgroup_root, name="cgroup root"))
     approval = None
-    trust = None
     if not test_seam:
         approval = _approval_evidence(args.approval, release_sha=release_sha, image_digest=image_digest, bundle_sha=bundle_sha, production=True)
-        trust = _trust_evidence()
 
     receipt = {
         "schema": "rollout-receipt-v1",
@@ -890,7 +857,6 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             "cgroup": cgroup,
             "health": health,
             "process": process,
-            "trust": trust,
         },
         "evidence_paths": [
             os.fspath(path)

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::{FormRejection, QueryRejection};
 use axum::extract::{Form, Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use serde_json::Value;
 
@@ -15,8 +15,6 @@ use crate::state;
 use super::data::{self, LibQuery};
 use super::pages;
 
-pub(crate) const UNAUTH_MSG: &str =
-    "Wrong or missing control key. Enter it in the header and click Unlock, then retry.";
 const LIB_QUERY_MSG: &str = "Library filters could not be decoded.";
 
 fn redirect(location: String) -> Response {
@@ -38,15 +36,8 @@ fn library_location(query: &LibQuery) -> String {
 
 pub(crate) async fn h_config_save(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     form: Result<Form<HashMap<String, String>>, FormRejection>,
 ) -> Response {
-    if !crate::api::check_token(&s.cfg, &headers) {
-        return html_error(
-            StatusCode::UNAUTHORIZED,
-            pages::settings_page(&s.cfg, Some((false, UNAUTH_MSG.to_string()))),
-        );
-    }
     let Form(form) = match form {
         Ok(form) => form,
         Err(rejection) => {
@@ -107,15 +98,8 @@ pub(crate) async fn h_config_save(
 
 pub(crate) async fn h_control(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(action): Path<String>,
 ) -> Response {
-    if !crate::api::check_token(&s.cfg, &headers) {
-        return html_error(
-            StatusCode::UNAUTHORIZED,
-            pages::status_page(&s, Some((UNAUTH_MSG, true))).await,
-        );
-    }
     match action.as_str() {
         "pause" => s.paused.store(true, Ordering::Relaxed),
         "resume" => {
@@ -139,20 +123,9 @@ pub(crate) async fn h_control(
 
 pub(crate) async fn h_episode_action(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path((id, action)): Path<(String, String)>,
     query: Result<Query<LibQuery>, QueryRejection>,
 ) -> Response {
-    if !crate::api::check_token(&s.cfg, &headers) {
-        let query = match query {
-            Ok(Query(query)) => query,
-            Err(_) => LibQuery::default(),
-        };
-        return html_error(
-            StatusCode::UNAUTHORIZED,
-            pages::library_page(&s, &query, Some((UNAUTH_MSG, true))).await,
-        );
-    }
     let Query(query) = match query {
         Ok(query) => query,
         Err(rejection) => {

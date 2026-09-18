@@ -55,13 +55,10 @@ class TestComposeImmutableRelease(unittest.TestCase):
             if s.startswith("image:"):
                 self.assertRegex(s, r"image:\s*\$\{ASRSUB_IMAGE:\?", msg=f"image line must be fail-closed: {s!r}")
 
-    def test_compose_preserves_secrets(self):
-        self.assertIn("control_api_key", self.compose, msg="compose must preserve control_api_key secret")
-        self.assertIn("/run/secrets/control_api_key", self.compose, msg="compose must preserve secret mount path")
-        self.assertIn("CONTROL_API_KEY_FILE", self.compose, msg="compose must preserve CONTROL_API_KEY_FILE env")
-        # secrets block present
-        self.assertRegex(self.compose, r"(?m)^secrets:\s*$")
-        self.assertIn("CONTROL_API_KEY_FILE_HOST", self.compose)
+    def test_compose_preserves_discord_secret_without_extra_secret(self):
+        self.assertIn("discord_webhook", self.compose)
+        self.assertIn("/run/secrets/discord_webhook", self.compose)
+        self.assertEqual(self.compose.count("/run/secrets/"), 1)
 
     def test_compose_preserves_all_mounts_and_state(self):
         self.assertIn("/var/lib/asrsub/state", self.compose)
@@ -116,9 +113,8 @@ class TestBuildReleaseMetadata(unittest.TestCase):
         self.assertRegex(self.build, r"\.release\.env|release\.env|release\.json", msg="build.sh must emit a release descriptor/env file")
         self.assertIn("ASRSUB_IMAGE", self.build, msg="build.sh must emit ASRSUB_IMAGE in descriptor")
         # Descriptor must not contain secrets.
-        # Ensure build.sh does not write CONTROL_API_KEY into descriptor.
-        # Check that descriptor writes are limited to ASRSUB_IMAGE/GIT_SHA etc.
-        for secret in ("CONTROL_API_KEY", "BAZARR_API_KEY", "SONARR_API_KEY"):
+        # Provider credentials must not be emitted into the release descriptor.
+        for secret in ("BAZARR_API_KEY", "SONARR_API_KEY"):
             # Allow comments mentioning secrets, but not writing them into descriptor.
             # Fail if build.sh writes secret into release file.
             self.assertNotRegex(self.build, rf"release.*{secret}|{secret}.*release", msg=f"build.sh must not emit secret {secret} into release descriptor")
@@ -305,12 +301,10 @@ class TestServerRenderedDashboard(unittest.TestCase):
         self.assertIn("StatusCode::SEE_OTHER", self.actions)
         self.assertIn('header::LOCATION', self.actions)
         self.assertIn("Html(", self.actions)
-        self.assertIn("StatusCode::UNAUTHORIZED", self.actions)
         self.assertIn("StatusCode::BAD_REQUEST", self.actions)
         self.assertIn("StatusCode::NOT_FOUND", self.actions)
         self.assertIn("StatusCode::INTERNAL_SERVER_ERROR", self.actions)
         self.assertIn('method="post"', self.pages)
-        self.assertIn('data-authenticated', self.pages)
 
     def test_api2_surface_stays_on_the_existing_router(self):
         api = (REPO / "src" / "api.rs").read_text(encoding="utf-8")
@@ -333,20 +327,15 @@ class TestServerRenderedDashboard(unittest.TestCase):
             self.assertIn(route, api, msg=route)
         self.assertIn(".merge(crate::web::routes())", api)
 
-    def test_authenticated_asset_uses_session_storage_and_urlencoded_forms(self):
+    def test_asset_uses_plain_urlencoded_forms(self):
         for needle in (
-            "sessionStorage",
-            "X-API-Key",
             "application/x-www-form-urlencoded",
             "document.open",
             ".disabled = true",
         ):
             self.assertIn(needle, self.app_js, msg=needle)
         self.assertNotIn("FormData(", self.app_js)
-        # The key input is intentionally not a successful-control field: the
-        # token can only travel in the header, never in the form body.
-        self.assertNotIn('name="control-key"', self.pages)
-        self.assertNotIn("control-key", self.data)
+        self.assertNotIn("storage", self.app_js.lower())
 
     def test_settings_generated_from_rust_schema(self):
         # The field schema is the single source of truth, shared with the daemon.
@@ -400,9 +389,9 @@ class TestControlClientContract(unittest.TestCase):
         self.assertNotIn('"/config"', self.pctl.replace('get("/config")', ""))
         self.assertNotIn("config unset", self.pctl)
 
-    def test_does_not_read_control_key_from_pipeline_env(self):
-        self.assertNotIn("CONTROL_API_KEY in pipeline.env", self.pctl)
-        self.assertIn("/run/secrets/control_api_key", self.pctl)
+    def test_cli_sends_plain_requests(self):
+        self.assertNotIn("read_token", self.pctl)
+        self.assertNotIn("secret_candidates", self.pctl)
 
 
 # Additions appended by the review-fix pass

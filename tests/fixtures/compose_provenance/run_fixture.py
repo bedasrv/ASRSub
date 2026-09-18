@@ -20,7 +20,7 @@ def rendered():
         output=Path(raw)/"compose-new.yaml"; digest="ghcr.io/bedasrv/asrsub@sha256:"+"a"*64
         result=subprocess.check_output(["python3","tools/compose_provenance.py","--template","docker-compose.yml","--image",digest,"--output",str(output)],text=True)
         projection=json.loads(result); data=output.read_bytes()
-        assert b"${" not in data and projection["mount_count"]==10
+        assert b"${" not in data and projection["mount_count"]==9
         assert projection["compose_sha256"]==hashlib.sha256(data).hexdigest()
 def main():
  p=argparse.ArgumentParser();p.add_argument("selector");a=p.parse_args();run_selector(a.selector,{"test_digest_only_provenance":digest,"test_rendered_compose_hash":rendered})

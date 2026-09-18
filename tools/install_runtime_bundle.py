@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and atomically install an authenticated ASRSub runtime bundle."""
+"""Validate and atomically install an ASRSub runtime bundle."""
 from __future__ import annotations
 
 import argparse
@@ -36,22 +36,17 @@ from production_adapter_common import (
 )
 
 
-PRODUCTION_OPENSSL = Path("/usr/bin/openssl")
 PRODUCTION_BUNDLE_ROOT = Path("/var/lib/asrsub/deploy-state/bundle")
 PRODUCTION_BUNDLE_MANIFEST = Path("/var/lib/asrsub/deploy-state/bundle-manifest.json")
 PRODUCTION_APPROVAL = Path("/var/lib/asrsub/deploy-state/approval.json")
 PRODUCTION_TARGET_ROOT = Path("/usr/local/libexec/asrsub")
 PRODUCTION_SYSTEMD_ROOT = Path("/etc/systemd/system")
 PRODUCTION_INSTALL_RECEIPT = Path("/var/lib/asrsub/deploy-state/evidence/runtime-bundle-install.json")
-PRODUCTION_TRUST_ROOT = Path("/var/lib/asrsub/deploy-state/trust")
-DEFAULT_APPROVAL_SIGNATURE = PRODUCTION_TRUST_ROOT / "approval.sig"
-DEFAULT_APPROVAL_PUBLIC_KEY = PRODUCTION_TRUST_ROOT / "approval-key.pub"
-DEFAULT_BUNDLE_SIGNATURE = PRODUCTION_TRUST_ROOT / "bundle-manifest.sig"
-DEFAULT_BUNDLE_PUBLIC_KEY = PRODUCTION_TRUST_ROOT / "bundle-signing-key.pub"
 
-# Nine operational files remain the closed runtime inventory.  The signed
-# bundle also carries the fixed production adapters and rendered Compose file;
-# systemd descriptors are signed members installed outside the runtime root.
+# Nine operational files remain the closed runtime inventory.  The integrity
+# manifest also carries the fixed production adapters and rendered Compose
+# file; systemd descriptors are validated members installed outside the runtime
+# root.
 CLOSED_RUNTIME_MEMBERS = frozenset(
     {
         "asrsub",
@@ -149,15 +144,15 @@ def _load_manifest(
     manifest_path: Path,
     release_sha: str,
     *,
-    expected_signing_mode: str = "production",
+    expected_integrity_mode: str = "unsigned",
 ) -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     manifest_path = require_absolute(manifest_path, name="bundle manifest")
     ensure_no_symlink(manifest_path, name="bundle manifest", allow_missing=False)
     manifest = read_json(manifest_path, name="bundle manifest")
     if not isinstance(manifest, dict) or manifest.get("schema") not in _ALLOWED_MANIFEST_SCHEMAS:
         raise AdapterError("bundle manifest has an unsupported schema")
-    if manifest.get("signing_mode") != expected_signing_mode:
-        raise AdapterError(f"bundle manifest signing mode must be {expected_signing_mode}")
+    if manifest.get("integrity_mode") != expected_integrity_mode:
+        raise AdapterError(f"bundle manifest integrity mode must be {expected_integrity_mode}")
     if manifest.get("release_sha") != release_sha:
         raise AdapterError("bundle manifest release SHA does not match the caller")
     members = manifest.get("members")
@@ -287,7 +282,7 @@ def _validate_systemd_contract(
         item["path"] for item in members if item.get("install_root") == "systemd"
     }
     if required != EXPECTED_SYSTEMD_MEMBERS:
-        raise AdapterError("signed systemd inventory is incomplete")
+        raise AdapterError("systemd inventory is incomplete")
     for relative in sorted(required):
         target = root / relative.removeprefix("systemd/")
         ensure_no_symlink(target, name="systemd contract", allow_missing=False)
@@ -322,12 +317,12 @@ def _validate_installed_systemd(root: Path, members: list[dict[str, Any]], *, ui
             raise AdapterError(f"installed systemd member hash mismatch: {relative}")
 
 
-def _read_approval(path: Path, *, expected_signing_mode: str = "production") -> dict[str, Any]:
-    value = read_json(require_absolute(path, name="authenticated approval"), name="authenticated approval")
+def _read_approval(path: Path) -> dict[str, Any]:
+    value = read_json(require_absolute(path, name="approval"), name="approval")
     if not isinstance(value, dict) or value.get("schema") != "approval-v1":
-        raise AdapterError("authenticated approval has an unsupported schema")
-    if value.get("signing_mode") != expected_signing_mode:
-        raise AdapterError(f"authenticated approval signing mode must be {expected_signing_mode}")
+        raise AdapterError("approval has an unsupported schema")
+    if value.get("integrity_mode") != "unsigned":
+        raise AdapterError("approval integrity mode must be unsigned")
     return value
 
 
@@ -349,34 +344,33 @@ def _validate_approval(
     generation: int | None,
     production: bool,
 ) -> None:
-    expected_signing_mode = "production" if production else "test-seam"
-    if approval.get("signing_mode") != expected_signing_mode:
-        raise AdapterError(f"authenticated approval signing mode must be {expected_signing_mode}")
+    if approval.get("integrity_mode") != "unsigned":
+        raise AdapterError("approval integrity mode must be unsigned")
     if approval.get("release_sha") != release_sha:
-        raise AdapterError("authenticated approval release SHA does not match the caller")
+        raise AdapterError("approval release SHA does not match the caller")
     if approval.get("bundle_sha256") != manifest_hash:
-        raise AdapterError("authenticated approval bundle hash does not match the manifest")
+        raise AdapterError("approval bundle hash does not match the manifest")
     if _bare_digest(approval.get("image_digest")) != image_digest:
-        raise AdapterError("authenticated approval image digest does not match the caller")
+        raise AdapterError("approval image digest does not match the caller")
     if approval.get("compose_sha256") != compose_sha256:
-        raise AdapterError("authenticated approval Compose hash does not match the caller")
+        raise AdapterError("approval Compose hash does not match the caller")
     if approval.get("compose_template_sha256") != compose_template_sha256:
-        raise AdapterError("authenticated approval template hash does not match the caller")
+        raise AdapterError("approval template hash does not match the caller")
     approved_generation = approval.get("generation")
     if not isinstance(approved_generation, int) or isinstance(approved_generation, bool) or approved_generation <= 0:
-        raise AdapterError("authenticated approval generation is invalid")
+        raise AdapterError("approval generation is invalid")
     if generation is not None and approved_generation != generation:
-        raise AdapterError("authenticated approval generation does not match the caller")
+        raise AdapterError("approval generation does not match the caller")
     if approval.get("approved_docker_socket") != "default":
-        raise AdapterError("authenticated approval Docker context is not default")
+        raise AdapterError("approval Docker context is not default")
     if approval.get("approved_state_root") != state_root:
-        raise AdapterError("authenticated approval state root does not match the fixed root")
+        raise AdapterError("approval state root does not match the fixed root")
     if production and state_root != "/var/lib/asrsub/state":
         raise AdapterError("production state root is not fixed")
     if production and set(approval).difference(
         {
             "schema",
-            "signing_mode",
+            "integrity_mode",
             "generation",
             "release_sha",
             "bundle_sha256",
@@ -389,47 +383,7 @@ def _validate_approval(
             "created_epoch_ns",
         }
     ):
-        raise AdapterError("authenticated approval contains an unapproved binding")
-
-
-def _require_fixed_path(path: Path, expected: Path, *, name: str) -> Path:
-    path = require_absolute(path, name=name)
-    if path != expected:
-        raise AdapterError(f"{name} must use the fixed protected path")
-    ensure_no_symlink(path, name=name, allow_missing=False)
-    if not path.is_file():
-        raise AdapterError(f"{name} is missing")
-    return path
-
-
-def _verify_detached(
-    *,
-    verifier: Path,
-    signature: Path,
-    public_key: Path,
-    data: Path,
-    label: str,
-    test_seam: bool,
-) -> None:
-    ensure_no_symlink(signature, name=f"{label} signature", allow_missing=False)
-    ensure_no_symlink(public_key, name=f"{label} trust anchor", allow_missing=False)
-    if not signature.is_file() or not public_key.is_file():
-        raise AdapterError(f"{label} detached signature material is missing")
-    if test_seam:
-        run_argv(
-            [verifier, "--bundle-root", data.parent, "--manifest", data, "--approval", data, "--release-sha", "0" * 40],
-            cwd=data.parent,
-            secret_values=environment_secret_values(),
-        )
-        return
-    if verifier != PRODUCTION_OPENSSL:
-        raise AdapterError("production detached verification must use the fixed /usr/bin/openssl")
-    run_argv(
-        [verifier, "dgst", "-sha256", "-verify", public_key, "-signature", signature, data],
-        cwd=data.parent,
-        secret_values=environment_secret_values(),
-        env=production_command_environment(),
-    )
+        raise AdapterError("approval contains an unapproved binding")
 
 
 def _copy_verified(source: Path, destination: Path, *, mode: int, uid: int, gid: int) -> None:
@@ -543,7 +497,7 @@ def _install_systemd_stage(
     root = ensure_existing_directory(root, name="systemd root")
     systemd_members = [item for item in members if item.get("install_root") == "systemd"]
     if {item["path"] for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
-        raise AdapterError("signed systemd inventory is incomplete")
+        raise AdapterError("systemd inventory is incomplete")
     installed: list[tuple[Path, Path | None]] = []
     created_directories: list[Path] = []
     try:
@@ -714,7 +668,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     required = {
         "bundle root": args.bundle_root,
         "bundle manifest": args.manifest,
-        "authenticated approval": args.approval,
+        "approval": args.approval,
         "release SHA": args.release_sha,
         "target root": args.target_root,
         "output": args.output,
@@ -724,8 +678,6 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             raise AdapterError(f"{'test-seam' if test_seam else 'production'} mode requires {label}")
     if args.dry_run and not test_seam:
         raise AdapterError("dry-run is non-production and cannot be used for production evidence")
-    if not test_seam and args.verify_command is not None and require_absolute(args.verify_command, name="verification command") != PRODUCTION_OPENSSL:
-        raise AdapterError("production verification command must use the fixed /usr/bin/openssl")
     release_sha = require_hex(args.release_sha, name="release SHA", length=40)
     bundle_root_arg = require_absolute(args.bundle_root, name="bundle root")
     target = require_absolute(args.target_root, name="bundle target")
@@ -737,7 +689,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             raise AdapterError("production bundle root must use the fixed approved path")
         if manifest_path != PRODUCTION_BUNDLE_MANIFEST:
             raise AdapterError("production bundle manifest must use the fixed approved path")
-        if require_absolute(args.approval, name="authenticated approval") != PRODUCTION_APPROVAL:
+        if require_absolute(args.approval, name="approval") != PRODUCTION_APPROVAL:
             raise AdapterError("production approval must use the fixed approved path")
         if target != PRODUCTION_TARGET_ROOT:
             raise AdapterError("production bundle target must use the fixed runtime path")
@@ -757,7 +709,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         bundle_root,
         manifest_path,
         release_sha,
-        expected_signing_mode="test-seam" if test_seam else "production",
+        expected_integrity_mode="unsigned",
     )
     runtime_members = [item for item in members if item.get("install_root", "runtime") == "runtime"]
     systemd_members = [item for item in members if item.get("install_root") == "systemd"]
@@ -773,7 +725,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         if {item["target"] for item in runtime_members} != EXPECTED_INSTALLED_RUNTIME_MEMBERS:
             raise AdapterError("runtime bundle manifest does not match the closed inventory")
         if {item["path"] for item in systemd_members} != EXPECTED_SYSTEMD_MEMBERS:
-            raise AdapterError("systemd bundle manifest does not match the signed inventory")
+            raise AdapterError("systemd bundle manifest does not match the expected inventory")
         for item in runtime_members:
             if item["mode"] != RUNTIME_MEMBER_MODES[item["target"]]:
                 raise AdapterError(f"runtime bundle executable mode mismatch: {item['target']}")
@@ -783,7 +735,6 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
     _validate_bundle_tree(bundle_root, manifest_path, members, exact_inventory=not test_seam)
 
     if not test_seam:
-        verifier = PRODUCTION_OPENSSL
         image_digest = _bare_digest(args.image_digest)
         compose_sha256 = require_hex(args.compose_sha256, name="rendered Compose SHA256", length=64)
         compose_template_sha256 = require_hex(args.compose_template_sha256, name="Compose template SHA256", length=64)
@@ -791,7 +742,7 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
         generation = args.generation
         if generation is not None and generation <= 0:
             raise AdapterError("approval generation must be positive")
-        approval = _read_approval(args.approval, expected_signing_mode="production")
+        approval = _read_approval(args.approval)
         _validate_approval(
             approval,
             release_sha=release_sha,
@@ -803,14 +754,9 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             generation=generation,
             production=True,
         )
-        approval_signature = _require_fixed_path(args.approval_signature or DEFAULT_APPROVAL_SIGNATURE, DEFAULT_APPROVAL_SIGNATURE, name="approval signature")
-        approval_key = _require_fixed_path(args.approval_public_key or DEFAULT_APPROVAL_PUBLIC_KEY, DEFAULT_APPROVAL_PUBLIC_KEY, name="approval trust anchor")
-        bundle_signature = _require_fixed_path(args.bundle_signature or DEFAULT_BUNDLE_SIGNATURE, DEFAULT_BUNDLE_SIGNATURE, name="bundle signature")
-        bundle_key = _require_fixed_path(args.bundle_public_key or DEFAULT_BUNDLE_PUBLIC_KEY, DEFAULT_BUNDLE_PUBLIC_KEY, name="bundle trust anchor")
-        _verify_detached(verifier=verifier, signature=bundle_signature, public_key=bundle_key, data=manifest_path, label="bundle", test_seam=False)
-        _verify_detached(verifier=verifier, signature=approval_signature, public_key=approval_key, data=args.approval, label="approval", test_seam=False)
         approval_receipt = {
-            "verified": True,
+            "validated": True,
+            "integrity_mode": approval["integrity_mode"],
             "schema": approval["schema"],
             "generation": approval["generation"],
             "release_sha": release_sha,
@@ -820,24 +766,10 @@ def _production(args: argparse.Namespace, *, test_seam: bool) -> int:
             "compose_template_sha256": compose_template_sha256,
             "approved_docker_socket": "default",
             "approved_state_root": state_root,
-            "signature_algorithm": "openssl-dgst-sha256",
         }
     else:
-        verifier = args.verify_command
-        if verifier is None:
-            raise AdapterError("test-seam mode requires --verify-command")
-        verifier = require_absolute(verifier, name="verification command")
-        ensure_no_symlink(verifier, name="verification command", allow_missing=False)
-        if not verifier.is_file() or not os.access(verifier, os.X_OK):
-            raise AdapterError("verification command must be an executable regular file")
-        # Fixture/test-seam approval remains intentionally non-production.
-        _read_approval(args.approval, expected_signing_mode="test-seam")
-        verification = run_argv(
-            [verifier, "--bundle-root", bundle_root, "--manifest", manifest_path, "--approval", args.approval, "--release-sha", release_sha],
-            cwd=bundle_root,
-            secret_values=environment_secret_values(),
-        )
-        approval_receipt = {"verified": False, "test_seam": True, "verification_returncode": verification["returncode"]}
+        _read_approval(args.approval)
+        approval_receipt = {"validated": True, "integrity_mode": "unsigned", "test_seam": True}
 
     target_identity = None
     if not args.dry_run:
@@ -960,12 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-fixture", action="store_true")
     parser.add_argument("--bundle-root", "--bundle-dir", dest="bundle_root", type=Path)
     parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--approval", "--authenticated-handoff", dest="approval", type=Path)
-    parser.add_argument("--verify-command", "--verifier", dest="verify_command", type=Path)
-    parser.add_argument("--approval-signature", type=Path)
-    parser.add_argument("--approval-public-key", type=Path)
-    parser.add_argument("--bundle-signature", type=Path)
-    parser.add_argument("--bundle-public-key", type=Path)
+    parser.add_argument("--approval", type=Path)
     parser.add_argument("--release-sha")
     parser.add_argument("--image-digest")
     parser.add_argument("--compose-sha256", "--rendered-compose-sha256", dest="compose_sha256")

@@ -175,8 +175,6 @@ const ENV_ALLOWLIST: &[&str] = &[
     "CPS_MERGE_MAX_DUR_MS",
     "CPS_MERGE_MAX_GAP_MS",
     "WEBHOOK_PORT",
-    "CONTROL_API_KEY",
-    "CONTROL_API_KEY_FILE",
     "LADDER_MIN_CUES",
     "LADDER_MIN_CHARS",
     "LADDER_MIN_CJK",
@@ -282,7 +280,6 @@ pub struct Config {
     pub cps_merge_max_dur_ms: u32,
     pub cps_merge_max_gap_ms: u32,
     pub webhook_port: u16,
-    pub control_api_key_file: PathBuf,
     pub ladder_min_cues: usize,
     pub ladder_min_chars: usize,
     pub ladder_min_cjk: f64,
@@ -1084,7 +1081,6 @@ impl Config {
             cps_merge_max_dur_ms: parse_int(&raw, "CPS_MERGE_MAX_DUR_MS", 7000),
             cps_merge_max_gap_ms: parse_int(&raw, "CPS_MERGE_MAX_GAP_MS", 1000),
             webhook_port: parse_int(&raw, "WEBHOOK_PORT", 8085),
-            control_api_key_file: get_path("CONTROL_API_KEY_FILE", "/run/secrets/control_api_key"),
             ladder_min_cues: parse_usize("LADDER_MIN_CUES", 40),
             ladder_min_chars: parse_usize("LADDER_MIN_CHARS", 1500),
             ladder_min_cjk: parse_float(&raw, "LADDER_MIN_CJK", 0.6),
@@ -1137,37 +1133,6 @@ impl Config {
                 (k.clone(), shown)
             })
             .collect()
-    }
-
-    pub fn control_key(&self) -> String {
-        for cand in [
-            std::env::var("CONTROL_API_KEY_FILE")
-                .ok()
-                .map(PathBuf::from),
-            Some(self.control_api_key_file.clone()),
-            Some(PathBuf::from("/run/secrets/control_api_key")),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Ok(v) = std::fs::read_to_string(&cand) {
-                let v = v.trim().to_string();
-                if !v.is_empty() {
-                    return v;
-                }
-            }
-        }
-        // The *process environment* only. `pipeline.env` and
-        // `config.overrides.json` live in a mounted directory that anybody with
-        // host access can edit, and a key read from there would keep
-        // authenticating a deployment that deliberately removed it from the
-        // environment — the documented contract is that the control key never
-        // comes from `pipeline.env`. Candidate *files* are tried first, so an
-        // empty (or whitespace-only) variable contributes no key and denies
-        // control access (`check_token` refuses an empty key) only when no key
-        // file exists: a key file outranks this variable, and disabling the
-        // control API takes removing the file as well.
-        env_str("CONTROL_API_KEY").unwrap_or_default()
     }
 }
 
@@ -2859,92 +2824,6 @@ mod tests {
         assert_eq!(env_str("ASRSUB_TEST_ENV_STR").as_deref(), Some("value"));
         std::env::remove_var("ASRSUB_TEST_ENV_STR");
         assert_eq!(env_str("ASRSUB_TEST_ENV_STR"), None);
-    }
-
-    /// `pipeline.env` and `config.overrides.json` live in a mounted directory;
-    /// the control key is documented as never coming from them, so a key written
-    /// into a config file must not authenticate whatever else the host provides.
-    ///
-    /// The variable is the *last* candidate, ahead of it only files — so on a host
-    /// that ships `/run/secrets/control_api_key` the variable cannot be observed
-    /// at all, and this test asserts the file-first precedence there instead of
-    /// returning silently (a passing test whose body never ran is not evidence;
-    /// `cargo test` hides output unless `--show-output` is passed). Which branch
-    /// ran is visible in the message on failure and with `--show-output`.
-    #[test]
-    fn control_key_never_comes_from_a_config_file() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("pipeline.env"),
-            "CONTROL_API_KEY=file-layer-key\n",
-        )
-        .unwrap();
-        let prev_dir = std::env::var_os("ASRSUB_CONFIG_DIR");
-        let prev_file = std::env::var_os("CONTROL_API_KEY_FILE");
-        let prev_key = std::env::var_os("CONTROL_API_KEY");
-        std::env::set_var("ASRSUB_CONFIG_DIR", dir.path());
-        std::env::remove_var("CONTROL_API_KEY_FILE");
-        std::env::set_var("CONTROL_API_KEY", "");
-        let cfg = Config::load().unwrap();
-        // Host-independent half: the config-file layer never supplies the key.
-        assert_ne!(
-            cfg.control_key(),
-            "file-layer-key",
-            "a key in pipeline.env must not authenticate control requests"
-        );
-        // Branch on the code's own predicate — a readable, non-empty file — not on
-        // `Path::exists`. Compose secrets are typically 0400 root-owned while
-        // `cargo test` runs as the invoking user, and a k8s `/run/secrets/<name>/`
-        // mount is a directory: `exists()` alone would take the file branch, find
-        // no key, and report a failure that is the harness's fault, not the code's.
-        let shipped_file_key = std::fs::read_to_string("/run/secrets/control_api_key")
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
-        if !shipped_file_key.is_empty() {
-            assert_eq!(
-                cfg.control_key(),
-                shipped_file_key,
-                "a host that ships the secret file must authenticate from the file"
-            );
-            std::env::set_var("CONTROL_API_KEY", "env-layer-key");
-            assert_ne!(
-                cfg.control_key(),
-                "env-layer-key",
-                "a key file outranks the environment variable"
-            );
-        } else {
-            // No key file anywhere: an empty variable contributes no key, and one
-            // holding only spaces is not a key anybody typed — `check_token`
-            // refuses an empty key, so control access is denied.
-            assert_eq!(
-                cfg.control_key(),
-                "",
-                "an empty variable with no key file must deny, not authenticate"
-            );
-            std::env::set_var("CONTROL_API_KEY", "   ");
-            assert_eq!(
-                cfg.control_key(),
-                "",
-                "a whitespace-only variable must deny, not authenticate"
-            );
-            std::env::set_var("CONTROL_API_KEY", "env-layer-key");
-            assert_eq!(cfg.control_key(), "env-layer-key");
-            // ... and a real value is trimmed before it is used.
-            std::env::set_var("CONTROL_API_KEY", " env-layer-key \n");
-            assert_eq!(cfg.control_key(), "env-layer-key");
-        }
-        match prev_key {
-            Some(v) => std::env::set_var("CONTROL_API_KEY", v),
-            None => std::env::remove_var("CONTROL_API_KEY"),
-        }
-        if let Some(v) = prev_file {
-            std::env::set_var("CONTROL_API_KEY_FILE", v);
-        }
-        match prev_dir {
-            Some(v) => std::env::set_var("ASRSUB_CONFIG_DIR", v),
-            None => std::env::remove_var("ASRSUB_CONFIG_DIR"),
-        }
     }
 
     #[test]

@@ -1,1 +1,1 @@
-{"schema":"bundle-manifest-v1","signing_mode":"fixture","release_sha":"0000000000000000000000000000000000000000","image_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","members":[]}
+{"schema":"bundle-manifest-v1","release_sha":"0000000000000000000000000000000000000000","image_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","members":[],"integrity_mode":"unsigned"}

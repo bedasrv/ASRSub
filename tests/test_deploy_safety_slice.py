@@ -51,7 +51,6 @@ class TestLegacyLayoutSafety(unittest.TestCase):
     def test_candidate_preserves_state_and_legacy_data_sources(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         for needle in (
-            "CONTROL_API_KEY_FILE: /run/secrets/control_api_key",
             "path: ${PROVIDER_KEYS_FILE:-/var/lib/asrsub/config/provider_keys.env}",
             "source: /var/lib/asrsub/config",
             "target: /home/user/.config/asr-pipeline",
@@ -61,8 +60,6 @@ class TestLegacyLayoutSafety(unittest.TestCase):
             "target: /var/lib/asrsub/state",
             "source: /var/lib/asrsub/runtime-secrets",
             "target: /run/secrets",
-            "source: /var/lib/asrsub/runtime-secrets/control_key",
-            "target: /run/secrets/control_api_key",
             "/var/lib/asrsub/runtime-secrets/discord_webhook",
             "/run/secrets/discord_webhook",
         ):
@@ -70,7 +67,7 @@ class TestLegacyLayoutSafety(unittest.TestCase):
         self.assertNotIn("source: /home/user/.config/asr-pipeline", text)
         self.assertNotIn("source: /home/user/.cache/asr-pipeline", text)
 
-    def test_expected_mount_contract_preserves_state_and_control_interface(self):
+    def test_expected_mount_contract_preserves_state_and_discord_interface(self):
         remote = load_remote_namespace()
         expected = set(remote["expected_mounts"]({"nas_media_prefix": "/mnt/nas/share/media"}))
         self.assertEqual(
@@ -82,11 +79,6 @@ class TestLegacyLayoutSafety(unittest.TestCase):
                 ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                 ("/mnt/nas/share/media", "/media", False),
                 ("/var/lib/asrsub/runtime-secrets", "/run/secrets", False),
-                (
-                    "/var/lib/asrsub/runtime-secrets/control_key",
-                    "/run/secrets/control_api_key",
-                    False,
-                ),
             },
         )
 
@@ -101,11 +93,6 @@ class TestLegacyLayoutSafety(unittest.TestCase):
                     ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
                     ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                     ("/mnt/nas/share/media", "/media", False),
-                    (
-                        "/var/lib/asrsub/runtime-secrets/control_key",
-                        "/run/secrets/control_api_key",
-                        False,
-                    ),
                     (
                         "/var/lib/asrsub/runtime-secrets/discord_webhook",
                         "/run/secrets/discord_webhook",
@@ -147,11 +134,6 @@ class TestLegacyLayoutSafety(unittest.TestCase):
                     ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
                     ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                     ("/mnt/nas/share/media", "/media", False),
-                    (
-                        "/var/lib/asrsub/runtime-secrets/control_key",
-                        "/run/secrets/control_api_key",
-                        False,
-                    ),
                 )
             ]
         }
