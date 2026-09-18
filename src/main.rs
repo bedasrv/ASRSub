@@ -647,12 +647,6 @@ async fn daemon_loop(
         } else {
             consecutive_failures = 0;
         }
-        if consecutive_failures >= 5 {
-            tracing::error!("5 consecutive failing passes; sleeping 10 min");
-            sleep_or_wake(&app_state, 600).await;
-            consecutive_failures = 0;
-            continue;
-        }
         // The prompt pass that POST /run-once promises is delivered by its
         // `wake.notify_one()` (the sleep ends early and the loop runs
         // immediately). This flag is only the dashboard-visible indicator
@@ -668,6 +662,12 @@ async fn daemon_loop(
                     omitted_reports,
                 },
             );
+        }
+        if consecutive_failures >= 5 {
+            tracing::error!("5 consecutive failing passes; sleeping 10 min");
+            sleep_or_wake(&app_state, 600).await;
+            consecutive_failures = 0;
+            continue;
         }
         let nap = if stats.done > 0 { 30 } else { 120 };
         tracing::info!(
