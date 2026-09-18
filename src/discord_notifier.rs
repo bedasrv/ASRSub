@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Best-effort, in-memory daemon notification handoff.
 
 use std::sync::Arc;
@@ -20,11 +19,11 @@ pub(crate) enum NotifierWork {
     },
 }
 
-pub(crate) struct CoordinatorHandle {
+pub(crate) struct NotifierHandle {
     sender: mpsc::Sender<NotifierWork>,
 }
 
-impl CoordinatorHandle {
+impl NotifierHandle {
     pub(crate) fn try_send(&self, work: NotifierWork) -> Result<(), NotifierWork> {
         self.sender
             .try_send(work)
@@ -34,7 +33,7 @@ impl CoordinatorHandle {
 
 pub(crate) fn start_with_transport(
     transport: Arc<dyn DeliveryTransport>,
-) -> (CoordinatorHandle, tokio::task::JoinHandle<()>) {
+) -> (NotifierHandle, tokio::task::JoinHandle<()>) {
     let (sender, mut receiver) = mpsc::channel(NOTIFIER_QUEUE_CAPACITY);
     let join = tokio::spawn(async move {
         while let Some(NotifierWork::Pass {
@@ -68,7 +67,7 @@ pub(crate) fn start_with_transport(
             }
         }
     });
-    (CoordinatorHandle { sender }, join)
+    (NotifierHandle { sender }, join)
 }
 
 #[cfg(test)]
@@ -185,7 +184,7 @@ mod tests {
         }
     }
 
-    async fn finish(handle: super::CoordinatorHandle, join: tokio::task::JoinHandle<()>) {
+    async fn finish(handle: super::NotifierHandle, join: tokio::task::JoinHandle<()>) {
         drop(handle);
         join.await.unwrap();
     }

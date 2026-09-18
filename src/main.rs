@@ -567,7 +567,7 @@ async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
 
 async fn daemon_loop(
     providers_file: Option<PathBuf>,
-    notifier: Option<crate::feature_modules::discord_notifier::CoordinatorHandle>,
+    notifier: Option<crate::feature_modules::discord_notifier::NotifierHandle>,
 ) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
