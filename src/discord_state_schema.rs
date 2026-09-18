@@ -366,9 +366,6 @@ impl StateSnapshotBytes {
 pub(crate) struct StateSnapshot {
     state_generation: u64,
     state_hash: [u8; 32],
-    pending_count: usize,
-    outbox_count: usize,
-    blocked_count: usize,
     overflow_summary: OverflowSummaryV1,
     disabled: bool,
 }
@@ -377,9 +374,6 @@ impl StateSnapshot {
         Self {
             state_generation,
             state_hash,
-            pending_count: 0,
-            outbox_count: 0,
-            blocked_count: 0,
             overflow_summary: Default::default(),
             disabled: false,
         }
@@ -398,15 +392,6 @@ impl StateSnapshot {
     }
     pub(crate) fn state_hash(&self) -> [u8; 32] {
         self.state_hash
-    }
-    pub(crate) fn pending_count(&self) -> usize {
-        self.pending_count
-    }
-    pub(crate) fn outbox_count(&self) -> usize {
-        self.outbox_count
-    }
-    pub(crate) fn blocked_count(&self) -> usize {
-        self.blocked_count
     }
     pub(crate) fn overflow_summary(&self) -> &OverflowSummaryV1 {
         &self.overflow_summary
