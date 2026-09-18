@@ -543,16 +543,31 @@ async fn refine_cmd(
 
 /// Daemon: single-instance flock + control API + adaptive sleep loop.
 async fn daemon(providers_file: Option<PathBuf>) -> Result<()> {
-    daemon_with_store_factory(
-        providers_file,
-        crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed(),
+    let transport = crate::feature_modules::discord_config::read_optional_runtime_secret(
+        std::path::Path::new("/run/secrets/discord_webhook"),
     )
-    .await
+    .and_then(|secret| {
+        crate::feature_modules::discord_transport::ValidatedWebhookUrl::from_runtime_secret(&secret)
+            .ok()
+    })
+    .and_then(|url| crate::feature_modules::discord_transport::DiscordTransport::new(url).ok())
+    .map(|transport| {
+        Arc::new(transport) as Arc<dyn crate::feature_modules::discord_transport::DeliveryTransport>
+    });
+    let (notifier, _notifier_join) = match transport {
+        Some(transport) => {
+            let (handle, join) =
+                crate::feature_modules::discord_notifier::start_with_transport(transport);
+            (Some(handle), Some(join))
+        }
+        None => (None, None),
+    };
+    daemon_loop(providers_file, notifier).await
 }
 
 async fn daemon_loop(
     providers_file: Option<PathBuf>,
-    notifier: Option<crate::feature_modules::discord_coordinator::CoordinatorHandle>,
+    notifier: Option<crate::feature_modules::discord_notifier::CoordinatorHandle>,
 ) -> Result<()> {
     let (cfg, pool, http) = load_stack(providers_file).await?;
     // Single-instance guard (flock on state dir).
@@ -657,7 +672,7 @@ async fn daemon_loop(
         }
         if let Some(notifier) = notifier.as_ref() {
             let _ = notifier.try_send(
-                crate::feature_modules::discord_coordinator::NotifierWork::Pass {
+                crate::feature_modules::discord_notifier::NotifierWork::Pass {
                     reports,
                     omitted_reports,
                 },
@@ -678,37 +693,6 @@ async fn daemon_loop(
         );
         sleep_or_wake(&app_state, nap).await;
     }
-}
-
-async fn daemon_with_store_factory<
-    F: crate::feature_modules::discord_state::NotificationStateStoreFactory + 'static,
->(
-    providers_file: Option<PathBuf>,
-    factory: F,
-) -> Result<()> {
-    let store = factory
-        .open_for_daemon()
-        .map_err(|error| anyhow::anyhow!("notification store unavailable: {error:?}"))?;
-    let lane = store.lane().clone();
-    let transport = crate::feature_modules::discord_config::read_optional_runtime_secret(
-        std::path::Path::new("/run/secrets/discord_webhook"),
-    )
-    .and_then(|secret| {
-        crate::feature_modules::discord_transport::ValidatedWebhookUrl::from_runtime_secret(&secret)
-            .ok()
-    })
-    .and_then(|url| crate::feature_modules::discord_transport::DiscordTransport::new(url).ok())
-    .map(|transport| {
-        std::sync::Arc::new(transport)
-            as std::sync::Arc<dyn crate::feature_modules::discord_transport::DeliveryTransport>
-    });
-    let (notifier, _join) = match transport {
-        Some(transport) => {
-            crate::feature_modules::discord_coordinator::start_with_dependencies(lane, transport)
-        }
-        None => crate::feature_modules::discord_coordinator::start_with_lane(Some(lane)),
-    };
-    daemon_loop(providers_file, Some(notifier)).await
 }
 
 async fn sleep_or_wake(st: &Arc<api::AppState>, secs: u64) {
@@ -968,23 +952,13 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_only_constructs_discord() {
-        let (sender, _join) = crate::feature_modules::discord_coordinator::start_with_lane(None);
+        let transport = Arc::new(
+            crate::feature_modules::discord_transport::FakeTransport::scripted(Vec::new()),
+        );
+        let (sender, join) =
+            crate::feature_modules::discord_notifier::start_with_transport(transport);
         drop(sender);
-    }
-
-    #[test]
-    fn production_daemon_selects_production_state_store() {
-        let factory = crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed();
-        assert_eq!(
-            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
-                &factory
-            ),
-            "production-statefs"
-        );
-        assert_eq!(
-            crate::feature_modules::discord_fs::PRODUCTION_STATE_ROOT,
-            "/var/lib/asrsub/state"
-        );
+        join.await.unwrap();
     }
 
     #[test]
@@ -1002,16 +976,6 @@ mod tests {
             0
         );
     }
-    #[test]
-    fn notification_state_reset_requires_matching_hash() {
-        assert!(
-            crate::feature_modules::discord_state::NotificationStateStoreFactory::backend_token(
-                &crate::feature_modules::discord_fs::ProductionStateStoreFactory::fixed()
-            )
-            .contains("statefs")
-        );
-    }
-
     #[test]
     fn run_once_does_not_construct_discord() {
         assert!(matches!(Cmd::RunOnce, Cmd::RunOnce));

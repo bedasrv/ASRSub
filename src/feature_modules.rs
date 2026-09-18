@@ -11,6 +11,8 @@ pub(crate) mod discord_coordinator;
 pub(crate) mod discord_fs;
 #[path = "discord_fs_linux.rs"]
 pub(crate) mod discord_fs_linux;
+#[path = "discord_notifier.rs"]
+pub(crate) mod discord_notifier;
 #[path = "discord_renderer.rs"]
 pub(crate) mod discord_renderer;
 #[path = "discord_state.rs"]

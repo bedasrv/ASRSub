@@ -82,28 +82,32 @@ curl -sf http://127.0.0.1:8085/ready  | jq .   # non-zero exit when 503
 
 Checked by `/ready` (media root, state dir, providers) or by the operator:
 
-### Notification and deployment boundary
+### Notification boundary (daemon-only outbound)
 
-- **Requirement (core):** outbound Discord delivery is constructed only by the
-  long-running daemon. `run-once` has zero notification secret/state/transport
-  access, and the existing authenticated inbound `/webhook` remains an
-  independent Tdarr wake/extraction route.
-- **Requirement (core):** notification state is separate from the pipeline
-  JSONL ledgers. State admission is serialized by one StateLane, survives
-  restart, quarantines contradictory bytes rather than treating them as an
-  empty store, and enforces the 900-second attempt-start floor. Notification
-  failures do not change pipeline counters, `LastPass`, readiness, or public
-  response shapes.
-- **Local evidence:** local fake/localhost transport and bounded fixture tests
-  cover safe payloads, optional-secret failure continuation, state replay, and
-  acknowledgement races. These tests do not prove a live container boundary
-  or visual Discord rendering.
-- **Rollout-only evidence (hardening):** production StateFs mount identity,
-  staged secret ownership, child-process isolation, signed image/Compose
-  provenance, resolver snapshots, systemd recovery, authenticated quiesce,
-  and rollback receipts must be established by the separate deployment
-  hardening gates. No notifier-only firewall claim is made: the current
-  notifier shares the ASRSub process with its other integrations.
+- **Optional daemon feature:** the long-running daemon reads one protected,
+  optional `/run/secrets/discord_webhook` file. The existing strict webhook
+  grammar validates the URL; a missing or malformed secret disables outbound
+  notification without failing the pipeline. The value is not accepted from
+  config/API/dashboard writes or ordinary process configuration.
+- **Best effort:** a meaningful pass is admitted with one bounded,
+  nonblocking `try_send` into a small in-memory Tokio queue. The notifier
+  renders the bounded reports and performs exactly one webhook POST, then
+  discards the work. Idle passes produce no notification. There is no durable
+  notification state, outbox, replay, reservation, acknowledgement, retry, or
+  scheduled tick in this daemon path.
+- **Boundaries:** `run-once` does not read the webhook secret or send a
+  request. The existing authenticated inbound `POST /webhook` remains the
+  independent Tdarr wake/extraction route; this feature adds no bot, gateway,
+  listener, command, interaction, or inbound Discord control plane.
+- **Failure handling:** render and transport failures only emit a generic
+  local classification. URL values, payload bodies, response bodies, paths,
+  and credentials are not included in those warnings; notification failures
+  do not change pipeline counters, `LastPass`, readiness, API responses, or
+  dashboard behavior.
+- **Local evidence:** deterministic notifier tests use an in-process fake
+  transport for meaningful, idle, omitted-report, render-failure, and
+  transport-failure cases. No live Discord request or deployment validation is
+  claimed here.
 
 ### 1. Local State Directory
 
