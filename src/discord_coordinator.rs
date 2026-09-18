@@ -35,10 +35,6 @@ impl CoordinatorHandle {
     }
 }
 
-pub(crate) fn start() -> (CoordinatorHandle, tokio::task::JoinHandle<()>) {
-    start_with_lane(None)
-}
-
 pub(crate) fn start_with_lane(
     lane: Option<StateLaneHandle>,
 ) -> (CoordinatorHandle, tokio::task::JoinHandle<()>) {
@@ -144,10 +140,6 @@ async fn finish_transport(
         }
     }
     Ok(())
-}
-
-pub(crate) fn classify_state_error(_error: NotificationStateError) -> &'static str {
-    "notification_state_error"
 }
 
 #[cfg(test)]
