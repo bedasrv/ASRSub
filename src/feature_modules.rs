@@ -5,8 +5,6 @@
 pub(crate) mod child_audit;
 #[path = "discord_config.rs"]
 pub(crate) mod discord_config;
-#[path = "discord_coordinator.rs"]
-pub(crate) mod discord_coordinator;
 #[path = "discord_fs.rs"]
 pub(crate) mod discord_fs;
 #[path = "discord_fs_linux.rs"]
