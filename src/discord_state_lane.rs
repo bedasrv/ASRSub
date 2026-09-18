@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::discord_state_codec;
 use super::discord_state_schema::*;
-use super::discord_types::{BoundedReports, EpisodeKind, EpisodeRunReport};
+use super::discord_types::{BoundedReports, EpisodeRunReport};
 
 #[derive(Clone)]
 pub(crate) struct StateLaneHandle {
@@ -109,26 +109,10 @@ impl StateLaneHandle {
         }
         let (reports, _) = BoundedReports::from_reports(state.reports.clone())
             .map_err(|_| NotificationStateError::Capacity)?;
-        let pending: Box<[(EpisodeKind, i64, u64)]> = state
-            .reports
-            .iter()
-            .map(|report| (report.kind(), report.episode_id(), 1))
-            .collect();
-        let transaction_ids: Box<[[u8; 32]]> = state
-            .reports
-            .iter()
-            .filter_map(|report| {
-                report.pipeline_commit_id().map(|id| {
-                    discord_state_codec::domain_hash(b"asrsub-transaction-v1", id.as_bytes())
-                })
-            })
-            .collect();
-        Ok(InspectDueResult::Ready(DeliveryView::with_captures(
+        Ok(InspectDueResult::Ready(DeliveryView::new(
             state.generation,
             reports,
             state.overflow,
-            pending,
-            transaction_ids,
         )))
     }
 
