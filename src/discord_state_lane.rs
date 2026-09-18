@@ -140,6 +140,9 @@ impl StateLaneHandle {
         let mut state = self.inner.lock().map_err(|_| NotificationStateError::Io)?;
         ensure_open(&state)?;
         validate_clock(&now)?;
+        if reports.len() == 0 {
+            return Ok(StateCommit::new(state.generation, state_hash(&state)));
+        }
         for report in reports.iter() {
             let id = report
                 .pipeline_commit_id()
