@@ -129,11 +129,6 @@ async fn finish_transport(
         DeliveryResult::Accepted => {
             lane.acknowledge(reservation_id, payload.sha256())?;
         }
-        DeliveryResult::Failed(
-            class @ super::discord_state_schema::SafeDeliveryError::PermanentResponse,
-        ) => {
-            lane.record_attempt_failure(reservation_id, class, now, None)?;
-        }
         DeliveryResult::Failed(class) => {
             lane.record_attempt_failure(reservation_id, class, now, None)?;
         }

@@ -154,10 +154,6 @@ fn aggregate(v: AggregateDisposition) -> &'static str {
     }
 }
 
-pub(crate) fn report_hash(report: &EpisodeRunReport) -> [u8; 32] {
-    domain_hash(b"asrsub-report-v1", &encode_report(report))
-}
-
 pub(crate) fn decode_report(bytes: &[u8]) -> Result<EpisodeRunReport, NotificationStateError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| NotificationStateError::Corrupt)?;

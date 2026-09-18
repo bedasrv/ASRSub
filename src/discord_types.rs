@@ -302,7 +302,6 @@ impl EpisodeRunReport {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) struct BoundedReports {
     items: Box<[EpisodeRunReport]>,
-    canonical_bytes: u32,
 }
 
 impl BoundedReports {
@@ -333,8 +332,6 @@ impl BoundedReports {
         Ok((
             Self {
                 items: kept.into_boxed_slice(),
-                canonical_bytes: u32::try_from(bytes)
-                    .map_err(|_| ReportConstructionError::CounterOverflow)?,
             },
             omitted,
         ))
@@ -348,9 +345,6 @@ impl BoundedReports {
     }
     pub(crate) fn into_boxed_slice(self) -> Box<[EpisodeRunReport]> {
         self.items
-    }
-    pub(crate) fn canonical_bytes_len(&self) -> u32 {
-        self.canonical_bytes
     }
 }
 
