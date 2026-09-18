@@ -34,6 +34,7 @@ DEFAULT_PROJECT_NAME = "asrsub"
 DEFAULT_WEBHOOK_PORT = "8085"
 DEFAULT_NAS_MEDIA_PREFIX = "/mnt/nas/share/media"
 DEFAULT_PROVIDER_KEYS_FILE = "/home/user/.config/asr-pipeline/secrets/provider_keys.env"
+DEFAULT_LISTENER_PROCESS = "asrsub"
 DEFAULT_TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "compose.simple.yaml"
 MANAGED_ENV_KEYS = frozenset(
     {"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"}
@@ -83,6 +84,35 @@ def _validate_port(value: str) -> str:
     if number > 65535:
         raise ValueError("WEBHOOK_PORT is outside the TCP port range")
     return value
+
+
+def parse_port_ownership(
+    socket_listing: str,
+    port: str,
+    *,
+    expected_process: str = DEFAULT_LISTENER_PROCESS,
+) -> dict[str, Any]:
+    """Return bounded ownership metadata for one LISTEN port, never raw ss output."""
+    port = _validate_port(port)
+    names: set[str] = set()
+    listening = False
+    for line in socket_listing.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "LISTEN" or len(fields) < 4:
+            continue
+        local_endpoint = fields[3]
+        if local_endpoint.rsplit(":", 1)[-1] != port:
+            continue
+        listening = True
+        names.update(re.findall(r'\(\(\"([^\"]+)\"', line))
+    ordered_names = sorted(names)
+    owned = expected_process in names
+    return {
+        "port": port,
+        "status": "owned" if owned else "unrelated" if listening else "not_listening",
+        "process_name": expected_process if owned else (ordered_names[0] if ordered_names else None),
+        "process_names": ordered_names,
+    }
 
 
 def _safe_text(value: str, *, name: str) -> str:
@@ -355,7 +385,11 @@ def _payload_for_deploy(config: DeploymentConfig, image: str, template: Path, en
         webhook_port=config.webhook_port,
         nas_media_prefix=config.nas_media_prefix,
     )
-    return {"image": image, "compose_text": compose_text, "env_text": env_text}
+    return {
+        "image": image,
+        "compose_text": base64.b64encode(compose_text.encode("utf-8")).decode("ascii"),
+        "env_text": base64.b64encode(env_text.encode("utf-8")).decode("ascii"),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -430,6 +464,7 @@ from pathlib import Path
 
 IMAGE_RE = re.compile(r"^ghcr\.io/bedasrv/asrsub@sha256:[0-9a-f]{64}$")
 FORBIDDEN = frozenset({"down", "prune", "rm", "restart", "systemctl", "daemon-reload"})
+EXPECTED_LISTENER_PROCESS = "asrsub"
 
 
 class RemoteFailure(Exception):
@@ -590,12 +625,39 @@ def inspect_container(container):
     }
 
 
-def immutable_active_image(identity):
-    values = [identity.get("config_image")] + list(identity.get("repo_digests", []))
-    for value in values:
+def immutable_repo_digest(identity):
+    for value in identity.get("repo_digests", []):
         if immutable(value):
             return value
-    raise RemoteFailure("active image identity is not an immutable digest")
+    return None
+
+
+def immutable_active_image(identity):
+    digest = immutable_repo_digest(identity)
+    if digest is None:
+        raise RemoteFailure("active image has no recoverable immutable RepoDigest")
+    return digest
+
+
+def parse_port_ownership(socket_listing, port, expected_process=EXPECTED_LISTENER_PROCESS):
+    names = set()
+    listening = False
+    for line in socket_listing.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "LISTEN" or len(fields) < 4:
+            continue
+        if fields[3].rsplit(":", 1)[-1] != port:
+            continue
+        listening = True
+        names.update(re.findall(r'\(\("([^"]+)"', line))
+    ordered_names = sorted(names)
+    owned = expected_process in names
+    return {
+        "port": port,
+        "status": "owned" if owned else "unrelated" if listening else "not_listening",
+        "process_name": expected_process if owned else (ordered_names[0] if ordered_names else None),
+        "process_names": ordered_names,
+    }
 
 
 def expected_mounts(payload):
@@ -604,20 +666,50 @@ def expected_mounts(payload):
     return [
         ("/home/user/.config/asr-pipeline", "/home/user/.config/asr-pipeline", True),
         ("/home/user/.cache/asr-pipeline", "/home/user/.cache/asr-pipeline", True),
-        ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
         (media, prefix, True),
         (media, "/media", False),
         ("/home/user/.config/asr-pipeline/secrets", "/run/secrets", False),
     ]
 
 
-def mounts_match(identity, payload):
-    actual = set()
+def mount_contract(identity):
+    contract = []
     for mount in identity.get("mounts", []):
         if not isinstance(mount, dict):
-            continue
-        actual.add((mount.get("Source"), mount.get("Destination"), bool(mount.get("RW"))))
-    return all(item in actual for item in expected_mounts(payload))
+            raise RemoteFailure("container mount metadata is invalid")
+        source = mount.get("Source")
+        destination = mount.get("Destination")
+        if not isinstance(source, str) or not isinstance(destination, str):
+            raise RemoteFailure("container mount metadata is invalid")
+        contract.append({"source": source, "destination": destination, "rw": bool(mount.get("RW"))})
+    return contract
+
+
+def contract_tuples(contract):
+    if not isinstance(contract, list):
+        return []
+    values = []
+    for mount in contract:
+        if not isinstance(mount, dict):
+            return []
+        source = mount.get("source")
+        destination = mount.get("destination")
+        if not isinstance(source, str) or not isinstance(destination, str):
+            return []
+        values.append((source, destination, bool(mount.get("rw"))))
+    return values
+
+
+def mount_contract_matches(identity, saved_contract):
+    actual = mount_contract(identity)
+    expected = contract_tuples(saved_contract)
+    return len(actual) == len(expected) and set(contract_tuples(actual)) == set(expected)
+
+
+def mounts_match(identity, payload):
+    actual = contract_tuples(mount_contract(identity))
+    expected = expected_mounts(payload)
+    return len(actual) == len(expected) and set(actual) == set(expected)
 
 
 def collect(payload, *, strict):
@@ -630,12 +722,10 @@ def collect(payload, *, strict):
     for name, path in (
         ("config", Path("/home/user/.config/asr-pipeline")),
         ("cache", Path("/home/user/.cache/asr-pipeline")),
-        ("state", Path("/var/lib/asrsub/state")),
         ("media", Path("/mnt/nas/share/media")),
         ("secrets", Path("/home/user/.config/asr-pipeline/secrets")),
     ):
         paths[name] = require_path(path, directory=True)
-    provider = Path("/home/user/.config/asr-pipeline/secrets/provider_keys.env")
     secret_metadata = {
         name: metadata(Path("/home/user/.config/asr-pipeline/secrets") / name)
         for name in ("control_api_key", "discord_webhook", "provider_keys.env")
@@ -657,22 +747,25 @@ def collect(payload, *, strict):
     if not re.fullmatch(r"[1-9][0-9]{0,4}", port or "") or int(port) > 65535:
         raise RemoteFailure("WEBHOOK_PORT is invalid")
     socket_listing = checked(["ss", "-ltnp"], "port ownership")
-    port_owned = bool(re.search(r":" + re.escape(port) + r"\b", socket_listing))
+    port_ownership = parse_port_ownership(socket_listing, port)
+    port_owned = port_ownership["status"] == "owned"
     container, row = active_container(payload)
     identity = inspect_container(container)
     owned = (
         identity["labels"].get("com.docker.compose.project") == payload["project_name"]
         and identity["labels"].get("com.docker.compose.service") == payload["service"]
     )
+    current_mounts = mounts_match(identity, payload)
+    previous_repo_digest = immutable_repo_digest(identity)
     if strict and not owned:
         raise RemoteFailure("active container project/service ownership does not match")
-    mounts_ok = mounts_match(identity, payload)
-    if strict and not mounts_ok:
-        raise RemoteFailure("active container mounts do not match the simple contract")
     if strict and not port_owned:
-        raise RemoteFailure("configured port is not owned by a listening process")
+        raise RemoteFailure("configured port is not owned by the intended ASRSub listener")
     if strict and identity.get("health") != "healthy":
         raise RemoteFailure("active container is not healthy")
+    if strict and previous_repo_digest is None:
+        raise RemoteFailure("active service has no recoverable immutable RepoDigest")
+    current_mount_contract = "simple" if current_mounts else "legacy-compatible"
     return {
         "ok": True,
         "checks": {
@@ -681,11 +774,18 @@ def collect(payload, *, strict):
             "required_paths": paths,
             "media_mount": True,
             "port_owned": port_owned,
-            "container_mounts": mounts_ok,
+            "port_ownership": port_ownership,
+            "current_service_healthy": identity.get("health") == "healthy",
             "health": identity.get("health"),
+            "current_mount_contract": current_mount_contract,
+            "current_mounts": current_mount_contract,
+            "candidate_mounts_verified": None,
+            "candidate_mount_verification": "not_checked_pre_apply",
+            "previous_immutable_repo_digest": previous_repo_digest is not None,
         },
         "secret_file_metadata": secret_metadata,
-        "active_image": immutable_active_image(identity) if strict else next((item for item in [identity.get("config_image")] + identity.get("repo_digests", []) if immutable(item)), None),
+        "active_image": previous_repo_digest,
+        "previous_immutable_repo_digest": previous_repo_digest,
         "image_id": identity.get("image_id"),
         "container_id": container,
         "port": port,
@@ -697,7 +797,7 @@ def collect(payload, *, strict):
 
 def atomic_bytes(path, data, mode):
     path = Path(path)
-    if path.exists() and path.is_symlink():
+    if os.path.lexists(path) and stat.S_ISLNK(os.lstat(path).st_mode):
         raise RemoteFailure("refusing to replace a symlink")
     fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
     try:
@@ -727,22 +827,43 @@ def timestamp():
 def create_backup(payload, preflight):
     project, compose, env = project_paths(payload)
     root = project / ".asrsub-rollback"
-    root.mkdir(mode=0o700, exist_ok=True)
+    if os.path.lexists(root):
+        if root.is_symlink() or not root.is_dir():
+            raise RemoteFailure("rollback root is not a real directory")
+    else:
+        root.mkdir(mode=0o700)
+    identity = preflight.get("_identity")
+    if not isinstance(identity, dict):
+        raise RemoteFailure("previous container identity is unavailable for rollback")
+    previous_repo_digest = preflight.get("previous_immutable_repo_digest") or preflight.get("active_image")
+    if not immutable(previous_repo_digest):
+        raise RemoteFailure("previous image is not a recoverable immutable RepoDigest")
+    previous_mount_contract = mount_contract(identity)
+    if not previous_mount_contract:
+        raise RemoteFailure("previous mount contract is unavailable")
+    if len(previous_mount_contract) != len(identity.get("mounts", [])):
+        raise RemoteFailure("previous mount contract is incomplete")
+    backup_kind = "simple" if (
+        identity.get("config_image") == previous_repo_digest and mounts_match(identity, payload)
+    ) else "legacy"
     name = timestamp()
     backup = root / name
     suffix = 0
-    while backup.exists():
+    while os.path.lexists(backup):
         suffix += 1
         backup = root / (name + "-" + str(suffix))
     backup.mkdir(mode=0o700)
     atomic_bytes(backup / payload["compose_file"], compose.read_bytes(), 0o600)
     atomic_bytes(backup / payload["env_file"], env.read_bytes(), 0o600)
     record = {
-        "schema": "asrsub-simple-backup-v1",
+        "schema": "asrsub-simple-backup-v2",
         "verified": True,
         "created_at": name,
-        "previous_image": preflight["active_image"],
+        "backup_kind": backup_kind,
+        "previous_image": previous_repo_digest,
+        "previous_repo_digest": previous_repo_digest,
         "previous_image_id": preflight.get("image_id"),
+        "previous_mount_contract": previous_mount_contract,
         "compose_file": payload["compose_file"],
         "env_file": payload["env_file"],
         "webhook_port": preflight.get("port", payload["webhook_port"]),
@@ -758,8 +879,14 @@ def restore_backup(payload, backup):
         record = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RemoteFailure("rollback metadata is invalid") from exc
-    if not isinstance(record, dict) or record.get("verified") is not True or not immutable(record.get("previous_image")):
-        raise RemoteFailure("rollback metadata is not a verified immutable backup")
+    if (
+        not isinstance(record, dict)
+        or record.get("verified") is not True
+        or not immutable(record.get("previous_repo_digest", record.get("previous_image")))
+        or record.get("backup_kind") not in {"legacy", "simple"}
+        or not contract_tuples(record.get("previous_mount_contract"))
+    ):
+        raise RemoteFailure("rollback metadata is not a verified immutable backup contract")
     saved_compose = backup / payload["compose_file"]
     saved_env = backup / payload["env_file"]
     require_path(saved_compose, directory=False)
@@ -771,6 +898,8 @@ def restore_backup(payload, backup):
 
 def latest_backup(payload):
     root = Path(payload["project_directory"]) / ".asrsub-rollback"
+    if not os.path.lexists(root) or root.is_symlink() or not root.is_dir():
+        raise RemoteFailure("rollback directory is unavailable or unsafe")
     candidates = []
     try:
         entries = list(root.iterdir())
@@ -783,7 +912,13 @@ def latest_backup(payload):
             value = json.loads((entry / "metadata.json").read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             continue
-        if isinstance(value, dict) and value.get("verified") is True and immutable(value.get("previous_image")):
+        if (
+            isinstance(value, dict)
+            and value.get("verified") is True
+            and value.get("backup_kind") in {"legacy", "simple"}
+            and immutable(value.get("previous_repo_digest", value.get("previous_image")))
+            and contract_tuples(value.get("previous_mount_contract"))
+        ):
             created = value.get("created_at")
             if isinstance(created, str):
                 candidates.append((created, entry.name, entry))
@@ -812,6 +947,42 @@ def wait_ready(port, timeout=60):
     raise RemoteFailure("bounded health/readiness gate failed")
 
 
+def verify_rollback_runtime(payload, record, port):
+    container, _row = active_container(payload)
+    identity = inspect_container(container)
+    digest = record.get("previous_repo_digest", record.get("previous_image"))
+    if not immutable(digest) or digest not in identity.get("repo_digests", []):
+        raise RemoteFailure("rollback does not prove the previous immutable RepoDigest")
+    backup_kind = record.get("backup_kind")
+    config_image = identity.get("config_image")
+    if backup_kind == "simple":
+        if config_image != digest:
+            raise RemoteFailure("simple rollback does not prove the exact Config.Image digest")
+        config_reference = "immutable_digest"
+    elif backup_kind == "legacy":
+        if not isinstance(config_image, str) or not config_image:
+            raise RemoteFailure("legacy rollback has no Compose image reference")
+        if immutable(config_image) and config_image != digest:
+            raise RemoteFailure("legacy rollback Config.Image conflicts with the recorded digest")
+        config_reference = "legacy/tag" if not immutable(config_image) else "legacy/digest"
+    else:
+        raise RemoteFailure("rollback metadata does not identify its backup contract")
+    if identity.get("health") != "healthy":
+        raise RemoteFailure("rolled back container is not healthy")
+    if not mount_contract_matches(identity, record.get("previous_mount_contract")):
+        raise RemoteFailure("rolled back container mounts do not match the saved previous contract")
+    return {
+        "container_id": container,
+        "image_id": identity.get("image_id"),
+        "image": digest,
+        "health": identity.get("health"),
+        "config_reference": config_reference,
+        "repo_digest_matched": True,
+        "mounts_verified": True,
+        "port": port,
+    }
+
+
 def verify_image_and_runtime(payload, image, port):
     container, _row = active_container(payload)
     identity = inspect_container(container)
@@ -826,6 +997,7 @@ def verify_image_and_runtime(payload, image, port):
         "image_id": identity.get("image_id"),
         "image": image,
         "health": identity.get("health"),
+        "candidate_mounts_verified": True,
         "mounts_verified": True,
         "port": port,
     }
@@ -836,7 +1008,7 @@ def rollback_to(payload, backup):
     port = record.get("webhook_port", payload["webhook_port"])
     checked(compose_argv(payload, "up", "-d", "--no-build", "--pull=never", payload["service"]), "Compose rollback", cwd=Path(payload["project_directory"]))
     wait_ready(str(port))
-    verification = verify_image_and_runtime(payload, record["previous_image"], str(port))
+    verification = verify_rollback_runtime(payload, record, str(port))
     return {"ok": True, "backup": backup.name, "image": record["previous_image"], "verification": verification}
 
 

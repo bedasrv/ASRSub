@@ -25,9 +25,13 @@ The routine model is one Docker Compose service and one immutable image:
 
 The tracked candidate is `deploy/compose.simple.yaml`. It has one
 `orchestrator`, host networking, `restart: unless-stopped`, and no build
-directive. It mounts the existing config, cache, state, and media paths. The
-provider key file is an optional Compose `env_file`; its absence does not make
-Compose invalid. The host secret directory is mounted read-only at
+directive. It mounts the existing config, cache, and media paths. The application
+source defines `cfg_dir()` as `/home/user/.config/asr-pipeline` by default, so
+that config mount owns the current pipeline ledgers (`state.jsonl`,
+`actions.jsonl`, `subtitle_registry.jsonl`, and related files). There is **no separate `/var/lib/asrsub/state` mount** and the simple template does not set
+`ASRSUB_CONFIG_DIR` or `STATE_FILE`; those ledgers are not silently relocated.
+The provider key file is an optional Compose `env_file`; its absence does not
+make Compose invalid. The host secret directory is mounted read-only at
 `/run/secrets`, so `/run/secrets/control_api_key` is available when present and
 an absent optional `discord_webhook` file disables that optional integration.
 The template contains no secret values and no top-level Compose `secrets:` file.
@@ -43,15 +47,19 @@ The operator machine needs Python 3 and an SSH client. The target needs:
 - the expected hostname and non-interactive SSH access;
 - Docker Engine, the Docker Compose plugin, `findmnt`, and `ss`;
 - the active project, Compose file, non-secret `.env`, and `orchestrator` service;
-- `/home/user/.config/asr-pipeline`, `/home/user/.cache/asr-pipeline`,
-  `/var/lib/asrsub/state`, and the mounted `/mnt/nas/share/media` directory;
+- `/home/user/.config/asr-pipeline` (which owns the current pipeline ledgers),
+  `/home/user/.cache/asr-pipeline`, and the mounted `/mnt/nas/share/media`
+  directory;
 - `/home/user/.config/asr-pipeline/secrets` as a real directory;
 - an existing healthy service for a deploy backup. Provider keys are optional,
   but a deployment without resolvable provider keys will not be ready.
 
 Run these commands from the repository checkout. They are read-only. `status`
-reads service status and bounded metadata. `preflight` additionally requires
-ownership, paths, mount, port, health, and immutable active-image checks.
+reads the current service's legacy-compatible safety metadata. `preflight`
+performs the full **pre-apply safety checks**: ownership, paths, real media
+mount, secret metadata, intended port ownership, health, and a recoverable
+immutable previous repo digest. Neither operation requires the candidate simple
+mount shape before the first apply.
 
 ```bash
 ./tools/asrsub_deploy.py status \
@@ -70,8 +78,11 @@ metadata checks, and port ownership checks. It never prints resolved Compose
 configuration, container environment values, or secret contents.
 
 A successful preflight is a structured result with `"ok":true`, an immutable
-`active_image`, `container_mounts:true`, `port_owned:true`, and healthy status.
-A failed preflight exits non-zero and reports a bounded failure summary. The
+`previous_immutable_repo_digest`, `current_mount_contract` set to either
+`simple` or `legacy-compatible`, `candidate_mount_verification` set to
+`not_checked_pre_apply`, `port_owned:true`, and healthy status. The
+`candidate_mounts_verified` field is reserved for the post-apply result. A
+failed preflight exits non-zero and reports a bounded failure summary. The
 summary is intentionally not a copy of Docker stderr.
 
 ## 3. CI release descriptor and immutable image
@@ -124,8 +135,12 @@ secret-bearing env keys and never reads the provider key file.
 ```
 
 This changes nothing. It reads Docker/Compose status, container labels and
-safe identity fields, required-path metadata, the media mount, and port state.
-It does not pull, apply, restart, recreate, or remove a container.
+safe identity fields, required-path metadata, the real media mount, bounded
+port ownership, and current service health. Its result labels a legacy Compose
+shape as `current_mount_contract: legacy-compatible`; the
+`post-apply candidate mount verification` field `candidate_mounts_verified`
+remains `null` before apply. It does not pull, apply, restart, recreate, or
+remove a container.
 
 ### Preflight (read-only gate)
 
@@ -137,8 +152,11 @@ It does not pull, apply, restart, recreate, or remove a container.
 
 This changes nothing. It is the required gate immediately before `deploy`.
 It verifies Docker/Compose, active `asrsub`/`orchestrator` ownership, required
-paths, `findmnt -T /mnt/nas/share/media`, secret-file metadata, port ownership,
-container mounts, healthy status, and an immutable active image identity.
+paths, `findmnt -T /mnt/nas/share/media`, secret-file metadata, bounded
+ownership by the intended `asrsub` listener on `WEBHOOK_PORT`, healthy current
+service status, and an immutable previous repo digest. It deliberately does
+not require the candidate simple mount contract; that is checked only after
+apply.
 
 ### Deploy/apply (the only routine mutating command)
 
@@ -151,11 +169,16 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding=
 ```
 
 Before any target write, the streamed remote script verifies the target
-hostname and runs the preflight gate. It then:
+hostname and runs the pre-apply safety checks. The first simple deployment may
+start from the target's **legacy Compose shape** (for example, a direct
+`/run/secrets/control_api_key` file mount), as long as the current service is
+owned, healthy, safely provisioned, and has a recoverable previous repo digest.
+It then:
 
 1. creates a timestamped `.asrsub-rollback/<timestamp>/` backup containing the
-   active `compose.yaml`, active non-secret `.env`, and the previous image
-   identity;
+   active `compose.yaml`, active non-secret `.env`, the previous immutable repo
+   digest, a `backup_kind`, and a **saved previous mount contract** containing
+   only paths, destinations, and RW flags;
 2. atomically stages the candidate Compose and non-secret env files;
 3. runs the quiet Compose validation action (`docker compose config -q`);
 4. pulls only the exact digest represented by `ASRSUB_IMAGE` (the remote
@@ -163,8 +186,9 @@ hostname and runs the preflight gate. It then:
    candidate digest, never a tag);
 5. applies only `docker compose ... up -d --no-build --pull=never orchestrator`;
 6. waits a bounded 60 seconds for both `/health` and `/ready` to return HTTP 200;
-7. verifies the running container's image reference, image digest/repo digest,
-   image ID, mounts, and Docker health status.
+7. performs the **post-apply candidate mount verification** and verifies
+   `candidate_mounts_verified:true`, the running container's exact image
+   reference and repo digest, image ID, mounts, and Docker health status.
 
 It never runs Compose `down`, a Docker daemon/systemd restart, an image prune,
 volume prune, broad deletion, or a build. Old images are retained.
@@ -197,14 +221,18 @@ tag.
   --expected-hostname <expected-hostname>
 ```
 
-Rollback checks the hostname before writes, selects the most recent verified
-backup whose recorded previous image is an immutable digest, and treats the
-backed-up `ASRSUB_IMAGE` digest as the only rollback identity. It atomically
-restores that Compose/env pair, and runs `docker compose ... up -d --no-build
---pull=never orchestrator`. It does not pull, retag, prune, stop first, or use a
-mutable tag. It waits for `/health` and `/ready`, then verifies the old image,
-health, and mounts. If no verified immutable backup exists, it exits non-zero
-without changing the active files.
+Rollback checks the hostname before writes and selects the most recent verified
+backup whose metadata includes a `backup_kind`, previous immutable repo digest,
+and saved previous mount contract. It atomically restores that Compose/env pair
+and runs `docker compose ... up -d --no-build --pull=never orchestrator`. It
+does not pull, retag, prune, stop first, or use a mutable tag. A `simple` backup
+must restore the exact digest in `Config.Image`, and its repo digest must also
+match. A `legacy` backup may restore a tag when the local `RepoDigests` contains
+the recorded digest; its verification explicitly reports
+`config_reference: legacy/tag` and `repo_digest_matched:true`. Both kinds must
+match the saved previous mount contract and pass health/readiness. If no
+verified immutable backup contract exists, it exits non-zero without changing
+the active files.
 
 ## 5. Health gates and automatic recovery
 
@@ -219,7 +247,7 @@ Expected success output is a short structured result similar to this; image
 IDs and paths are non-secret metadata:
 
 ```json
-{"backup":"20260918T120000Z","image":"ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>","ok":true,"operation":"deploy","verification":{"health":"healthy","mounts_verified":true}}
+{"backup":"20260918T120000Z","image":"ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>","ok":true,"operation":"deploy","verification":{"candidate_mounts_verified":true,"health":"healthy","mounts_verified":true}}
 ```
 
 A config, pull, apply, bounded readiness, or post-apply identity failure
@@ -339,9 +367,9 @@ executed.
 - **Pull failure:** confirm that CI published the exact digest in `release.json`
   and that target access is authorized. Never replace it with a tag.
 - **Readiness 503 or timeout:** read the safe `/health`/`/ready` status and
-  application diagnostics. Check the media mount, state directory, and
-  provider-key presence without opening key files. Automatic rollback reports
-  its `rollback.ok` status.
+  application diagnostics. Check the media mount, the config mount that owns
+  the current pipeline ledgers, and provider-key presence without opening key
+  files. Automatic rollback reports its `rollback.ok` status.
 - **Digest or mount verification failure:** do not retry with `--pull=always`,
   `latest`, or a manual container replacement. Use the manual rollback command
   and preserve the backup for investigation.
@@ -357,8 +385,9 @@ executed.
 4. Confirm secret metadata only (`0700` directory, `0600` files); never print or
    read secret values.
 5. Run `deploy --image "$IMAGE"`; capture only the structured result.
-6. Require `ok:true`, immutable image verification, healthy status, verified
-   mounts, and successful `/health` and `/ready` probes.
+6. Require `ok:true`, immutable image verification, healthy status, and
+   `candidate_mounts_verified:true` after apply, plus successful `/health` and
+   `/ready` probes.
 7. On a failed deploy, require non-zero exit and inspect only `rollback.ok`.
    If false, use `rollback` after fixing the bounded prerequisite.
 8. Record the commit, digest, backup timestamp, and structured result without

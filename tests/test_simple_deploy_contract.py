@@ -1,7 +1,9 @@
 """Offline contracts for the simple immutable Compose deployment path."""
 from __future__ import annotations
 
+import base64
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -25,6 +27,13 @@ def load_tool():
     finally:
         sys.path.pop(0)
     return asrsub_deploy
+
+
+def load_remote_namespace():
+    deploy = load_tool()
+    namespace = {}
+    exec(deploy.REMOTE_SCRIPT, namespace)
+    return namespace
 
 
 class TestImageReferenceValidation(unittest.TestCase):
@@ -163,6 +172,50 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
         self.assertNotIn("placeholder-only", env_text)
 
 
+class TestDeployPayloadContract(unittest.TestCase):
+    def test_payload_fields_decode_to_the_original_compose_and_env_bytes(self):
+        deploy = load_tool()
+        config = deploy.DeploymentConfig(
+            target="target.example",
+            expected_hostname="target-host",
+        )
+        payload = deploy._payload_for_deploy(config, VALID_IMAGE, TEMPLATE, None)
+        self.assertEqual(base64.b64decode(payload["compose_text"]), TEMPLATE.read_bytes())
+        expected_env = deploy.build_candidate_env(
+            None,
+            image=VALID_IMAGE,
+            webhook_port=config.webhook_port,
+            nas_media_prefix=config.nas_media_prefix,
+        ).encode("utf-8")
+        self.assertEqual(base64.b64decode(payload["env_text"]), expected_env)
+        self.assertNotIn("placeholder-only", base64.b64decode(payload["env_text"]).decode("utf-8"))
+
+
+class TestPortOwnership(unittest.TestCase):
+    def test_parser_proves_the_intended_asrsub_listener_without_raw_ss_output(self):
+        deploy = load_tool()
+        output = (
+            'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* '
+            'users:(("asrsub",pid=1234,fd=7))\n'
+        )
+        result = deploy.parse_port_ownership(output, "8085")
+        self.assertEqual(result["status"], "owned")
+        self.assertEqual(result["process_name"], "asrsub")
+        self.assertEqual(result["port"], "8085")
+        self.assertNotIn("pid", json.dumps(result))
+        self.assertNotIn("raw", result)
+
+    def test_parser_marks_an_unrelated_listener_as_not_owned(self):
+        deploy = load_tool()
+        output = (
+            'LISTEN 0 4096 127.0.0.1:8085 0.0.0.0:* '
+            'users:(("python",pid=99,fd=3))\n'
+        )
+        result = deploy.parse_port_ownership(output, "8085")
+        self.assertEqual(result["status"], "unrelated")
+        self.assertEqual(result["process_name"], "python")
+
+
 class TestComposeTemplateContract(unittest.TestCase):
     def test_simple_template_contains_only_the_approved_runtime_shape(self):
         self.assertTrue(TEMPLATE.is_file(), "simple Compose template is missing")
@@ -178,7 +231,6 @@ class TestComposeTemplateContract(unittest.TestCase):
             "required: false",
             "/home/user/.config/asr-pipeline",
             "/home/user/.cache/asr-pipeline",
-            "/var/lib/asrsub/state",
             "/mnt/nas/share/media",
             "/home/user/.config/asr-pipeline/secrets",
             "/run/secrets",
@@ -190,6 +242,13 @@ class TestComposeTemplateContract(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^secrets:\s*$")
         self.assertNotIn("control_api_key:", text)
         self.assertNotIn("discord_webhook:", text)
+
+    def test_config_mount_owns_current_ledgers_without_an_unused_state_mount(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("target: /home/user/.config/asr-pipeline", text)
+        self.assertNotIn("/var/lib/asrsub/state", text)
+        self.assertNotIn("ASRSUB_CONFIG_DIR:", text)
+        self.assertNotIn("STATE_FILE:", text)
 
 
 class TestReleaseDescriptorDigestContract(unittest.TestCase):
@@ -218,6 +277,14 @@ class TestDeployDocumentationContract(unittest.TestCase):
             "status",
             "deploy",
             "rollback",
+            "legacy Compose shape",
+            "pre-apply safety checks",
+            "post-apply candidate mount verification",
+            "candidate_mounts_verified",
+            "saved previous mount contract",
+            "legacy/tag",
+            "current pipeline ledgers",
+            "no separate `/var/lib/asrsub/state` mount",
             "release.json",
             "ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>",
             "docker compose config -q",
@@ -254,6 +321,284 @@ class TestDeployDocumentationContract(unittest.TestCase):
                 operation,
             )
         self.assertIn("curl --fail --silent", text)
+
+
+class TestDeployPhases(unittest.TestCase):
+    def test_strict_preapply_accepts_legacy_mounts_and_defers_candidate_verification(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "compose.yaml").write_text("legacy", encoding="utf-8")
+            (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "service": "orchestrator",
+                "project_name": "asrsub",
+                "webhook_port": "8085",
+                "nas_media_prefix": "/mnt/nas/share/media",
+            }
+            identity = {
+                "labels": {
+                    "com.docker.compose.project": "asrsub",
+                    "com.docker.compose.service": "orchestrator",
+                },
+                "mounts": [
+                    {
+                        "Source": "/home/user/.config/asr-pipeline",
+                        "Destination": "/home/user/.config/asr-pipeline",
+                        "RW": True,
+                    },
+                    {
+                        "Source": "/home/user/.cache/asr-pipeline",
+                        "Destination": "/home/user/.cache/asr-pipeline",
+                        "RW": True,
+                    },
+                    {
+                        "Source": "/mnt/nas/share/media",
+                        "Destination": "/mnt/nas/share/media",
+                        "RW": True,
+                    },
+                    {
+                        "Source": "/mnt/nas/share/media",
+                        "Destination": "/media",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "Destination": "/run/secrets/control_api_key",
+                        "RW": False,
+                    },
+                ],
+                "health": "healthy",
+                "config_image": "ghcr.io/bedasrv/asrsub:legacy",
+                "image_id": "image-id",
+                "repo_digests": [VALID_IMAGE],
+            }
+            original = {name: remote[name] for name in ("metadata", "require_path", "checked", "active_container", "inspect_container")}
+            remote["metadata"] = lambda path: {"present": True, "regular": True, "directory": True, "symlink": False, "mode": 0o600}
+            remote["require_path"] = lambda path, **kwargs: {"present": True, "regular": True, "directory": True, "mode": 0o700}
+            remote["checked"] = lambda argv, label, **kwargs: (
+                'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("asrsub",pid=1,fd=1))\n'
+                if argv[0] == "ss"
+                else "ok\n"
+            )
+            remote["active_container"] = lambda value: ("container-id", {})
+            remote["inspect_container"] = lambda value: identity
+            try:
+                result = remote["collect"](payload, strict=True)
+            finally:
+                remote.update(original)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["checks"]["current_mount_contract"], "legacy-compatible")
+            self.assertIsNone(result["checks"]["candidate_mounts_verified"])
+            self.assertEqual(result["previous_immutable_repo_digest"], VALID_IMAGE)
+
+
+class TestRemoteFilesystemSafety(unittest.TestCase):
+    def test_atomic_bytes_rejects_a_broken_symlink(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target"
+            os.symlink("missing-target", path)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["atomic_bytes"](path, b"replacement", 0o600)
+            self.assertTrue(path.is_symlink())
+
+    def test_create_backup_rejects_symlink_and_non_directory_roots(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "compose.yaml").write_text("legacy", encoding="utf-8")
+            (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+            }
+            preflight = {"active_image": VALID_IMAGE, "image_id": "image-id", "port": "8085"}
+            rollback_root = project / ".asrsub-rollback"
+            os.symlink("missing-root", rollback_root)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["create_backup"](payload, preflight)
+            rollback_root.unlink()
+            rollback_root.write_text("not a directory", encoding="utf-8")
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["create_backup"](payload, preflight)
+
+
+class TestRollbackContracts(unittest.TestCase):
+    def test_backup_records_sanitized_legacy_mount_contract(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir()
+            (project / "compose.yaml").write_text("legacy", encoding="utf-8")
+            (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+                "webhook_port": "8085",
+                "nas_media_prefix": "/mnt/nas/share/media",
+            }
+            mounts = [
+                {
+                    "Source": "/home/user/.config/asr-pipeline",
+                    "Destination": "/home/user/.config/asr-pipeline",
+                    "RW": True,
+                    "Mode": "rw",
+                },
+                {
+                    "Source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                    "Destination": "/run/secrets/control_api_key",
+                    "RW": False,
+                    "Propagation": "rprivate",
+                },
+            ]
+            preflight = {
+                "active_image": VALID_IMAGE,
+                "image_id": "image-id",
+                "port": "8085",
+                "_identity": {
+                    "config_image": "ghcr.io/bedasrv/asrsub:legacy",
+                    "repo_digests": [VALID_IMAGE],
+                    "mounts": mounts,
+                },
+            }
+            _backup, record = remote["create_backup"](payload, preflight)
+            self.assertEqual(record["backup_kind"], "legacy")
+            self.assertEqual(record["previous_repo_digest"], VALID_IMAGE)
+            self.assertEqual(
+                record["previous_mount_contract"],
+                [
+                    {
+                        "source": "/home/user/.config/asr-pipeline",
+                        "destination": "/home/user/.config/asr-pipeline",
+                        "rw": True,
+                    },
+                    {
+                        "source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "destination": "/run/secrets/control_api_key",
+                        "rw": False,
+                    },
+                ],
+            )
+            self.assertEqual(
+                set(record["previous_mount_contract"][0]),
+                {"source", "destination", "rw"},
+            )
+
+    def test_legacy_rollback_accepts_tag_config_when_repo_digest_matches(self):
+        remote = load_remote_namespace()
+        contract = [
+            {
+                "source": "/home/user/.config/asr-pipeline",
+                "destination": "/home/user/.config/asr-pipeline",
+                "rw": True,
+            }
+        ]
+        record = {
+            "backup_kind": "legacy",
+            "previous_image": VALID_IMAGE,
+            "previous_repo_digest": VALID_IMAGE,
+            "previous_mount_contract": contract,
+        }
+        payload = {"service": "orchestrator", "project_name": "asrsub"}
+        identity = {
+            "config_image": "ghcr.io/bedasrv/asrsub:legacy",
+            "repo_digests": [VALID_IMAGE],
+            "health": "healthy",
+            "image_id": "image-id",
+            "mounts": [
+                {
+                    "Source": "/home/user/.config/asr-pipeline",
+                    "Destination": "/home/user/.config/asr-pipeline",
+                    "RW": True,
+                }
+            ],
+        }
+        original = {name: remote[name] for name in ("active_container", "inspect_container")}
+        remote["active_container"] = lambda value: ("container-id", {})
+        remote["inspect_container"] = lambda value: identity
+        try:
+            result = remote["verify_rollback_runtime"](payload, record, "8085")
+        finally:
+            remote.update(original)
+        self.assertEqual(result["config_reference"], "legacy/tag")
+        self.assertTrue(result["repo_digest_matched"])
+        self.assertTrue(result["mounts_verified"])
+
+    def test_simple_rollback_requires_exact_digest_config_reference(self):
+        remote = load_remote_namespace()
+        record = {
+            "backup_kind": "simple",
+            "previous_image": VALID_IMAGE,
+            "previous_repo_digest": VALID_IMAGE,
+            "previous_mount_contract": [
+                {
+                    "source": "/home/user/.config/asr-pipeline",
+                    "destination": "/home/user/.config/asr-pipeline",
+                    "rw": True,
+                }
+            ],
+        }
+        payload = {"service": "orchestrator", "project_name": "asrsub"}
+        identity = {
+            "config_image": "ghcr.io/bedasrv/asrsub:tagged",
+            "repo_digests": [VALID_IMAGE],
+            "health": "healthy",
+            "image_id": "image-id",
+            "mounts": [
+                {
+                    "Source": "/home/user/.config/asr-pipeline",
+                    "Destination": "/home/user/.config/asr-pipeline",
+                    "RW": True,
+                }
+            ],
+        }
+        original = {name: remote[name] for name in ("active_container", "inspect_container")}
+        remote["active_container"] = lambda value: ("container-id", {})
+        remote["inspect_container"] = lambda value: identity
+        try:
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["verify_rollback_runtime"](payload, record, "8085")
+        finally:
+            remote.update(original)
+
+
+class TestRemoteRollbackSelection(unittest.TestCase):
+    def test_selects_latest_verified_legacy_contract_without_docker(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            root = project / ".asrsub-rollback"
+            root.mkdir(parents=True)
+            contract = [
+                {
+                    "source": "/home/user/.config/asr-pipeline",
+                    "destination": "/home/user/.config/asr-pipeline",
+                    "rw": True,
+                }
+            ]
+            for name, valid in (("20260101T000000Z", True), ("20260102T000000Z", False), ("20260103T000000Z", True)):
+                backup = root / name
+                backup.mkdir()
+                record = {
+                    "schema": "asrsub-simple-backup-v2",
+                    "verified": valid,
+                    "created_at": name,
+                    "backup_kind": "legacy",
+                    "previous_image": VALID_IMAGE,
+                    "previous_repo_digest": VALID_IMAGE,
+                    "previous_mount_contract": contract if valid else [],
+                }
+                (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
+            payload = {"project_directory": str(project)}
+            self.assertEqual(remote["latest_backup"](payload).name, "20260103T000000Z")
 
 
 class TestRollbackSelection(unittest.TestCase):

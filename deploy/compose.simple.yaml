@@ -26,11 +26,6 @@ services:
         read_only: false
         bind: { propagation: rprivate, create_host_path: false }
       - type: bind
-        source: /var/lib/asrsub/state
-        target: /var/lib/asrsub/state
-        read_only: false
-        bind: { propagation: rprivate, create_host_path: false }
-      - type: bind
         source: /mnt/nas/share/media
         target: ${NAS_MEDIA_PREFIX:?NAS_MEDIA_PREFIX must be set}
         read_only: false
