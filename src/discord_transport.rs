@@ -97,16 +97,6 @@ pub(crate) fn classify_status(status: u16) -> DeliveryResult {
 }
 
 #[cfg(test)]
-pub(crate) struct LocalTestEndpoint(String);
-
-#[cfg(test)]
-impl LocalTestEndpoint {
-    pub(crate) fn new(address: std::net::SocketAddr) -> Self {
-        Self(format!("http://{address}"))
-    }
-}
-
-#[cfg(test)]
 pub(crate) struct FakeTransport {
     responses: Arc<Mutex<Vec<DeliveryResult>>>,
     payloads: Arc<Mutex<Vec<Vec<u8>>>>,
