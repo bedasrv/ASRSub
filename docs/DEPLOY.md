@@ -185,19 +185,51 @@ locally, and **never pushes**. It never runs `docker compose down`,
 ## External signer boundary
 
 `tools/signer_argv_policy.json` is a non-secret, repository-side contract for
-the external release signer. Its two commands must be executed from the
-repository root, with `/usr/bin/python3` invoking `tools/asrsub-env`, and with
-the private key supplied only through the listed inherited file descriptor.
-The bundle and approval commands retain the relative `release/` layout and
-write production-mode artifacts only after their own validation. The wrapper
-creates a private per-invocation target/cache root; it does not receive the
-caller environment or copy Cargo state for signer commands.
+the Option-A release signer. `tools/asrsub_signer_supervisor.c` is built twice
+by `tools/build_signer_supervisors.sh`, producing the fixed-role launchers
+`/usr/local/sbin/asrsub-bundle-signer` and
+`/usr/local/sbin/asrsub-approval-signer`. The build contains no private
+material; install it as root on the approved signing host:
 
-This repository does not launch those signer commands, hand off a production
-private key, or claim production signing evidence. The release workflow is
-image-only and contains no signing-key handoff. Key opening, release inputs,
-external signer execution, trust-anchor installation, and target evidence
-remain external deployment prerequisites.
+```bash
+sudo tools/build_signer_supervisors.sh
+```
+
+The `--output-dir` option is only a test seam and is constrained to a
+no-symlink directory below `/tmp/agent-scratch` or `/var/tmp`; production
+installation is fixed at `/usr/local/sbin` and uses `/usr/bin/cc` and
+`/usr/bin/install`.
+
+The bundle supervisor uses the root-owned `0400` key
+`/etc/asrsub/signing/bundle-signing-key.pem`; the approval supervisor uses
+`/etc/asrsub/signing/approval-key.pem`. The parent directory and both key files
+are deployment inputs, never repository files. The supervisor accepts only its
+fixed role token (`asrsub-bundle-signing-key` or `asrsub-approval-key`), an
+absolute no-symlink implementation root, and the exact command in
+`tools/signer_argv_policy.json`. It opens the compiled-in key
+without putting its path in `argv`, the environment, logs, or receipts, then
+passes it only as FD 3 (bundle) or FD 4 (approval). All other inherited
+non-standard descriptors are closed before the direct `execve`.
+Before execution it revalidates the root-owned, non-writable `tools/` scripts
+and the fixed release input trees without following links; output paths are
+intentionally not part of that validation. A privileged root attacker who can
+replace files after validation remains outside this user-space boundary.
+
+For a trusted, root-owned repository checkout containing the current `release/`
+inputs, the host invokes the role launcher with the matching token and root;
+the command after `--` must be copied exactly from the policy. The Python
+signers retain the current RSA contract: `/usr/bin/openssl dgst -sha256` signs
+through that FD, and no Ed25519 path is supported.
+
+`tools/asrsub-env` starts the signer in its own process group and forwards
+SIGHUP, SIGINT, and SIGTERM to that group so cancellation does not strand the
+OpenSSL descendant.
+
+The repository does not open or hand off a production private key, fabricate a
+signed bundle, or claim target signing/rollout evidence. Key provisioning,
+trusted release inputs, supervisor installation, trust-anchor installation, and
+target evidence remain external deployment prerequisites. The release workflow
+is still image-only and contains no signing-key handoff.
 
 ## Deploy (systemd-owned, explicit, immutable)
 
