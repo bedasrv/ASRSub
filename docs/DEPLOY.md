@@ -1,374 +1,385 @@
-# ASRSub Deploy Instructions (Explicit, Immutable Release)
+# ASRSub simple immutable Compose deployment
 
-**Requirement (not executed evidence):** images are built by CI and published
-as immutable OCI digests. The tracked `docker-compose.yml` is a template; the
-sole renderer is `tools/compose_provenance.py`, which produces the exact
-interpolation-free candidate installed at `/usr/local/libexec/asrsub/compose.yaml`.
-The template hash and rendered Compose hash are separate approval-bound
-identities. A mutable tag or registry lookup is never a production identity.
+This is the operator runbook for routine ASRSub deployment. It is self-contained:
+all routine status, preflight, apply, verification, and rollback actions use
+`tools/asrsub_deploy.py`. This checkout does not claim that a production
+deployment, rollback, secret activation, or hardened-residue transition has
+run.
 
-**Rollout-only evidence:** the final digest, release SHA, signed bundle,
-approval generation, installed inventory, and target receipt must be read back
-on the approved target before systemd may start the runtime. This document
-does not claim that any rollout, secret activation, or host mutation has run.
+## 1. Authoritative deployment model
 
-## What's in the image
+The routine model is one Docker Compose service and one immutable image:
 
-Single statically-built `asrsub` Rust binary + ffmpeg + ca-certs on
-Debian slim. **No Python, no model weights, no GPU runtime** — all Whisper
-and LLM inference is remote via `asrsub_providers.json`, of which the image
-bakes only the **keyless template** (`asrsub_providers.json.example`):
-images never carry keys. At runtime leave `api_key` empty and supply the
-`key_env` vars in
-`/home/user/.config/asr-pipeline/secrets/provider_keys.env` (`chmod 600`;
-override the path with `PROVIDER_KEYS_FILE`), which the shipped compose loads
-into the container environment through `env_file`. `resolve_key` prefers a
-non-empty `api_key` and otherwise reads `$key_env` from the process
-environment at call time, and Docker populates that environment when the
-container starts — so after rotating a key, re-run `docker compose up -d`
-(Compose recreates the container when the rendered environment changes).
-The operator dashboard is server-rendered by the daemon at `/` and `/ui/*`
-(JavaScript/CSS embedded in the binary — no runtime asset files). Read views
-are open; settings and episode actions use ordinary POST/redirect/GET and
-require the control key, entered once in the dashboard header (kept in
-`sessionStorage` only). Successful mutations return `303 See Other` to a
-complete page; failures remain complete HTML responses with their original
-status. Settings writes go to `config.overrides.json` and apply on the next
-daemon restart.
+| Setting | Default | Contract |
+| --- | --- | --- |
+| SSH target | supplied by `--target` | no implicit host is used |
+| Expected hostname | supplied by `--expected-hostname` | checked on the target before any write |
+| Project directory | `/opt/mediastack/asrsub` | override with `--project-directory` |
+| Compose file | `compose.yaml` in the project | override with `--compose-file` |
+| Non-secret Compose env file | `.env` in the project | override with `--env-file` |
+| Service | `orchestrator` | override with `--service` |
+| Compose project name | `asrsub` | override with `--project-name` |
+| Readiness port | `8085` via `WEBHOOK_PORT` | override with `--webhook-port` |
+| Container media prefix | `/mnt/nas/share/media` via `NAS_MEDIA_PREFIX` | override with `--nas-media-prefix` |
+| Image identity | `ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` | exact digest only |
 
-The settings form exposes only keys the config layers control. A few tuning
-knobs are read straight from the process environment by their consumers
-(`providers.rs`, `jimaku.rs`), so **neither** the dashboard's
-`config.overrides.json` **nor** `pipeline.env` reaches them — `pipeline.env`
-is parsed into the config map, never exported into the process environment.
-Put these in the container environment (the compose `environment:` block or
-the optional `env_file`): `LLM_PER_ENDPOINT_CONCURRENCY`, `LLM_TIMEOUT_S`,
-`LLM_CONNECT_TIMEOUT_S`, `LLM_READ_TIMEOUT_S`, `TRANSLATION_TIMEOUT_S`,
-`WHISPER_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `JIMAKU_BASE_URL`,
-`JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_TIMEOUT`,
-`ANILIST_BASE_URL`, `RUST_LOG` (verbosity, `EnvFilter` syntax).
-`ANILIST_CACHE` is **not** one of these: it is an ordinary settings field,
-editable in the dashboard and settable from `pipeline.env`. Each provider entry's `key_env` is also read from the process
-environment, never from a config file — that is how `provider_keys.env`
-reaches the pipeline.
+The tracked candidate is `deploy/compose.simple.yaml`. It has one
+`orchestrator`, host networking, `restart: unless-stopped`, and no build
+directive. It mounts the existing config, cache, state, and media paths. The
+provider key file is an optional Compose `env_file`; its absence does not make
+Compose invalid. The host secret directory is mounted read-only at
+`/run/secrets`, so `/run/secrets/control_api_key` is available when present and
+an absent optional `discord_webhook` file disables that optional integration.
+The template contains no secret values and no top-level Compose `secrets:` file.
 
-An **empty** variable is not a value: it pins nothing, it is skipped when the
-layers merge, it is treated as unset by the consumers above, and a file value
-survives it. `WEBHOOK_PORT=` in the compose `.env` therefore cannot blank a
-setting. One exception: an empty `RUST_LOG` is a *valid empty filter* for
-`EnvFilter`, so it silences the daemon instead of falling back to the default
-level — unset the variable, or set a level. Note the other direction too: blanking a variable does **not** clear a
-value that lives in `pipeline.env` or `config.overrides.json`. To clear one,
-edit that file, `POST /api2/config {"KEY":""}`, or delete the key from
-`config.overrides.json` — the settings form never submits an empty `Secret`.
+`ASRSUB_IMAGE` must be the exact lowercase digest reference. A tag, including a
+full-SHA lookup tag, is rejected by the tool. The tool never resolves a tag and
+never runs a registry lookup to turn a tag into an identity.
 
-Two settings are **pinned by the shipment**, because the bind mount and the
-reverse proxy must agree with the daemon: `NAS_MEDIA_PREFIX` and
-`WEBHOOK_PORT`. Compose exports both into the container, process env outranks
-every config layer, so the dashboard renders them read-only — a value saved
-from the UI could never take effect. Change them in the compose `.env`.
+## 2. Prerequisites and read-only checks
 
-## Prerequisites
+The operator machine needs Python 3 and an SSH client. The target needs:
 
-## Hardened boundary (requirements)
+- the expected hostname and non-interactive SSH access;
+- Docker Engine, the Docker Compose plugin, `findmnt`, and `ss`;
+- the active project, Compose file, non-secret `.env`, and `orchestrator` service;
+- `/home/user/.config/asr-pipeline`, `/home/user/.cache/asr-pipeline`,
+  `/var/lib/asrsub/state`, and the mounted `/mnt/nas/share/media` directory;
+- `/home/user/.config/asr-pipeline/secrets` as a real directory;
+- an existing healthy service for a deploy backup. Provider keys are optional,
+  but a deployment without resolvable provider keys will not be ready.
 
-- Runtime secrets are staged by a root-owned, journaled deployment operation
-  into `/var/lib/asrsub/runtime-secrets/`; the container sees only the fixed
-  read-only projections `/run/secrets/discord_webhook` and
-  `/run/secrets/control_api_key`. The operator source directory, provider-key
-  source, approval files, rollback material, deployment journal, and Docker
-  socket are never mounted.
-- The application runs as UID/GID `1000:1000` with no capabilities and
-  `no-new-privileges`. StateFs is separate from the pipeline JSONL ledgers and
-  is admitted only after no-follow, ownership, mode, filesystem, and mount
-  identity checks. Systemd owns recovery and restart; Compose does not.
-- Deployment admission is blocked before quiesce, replacement, recovery, or
-  journal mutation and is reopened only after terminal journal, receipt,
-  evidence, and active-set witnesses read back. Pending notification state is
-  preserved across deployment; no drain/reset side effect is defined.
-- The daemon uses an in-process resolver snapshot for Discord. It does **not**
-  claim a Discord-only firewall or cgroup allowlist because Discord shares the
-  ASRSub process with other integrations.
-
-**Local evidence:** disposable fixtures and localhost/fake transports verify
-Compose projections, journal transitions, StateFs behavior, child policy,
-provenance, and receipts. **Rollout-only evidence:** effective container
-mounts, cgroup delegation, resolver peers, systemd ownership, running image
-identity, and rollback timestamps require a target-VM receipt.
-
-- GHCR read access on the host (one time):
-  ```bash
-  docker login ghcr.io   # PAT with read:packages
-  ```
-
-- Secret file present on host (not in repo, not in compose env):
-  ```bash
-  mkdir -p /home/user/.config/asr-pipeline/secrets
-  chmod 700 /home/user/.config/asr-pipeline/secrets
-  # Create secret file with raw key (no newline, chmod 600)
-  printf '%s' '<CONTROL_API_KEY>' > /home/user/.config/asr-pipeline/secrets/control_api_key
-  chmod 600 /home/user/.config/asr-pipeline/secrets/control_api_key
-  # Verify compose picks it up (requires ASRSUB_IMAGE to be set for config rendering):
-  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> CONTROL_API_KEY_FILE_HOST=/home/user/.config/asr-pipeline/secrets/control_api_key docker compose config | grep -A2 control_api_key
-  ```
-  The file is mounted as a Docker Compose secret at `/run/secrets/control_api_key` inside containers. Environment `CONTROL_API_KEY` is only for hermetic tests.
-
-- Provider API keys, if the providers file leaves `api_key` empty. One
-  `KEY_ENV=value` line per `key_env` name the file references:
-  ```bash
-  printf '%s\n' 'OPENROUTER_API_KEY=...' 'OPENCODE_ZEN_API_KEY=...' \
-    'COMMANDCODE_API_KEY=...' 'NOUS_API_KEY=...' \
-    > /home/user/.config/asr-pipeline/secrets/provider_keys.env
-  chmod 600 /home/user/.config/asr-pipeline/secrets/provider_keys.env
-  # Verify the rendered container environment picks them up. `docker compose
-  # config` interpolates env_file values, so print the names only — piping it
-  # through a plain grep would print the live keys into your scrollback:
-  ASRSUB_IMAGE=ghcr.io/bedasrv/asrsub:<full-40-char-sha> docker compose config \
-    | grep -oE '^ *[A-Z_]+_API_KEY:'
-  ```
-  The compose `env_file` entry is `required: false`, so a deployment that
-  keeps every key inside the mode-600 providers file still validates. (That
-  mapping form, with `required:`, needs Docker Compose v2.24+; older plugins
-  reject the file.) Values
-  are readable by anyone who can run `docker inspect` on the container — on a
-  single-admin host that is the same exposure as the providers file it
-  replaces, and it keeps keys out of the config the daemon re-reads.
-
-- Non-control settings remain in `/home/user/.config/asr-pipeline/pipeline.env` (mounted as a volume, not injected as env); copy `pipeline.env.example` as a starting point. Do not put `CONTROL_API_KEY` there, and do not put provider API keys in it — provider keys live in the providers file or, preferably, in `secrets/provider_keys.env` via each entry's `key_env` (see above).
-
-- Media layout (see `HEALTH.md`). Two settings describe the same media from
-  two vantage points and are both configurable:
-  - `NAS_MEDIA_PREFIX` (default `/mnt/nas/share/media`) — where **this
-    container** reads media; `/data/…` paths from Sonarr/Radarr map here.
-    Set it in the compose `.env`, because the bind mount must match.
-  - `JELLYFIN_MEDIA_ROOT` (default `/media`) — the path prefix the
-    **Jellyfin server** reports; set it in `pipeline.env` to match Jellyfin.
-    The compose file also uses the value from *its own* environment as the
-    target of the second (read-only) media mount, and Compose cannot read
-    `pipeline.env`: change it in both places, or leave it at `/media`.
-  `MEDIA_HOST_PATH` is the host directory bind-mounted into the container
-  (default `/mnt/nas/share/media`), mounted at both prefixes.
-
-- Jellyfin has **no compiled-in URL**; set `JELLYFIN_URL` explicitly in
-  `pipeline.env` (or leave it empty to disable refresh). A key without a URL
-  logs a warning and `/ready` reports `jellyfin_misconfigured`.
-
-- Check health prerequisites (see `HEALTH.md`):
-  ```bash
-  df -T /home/user/.config/asr-pipeline
-  mountpoint -q /mnt/nas/share/media && echo "NFS mounted" || echo "NFS missing"
-  ls -lh /home/user/.config/asr-pipeline/*.jsonl 2>/dev/null || echo "no state ledgers yet (first boot is fine)"
-  ```
-
-## Build (CI-owned, immutable, versioned)
-
-Every push to `main` triggers `.github/workflows/release.yml`: it builds
-and publishes a release identified by the full Git SHA and its registry content
-digest. The SHA tag is a lookup label for CI and development; the production
-approval records the immutable
-`ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` reference. A mutable tag or
-registry lookup is never a production identity. The workflow emits the
-non-secret release descriptor as an artifact (`release.json`:
-`asrsub_image` / `git_sha` / `build_time` — no secrets).
-
-`build.sh` remains for local/dev builds only: it tags the same
-`ghcr.io/bedasrv/asrsub:<git-sha>` scheme (override the registry with
-`ASRSUB_REGISTRY=` for mirrors), emits `.release.env` + `release.json`
-locally, and **never pushes**. It never runs `docker compose down`,
-`docker rmi`, or `docker builder prune`.
-
-- Never deploy a mutable `latest` tag or a SHA tag alone. Production accepts only the approved full `@sha256:` image reference.
-- Retains volumes: `/home/user/.config/asr-pipeline`, `/home/user/.cache/asr-pipeline`, and the host media directory.
-- Single `orchestrator` service: the daemon serves the dashboard at `/` and the API at `/api2/*`; there is no separate dashboard replica (a read-only state mount used to restart-loop with `EROFS`).
-- Release descriptor contains only `ASRSUB_IMAGE` / `GIT_SHA` / `BUILD_TIME` — no secrets.
-
-## External signer boundary
-
-`tools/signer_argv_policy.json` is a non-secret, repository-side contract for
-the Option-A release signer. `tools/asrsub_signer_supervisor.c` is built twice
-by `tools/build_signer_supervisors.sh`, producing the fixed-role launchers
-`/usr/local/sbin/asrsub-bundle-signer` and
-`/usr/local/sbin/asrsub-approval-signer`. The build contains no private
-material; install it as root on the approved signing host:
+Run these commands from the repository checkout. They are read-only. `status`
+reads service status and bounded metadata. `preflight` additionally requires
+ownership, paths, mount, port, health, and immutable active-image checks.
 
 ```bash
-sudo tools/build_signer_supervisors.sh
+./tools/asrsub_deploy.py status \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
+
+./tools/asrsub_deploy.py preflight \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
 ```
 
-The `--output-dir` option is only a test seam and is constrained to a
-no-symlink directory below `/tmp/agent-scratch` or `/var/tmp`; production
-installation is fixed at `/usr/local/sbin` and uses `/usr/bin/cc` and
-`/usr/bin/install`.
+The exact preflight operation does not stage files, create backups, pull an
+image, recreate a container, stop a service, restart Docker/systemd, or delete
+anything. It uses read-only Docker/Compose queries, `findmnt` for media, file
+metadata checks, and port ownership checks. It never prints resolved Compose
+configuration, container environment values, or secret contents.
 
-The bundle supervisor uses the root-owned `0400` key
-`/etc/asrsub/signing/bundle-signing-key.pem`; the approval supervisor uses
-`/etc/asrsub/signing/approval-key.pem`. The parent directory and both key files
-are deployment inputs, never repository files. The supervisor accepts only its
-fixed role token (`asrsub-bundle-signing-key` or `asrsub-approval-key`), an
-absolute no-symlink implementation root, and the exact command in
-`tools/signer_argv_policy.json`. It opens the compiled-in key
-without putting its path in `argv`, the environment, logs, or receipts, then
-passes it only as FD 3 (bundle) or FD 4 (approval). All other inherited
-non-standard descriptors are closed before the direct `execve`.
-Before execution it revalidates the root-owned, non-writable `tools/` scripts
-and the fixed release input trees without following links; output paths are
-intentionally not part of that validation. A privileged root attacker who can
-replace files after validation remains outside this user-space boundary.
+A successful preflight is a structured result with `"ok":true`, an immutable
+`active_image`, `container_mounts:true`, `port_owned:true`, and healthy status.
+A failed preflight exits non-zero and reports a bounded failure summary. The
+summary is intentionally not a copy of Docker stderr.
 
-For a trusted, root-owned repository checkout containing the current `release/`
-inputs, the host invokes the role launcher with the matching token and root;
-the command after `--` must be copied exactly from the policy. The Python
-signers retain the current RSA contract: `/usr/bin/openssl dgst -sha256` signs
-through that FD, and no Ed25519 path is supported.
+## 3. CI release descriptor and immutable image
 
-`tools/asrsub-env` starts the signer in its own process group and forwards
-SIGHUP, SIGINT, and SIGTERM to that group so cancellation does not strand the
-OpenSSL descendant.
+`.github/workflows/release.yml` is the image publishing path. The
+`docker/build-push-action` step is named `build`; its `digest` output is the
+registry digest emitted for the pushed image. The workflow writes a non-secret
+artifact named `release.json` containing:
 
-The repository does not open or hand off a production private key, fabricate a
-signed bundle, or claim target signing/rollout evidence. Key provisioning,
-trusted release inputs, supervisor installation, trust-anchor installation, and
-target evidence remain external deployment prerequisites. The release workflow
-is still image-only and contains no signing-key handoff.
+```json
+{
+  "asrsub_image": "ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>",
+  "image_digest": "sha256:<64-lowercase-hex>",
+  "lookup_tag": "ghcr.io/bedasrv/asrsub:<full-git-sha>",
+  "git_sha": "<full-git-sha>",
+  "build_time": "<UTC timestamp>"
+}
+```
 
-## Deploy (systemd-owned, explicit, immutable)
+`lookup_tag` is retained only as a CI/release lookup label. The deploy tool
+consumes `asrsub_image` only after its exact digest validation; it does not
+consume `lookup_tag`, `git_sha` as an image, or any mutable tag.
 
-Production deployment is owned by systemd and the checked-in fixed-path
-adapters. The recovery unit must pass before Docker or runtime reconciliation
-can start. The adapter reads the authenticated release transaction, verifies the
-rendered Compose hash and `@sha256:` image identity, pulls only that digest,
-and starts Compose with the fixed project and `/dev/null` environment file using
-`up -d --no-build --pull=never`. It does not accept caller-selected Compose files, `.env` files, override files,
-Docker contexts, proxies, or mutable tags.
+After downloading the CI artifact, inspect only the non-secret descriptor and
+set the image variable without changing it:
 
 ```bash
-# These are the fixed systemd entrypoints; systemd owns their invocation.
-/usr/local/libexec/asrsub/asrsub-recover --preflight
-/usr/local/libexec/asrsub/asrsub-runtime --reconcile
+IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding="utf-8"))["asrsub_image"])')"
+printf '%s\n' "$IMAGE"
 ```
 
-A missing approval, trust anchor, rendered Compose file, StateFs root, runtime
-inventory member, or Docker executable blocks with a non-zero status. This
-checkout has not executed a production rollout and does not fabricate a signed
-bundle or target evidence.
+The printed value must match
+`ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>`. Do not substitute the
+`lookup_tag` value. The repository's `build.sh` remains a local build helper;
+it does not produce the CI digest and is not the routine deployment path.
 
-For local or fixture-only checks, keep using the explicit `--test-seam` or
-fixture harnesses. Do not run bare `docker compose config`: it can resolve
-`env_file` values into output. A non-production development check may use
-`docker compose pull`, but that command is not the production deployment path.
+## 4. Exact operator commands
 
-## Readiness verification
+The commands below use placeholders, not credentials. Set `IMAGE` from the
+CI `release.json` as shown above. If a site keeps additional non-secret
+settings, pass a non-secret source file with `--env-source`; the tool rejects
+secret-bearing env keys and never reads the provider key file.
 
-A ready deployment answers `200` on `/ready`; a `503` names the failing
-local check (`checks.media_root`, `checks.providers`, `checks.state_dir`)
-and reports integrations as diagnostics. A deployment smoke test is
-provided:
+### Status (read-only)
 
 ```bash
-scripts/deploy_smoke.sh                      # defaults to http://127.0.0.1:8085
-BASE_URL=http://127.0.0.1:8085 scripts/deploy_smoke.sh
+./tools/asrsub_deploy.py status \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
 ```
 
+This changes nothing. It reads Docker/Compose status, container labels and
+safe identity fields, required-path metadata, the media mount, and port state.
+It does not pull, apply, restart, recreate, or remove a container.
 
-## Reverse proxy & firewall (port 8085)
-
-The daemon listens on `0.0.0.0:${WEBHOOK_PORT}` (default `8085`) — both the
-dashboard/API and the `/webhook` receiver share it. Putting it behind an
-authenticated reverse proxy (Pomerium, oauth2-proxy, nginx, Traefik, …)
-requires the network path to actually reach the upstream, not just a
-working SSO page.
-
-- **Upstream target**: `http://<asrsub-host>:8085` on the LAN/DMZ. With
-  `network_mode: host` the proxy can target the host directly.
-- **Firewall/ACL**: allow the **proxy host → asrsub host, TCP 8085**. A
-  missing DMZ-to-LAN allowlist entry is the most common failure: the public
-  route returns the SSO `302` (proxy healthy) while the authenticated
-  upstream path is blocked.
-- **Probes**: point the proxy health check at `/health` (liveness) or
-  `/ready` (readiness). Both are unauthenticated GETs; do not require SSO
-  for them.
-- **WebSockets / long-lived connections**: enable upgrade/streaming
-  timeouts for `/` and `/api2/*` if the dashboard holds a connection; keep
-  `/webhook` reachable from the media server (it is authenticated by
-  `X-API-Key`/`X-Control-Key`).
-- **SSO vs upstream**: an unauthenticated request returning the IdP `302`
-  proves only that the proxy works. Verify the upstream itself from the
-  **proxy network** and from a trusted host:
-
-  ```bash
-  # From the proxy host/network: the origin must answer directly.
-  curl -sf -o /dev/null -w '%{http_code}\n' http://<asrsub-host>:8085/health   # expect 200
-  curl -sf -o /dev/null -w '%{http_code}\n' http://<asrsub-host>:8085/ready    # expect 200
-  # Public, unauthenticated: expect a 302 to the IdP, NOT a 200.
-  curl -s -o /dev/null -w '%{http_code} -> %{redirect_url}\n' https://asrsub.example.com/
-  # Authenticated through the proxy: expect the dashboard HTML.
-  curl -sf -H 'Cookie: <session>' https://asrsub.example.com/health | jq .
-  ```
-
-A public `200` on protected routes means auth is bypassed; a public `302`
-with a dead authenticated path means the firewall/ACL above is missing.
-
-## Upgrading from the two-service layout
-
-Older deployments ran `orchestrator` **and** a second daemon as `dashboard`
-on `WEBHOOK_PORT=8080` over a read-only state mount. That replica
-restart-looped with `EROFS` and is gone: one service now serves `/` and
-`/api2/*` on `WEBHOOK_PORT` (default 8085), so update anything that pointed
-at `:8080` — proxies, bookmarks, uptime monitors.
-
-`pctl` follows the same single-service API. Two subcommands changed:
-`status2` is now `api-status`, and `config unset` was removed (delete the key
-from `config.overrides.json` instead). A key file outranks the variable, and the
-candidates are tried in this order: `CONTROL_API_KEY_FILE` (the environment
-variable if set, else that config key, whose shipped default is
-`/run/secrets/control_api_key`), then the literal
-`/run/secrets/control_api_key`, and only then the `CONTROL_API_KEY`
-**environment variable**, which exists as a test fallback. An empty
-`CONTROL_API_KEY` therefore contributes no key, and with no key file present
-every control request is refused — but blanking the variable alone does **not**
-disable the control API while a key file is there; remove the secret file as
-well. No value of `CONTROL_API_KEY_FILE` can prevent the daemon reading
-`/run/secrets/control_api_key`: the literal path is an unconditional candidate,
-and an empty variable is treated as unset, so the config key falls back to that
-same default. The *token* is never read
-from a config *value*: a key written into `pipeline.env` or
-`config.overrides.json` does not authenticate, and the daemon no longer reads
-`PIPE_TOKEN`. The *path* in `CONTROL_API_KEY_FILE` is an ordinary config key,
-so any layer may point it somewhere else
-(`CONTROL_API_KEY_FILE=/srv/keys/asrsub` in `pipeline.env` works and that
-file's contents then authenticate). The bundled `pctl` client is separate and
-reads the sources in the **opposite** order — `PIPE_TOKEN`, then
-`CONTROL_API_KEY`, then `CONTROL_API_KEY_FILE`, `/run/secrets/control_api_key`
-and `<config dir>/secrets/control_api_key` — so a client whose environment
-holds a stale `PIPE_TOKEN` sends a token the daemon will not accept.
-
-## Rollback (approved digest, systemd-owned)
-
-Read the previous release descriptor and approval transaction. A previous SHA
-tag such as `ghcr.io/bedasrv/asrsub:<previous-40-char-sha>` is only a lookup
-label; it must resolve to a newly authenticated immutable digest before use.
-Do not point production Compose at a tag.
+### Preflight (read-only gate)
 
 ```bash
-# The recovery gate and runtime reconcile consume the approved previous digest.
-/usr/local/libexec/asrsub/asrsub-recover --preflight
-/usr/local/libexec/asrsub/asrsub-runtime --reconcile
+./tools/asrsub_deploy.py preflight \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
 ```
 
-Do NOT use `docker tag ... :latest` — the mutable latest tag is intentionally
-absent from the production flow.
+This changes nothing. It is the required gate immediately before `deploy`.
+It verifies Docker/Compose, active `asrsub`/`orchestrator` ownership, required
+paths, `findmnt -T /mnt/nas/share/media`, secret-file metadata, port ownership,
+container mounts, healthy status, and an immutable active image identity.
 
-## Paused Startup
+### Deploy/apply (the only routine mutating command)
 
-Not implemented at boot: the daemon always starts unpaused (no `paused`
-file, no `PAUSED=1` handling — those belonged to the retired Python
-daemon). The systemd-owned runtime starts only after the authenticated
-reconciliation gate passes. Do not manually start a mutable image to hold the
-backlog.
+```bash
+IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding="utf-8"))["asrsub_image"])')"
+./tools/asrsub_deploy.py deploy \
+  --target <target-host> \
+  --expected-hostname <expected-hostname> \
+  --image "$IMAGE"
+```
 
-## Notes
+Before any target write, the streamed remote script verifies the target
+hostname and runs the preflight gate. It then:
 
-- No secret values in code, docs, tests, or logs. Release descriptor (`.release.env` / `release.json`) is non-secret by construction.
-- Source language fails closed: the audio track is picked by its real tag and that code is sent to Whisper; a tag that is absent **or unusable** (`und`, `unknown`, an empty/whitespace tag) is not sent at all — such a track is probed unforced and the detected code pins the rest. If the language cannot be established the episode errors (state row `error`) and nothing is uploaded or registered `done` — a deployment never commits a subtitle whose source language is unknown. Expect no `source_stream`/`source_lang` in the registry `extra` for old rows; new rows carry `source_lang` on **every** row and `source_stream` on **ASR rows only** (ladder rows have no chosen audio stream).
-- Build and deploy logs must redact `CONTROL_API_KEY`.
-- Verify after deploy: `HEALTH.md` probes, `docker compose ps`, and `pipeline.env` contains no control key.
+1. creates a timestamped `.asrsub-rollback/<timestamp>/` backup containing the
+   active `compose.yaml`, active non-secret `.env`, and the previous image
+   identity;
+2. atomically stages the candidate Compose and non-secret env files;
+3. runs the quiet Compose validation action (`docker compose config -q`);
+4. pulls only the exact digest represented by `ASRSUB_IMAGE` (the remote
+   action is the equivalent of `docker compose pull orchestrator` with the
+   candidate digest, never a tag);
+5. applies only `docker compose ... up -d --no-build --pull=never orchestrator`;
+6. waits a bounded 60 seconds for both `/health` and `/ready` to return HTTP 200;
+7. verifies the running container's image reference, image digest/repo digest,
+   image ID, mounts, and Docker health status.
+
+It never runs Compose `down`, a Docker daemon/systemd restart, an image prune,
+volume prune, broad deletion, or a build. Old images are retained.
+
+### Verify (read-only)
+
+Run the tool status check and the two bounded local HTTP probes from the target
+(or from a host that can reach the target's host-network port):
+
+```bash
+./tools/asrsub_deploy.py status \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
+
+curl --fail --silent --show-error http://127.0.0.1:8085/health
+curl --fail --silent --show-error http://127.0.0.1:8085/ready
+```
+
+Successful probes return HTTP 200 and JSON/response bodies from the service;
+the deployment tool itself does not copy those bodies into its output. A
+non-zero `curl` result or HTTP 503 means the deployment is not ready. Verify
+also confirms that the active image is the requested `@sha256:` digest, not a
+tag.
+
+### Rollback (mutating, but pull-free)
+
+```bash
+./tools/asrsub_deploy.py rollback \
+  --target <target-host> \
+  --expected-hostname <expected-hostname>
+```
+
+Rollback checks the hostname before writes, selects the most recent verified
+backup whose recorded previous image is an immutable digest, and treats the
+backed-up `ASRSUB_IMAGE` digest as the only rollback identity. It atomically
+restores that Compose/env pair, and runs `docker compose ... up -d --no-build
+--pull=never orchestrator`. It does not pull, retag, prune, stop first, or use a
+mutable tag. It waits for `/health` and `/ready`, then verifies the old image,
+health, and mounts. If no verified immutable backup exists, it exits non-zero
+without changing the active files.
+
+## 5. Health gates and automatic recovery
+
+The deployment gate is bounded. Both endpoints must return 200 within 60
+seconds after apply:
+
+- `/health` proves the daemon is live;
+- `/ready` proves the configured readiness checks, including media/state and
+  provider readiness, pass.
+
+Expected success output is a short structured result similar to this; image
+IDs and paths are non-secret metadata:
+
+```json
+{"backup":"20260918T120000Z","image":"ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>","ok":true,"operation":"deploy","verification":{"health":"healthy","mounts_verified":true}}
+```
+
+A config, pull, apply, bounded readiness, or post-apply identity failure
+restores the timestamped backup and runs the old Compose files with
+`--pull=never`. The command returns non-zero even when automatic rollback
+succeeds. Expected failure output has `"ok":false` and an explicit rollback
+status, for example the following explicit `rollback status` field:
+
+```json
+{"backup":"20260918T120000Z","ok":false,"operation":"deploy","rollback":{"ok":true}}
+```
+
+If automatic rollback itself fails, do not retry destructive commands. Run the
+manual rollback command after fixing only the reported prerequisite, then
+repeat the read-only verify checks. A manual rollback never pulls an image.
+
+## 6. Secret handling
+
+Secret values are external deployment inputs. The simple template contains no
+secret values and the deploy tool accepts no secret argument.
+
+| Input | Host location | Required metadata |
+| --- | --- | --- |
+| Control API key | `/home/user/.config/asr-pipeline/secrets/control_api_key` | parent directory `0700`, file `0600`, root/owner-controlled |
+| Optional Discord webhook | `/home/user/.config/asr-pipeline/secrets/discord_webhook` | if present, file `0600`; absence disables it |
+| Provider key env file | `/home/user/.config/asr-pipeline/secrets/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
+| Container projection | `/run/secrets` | read-only bind mount |
+
+The operator must enforce `chmod 600` on each present secret file and `chmod 700`
+on the secret directory without displaying its contents.
+
+The preflight reads secret-file metadata with `lstat`; it does not open or read
+secret values. The remote script never includes secret file contents, resolved
+Compose config, raw Docker output, or raw SSH stderr in its result. Operators
+and agents must **never print or read secret values in logs**, shell history,
+CI output, or troubleshooting transcripts. Do not run an unfiltered
+`docker compose config`, `docker inspect` that includes `.Config.Env`, or a
+plain grep that prints env-file values. If a separate reviewed diagnostic must
+list provider variable names, use only the names-only form
+`grep -oE '^ *[A-Z_]+_API_KEY:'`; do not omit the `-o` names-only option,
+because a plain match prints live values. If a secret value appears in output,
+stop, rotate it out-of-band, and treat the log as compromised.
+
+Non-secret values belong in the target `.env` and are represented by
+`deploy/asrsub.env.example`. The tool may stage `ASRSUB_IMAGE`, `WEBHOOK_PORT`,
+`NAS_MEDIA_PREFIX`, `PROVIDER_KEYS_FILE`, and other explicitly non-secret
+settings. It will not read `provider_keys.env` as a candidate env source.
+
+## 7. Forbidden routine commands
+
+Do not use any of these commands for routine deployment or recovery:
+
+```text
+docker compose down
+docker compose rm -f
+docker system prune -af
+docker image prune -af
+docker volume prune -af
+systemctl restart docker
+systemctl restart asrsub-runtime.service
+docker tag ...:latest ...
+docker compose up -d --build
+rm -rf /opt/mediastack/asrsub
+```
+
+This includes equivalent aliases, broad deletion of the project or data mounts,
+mutable `latest`/SHA-tag deployment, Docker daemon restart, and daemon/systemd
+restart. The routine tool deliberately has no `down`, `prune`, `rm`,
+`systemctl`, image-prune, or broad-delete command path.
+
+## 8. One-time transition: hardened residue
+
+The repository still contains the previous hardened systemd/drop-in/runtime
+implementation for audit and transition purposes. Removing it is **not** part
+of routine Compose deployment. It is a separate, explicitly authorized,
+one-time change window with a named operator, backup, and read-only inventory.
+No such transition has run from this checkout.
+
+The transition inventory must identify, before removal, only the installed
+residue that is actually present:
+
+- `/etc/systemd/system/asrsub-recovery.service`;
+- `/etc/systemd/system/asrsub-runtime.service`;
+- the Docker drop-in
+  `/etc/systemd/system/docker.service.d/asrsub-recovery.conf`;
+- `/usr/local/libexec/asrsub` and its installed runtime helpers.
+
+The old fixed entrypoints (`asrsub-recover --preflight` and
+`asrsub-runtime --reconcile`) are legacy transition evidence, not the routine
+path. An authorized transition may disable those units, remove only the
+reviewed per-file residue, run the required systemd manager reload, and verify
+that the simple Compose service remains the sole owner. It must not use
+`rm -rf`, broad deletion, or a daemon/systemd restart as a substitute for an
+inventory. Keep the old files until the transition owner confirms the new path;
+this document makes no claim that the transition or production deployment was
+executed.
+
+## 9. Troubleshooting
+
+- **Hostname mismatch:** stop. Check the target's reported hostname and pass
+  the exact value to `--expected-hostname`. No files were written before this
+  check.
+- **Missing Docker/Compose:** install or repair the target prerequisites. Do
+  not bypass the tool with a manual Compose command.
+- **Project/service ownership failure:** inspect only safe `docker compose ps`
+  metadata and labels. Confirm project `asrsub` and service `orchestrator`; do
+  not take over an unrelated project.
+- **Missing path or media mount:** create/fix the approved non-secret directory
+  or NFS mount under the target change process. `findmnt -T
+  /mnt/nas/share/media` must identify a real mount, not merely a directory.
+- **Port ownership failure:** confirm `WEBHOOK_PORT` and that the intended
+  service owns the listening port. Do not stop an unrelated listener.
+- **Compose config failure:** inspect the non-secret `.env` names and the
+  Compose plugin version. Do not print the rendered config or provider env
+  values. The optional provider file requires Compose v2.24+ for
+  `required: false`.
+- **Pull failure:** confirm that CI published the exact digest in `release.json`
+  and that target access is authorized. Never replace it with a tag.
+- **Readiness 503 or timeout:** read the safe `/health`/`/ready` status and
+  application diagnostics. Check the media mount, state directory, and
+  provider-key presence without opening key files. Automatic rollback reports
+  its `rollback.ok` status.
+- **Digest or mount verification failure:** do not retry with `--pull=always`,
+  `latest`, or a manual container replacement. Use the manual rollback command
+  and preserve the backup for investigation.
+- **No rollback backup:** the tool refuses to guess. Restore a verified backup
+  through the approved change process; never reconstruct one from a tag.
+
+## 10. Agent runbook
+
+1. Confirm this checkout and the target are the intended environments; do not
+   access production while testing this tool.
+2. Obtain CI `release.json`; use only its `asrsub_image` `@sha256:` value.
+3. Run `status`, then the exact read-only `preflight`; stop on any failure.
+4. Confirm secret metadata only (`0700` directory, `0600` files); never print or
+   read secret values.
+5. Run `deploy --image "$IMAGE"`; capture only the structured result.
+6. Require `ok:true`, immutable image verification, healthy status, verified
+   mounts, and successful `/health` and `/ready` probes.
+7. On a failed deploy, require non-zero exit and inspect only `rollback.ok`.
+   If false, use `rollback` after fixing the bounded prerequisite.
+8. Record the commit, digest, backup timestamp, and structured result without
+   recording secrets.
+9. Do not remove hardened systemd/drop-in/runtime residue unless a separate
+   transition is explicitly authorized and reviewed.
+
+## Reverse proxy and firewall
+
+The host-network service listens on `WEBHOOK_PORT` (default 8085). A reverse
+proxy must reach `http://<asrsub-host>:8085`; allow proxy-host to target-host
+TCP 8085. Use `/health` for liveness and `/ready` for readiness. These probes
+are unauthenticated and must not require SSO. A public 302 only proves the
+proxy's login path; verify the upstream path separately. Do not expose the
+control API key or provider values while testing the route.
+
+## Existing application notes
+
+Non-control settings remain in `pipeline.env` and the operator config mounts.
+An empty environment variable pins nothing and a file value survives it; it
+also does not clear a value already in `pipeline.env` or
+`config.overrides.json`. The dashboard and API continue to use the single
+`orchestrator` service. Provider key rotation takes effect when the container
+is recreated by the next immutable apply, not through a live secret reload.
