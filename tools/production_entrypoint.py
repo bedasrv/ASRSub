@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import sys
+sys.dont_write_bytecode = True
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any
