@@ -12,7 +12,6 @@ use super::discord_transport::{DeliveryResult, DeliveryTransport};
 use super::discord_types::BoundedReports;
 
 pub(crate) const NOTIFIER_QUEUE_CAPACITY: usize = 8;
-pub(crate) const SHUTDOWN_DEADLINE_SECONDS: u64 = 20;
 
 #[derive(Debug)]
 pub(crate) enum NotifierWork {
