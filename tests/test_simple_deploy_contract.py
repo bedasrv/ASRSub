@@ -317,7 +317,9 @@ class TestComposeTemplateContract(unittest.TestCase):
             "/home/user/.cache/asr-pipeline",
             "/mnt/nas/share/media",
             "/run/secrets",
-            "/run/secrets/control_key",
+            "/run/secrets/control_api_key",
+            "/var/lib/asrsub/state",
+            "/run/secrets/discord_webhook",
         ):
             self.assertIn(needle, text, needle)
         self.assertNotIn("cgroup", text)
@@ -327,10 +329,11 @@ class TestComposeTemplateContract(unittest.TestCase):
         self.assertNotIn("control_api_key:", text)
         self.assertNotIn("discord_webhook:", text)
 
-    def test_config_mount_owns_current_ledgers_without_an_unused_state_mount(self):
+    def test_config_mount_keeps_application_ledgers_and_statefs_stays_separate(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("target: /home/user/.config/asr-pipeline", text)
-        self.assertNotIn("/var/lib/asrsub/state", text)
+        self.assertIn("source: /var/lib/asrsub/state", text)
+        self.assertIn("target: /var/lib/asrsub/state", text)
         self.assertNotIn("ASRSUB_CONFIG_DIR:", text)
         self.assertNotIn("STATE_FILE:", text)
 
@@ -368,7 +371,10 @@ class TestDeployDocumentationContract(unittest.TestCase):
             "saved previous mount contract",
             "legacy/tag",
             "current pipeline ledgers",
-            "no separate `/var/lib/asrsub/state` mount",
+            "production Discord StateFs",
+            "/var/lib/asrsub/state",
+            "remains mounted",
+            "not migrated",
             "release.json",
             "ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>",
             "docker compose config -q",
@@ -408,7 +414,7 @@ class TestDeployDocumentationContract(unittest.TestCase):
 
 
 class TestDeployPhases(unittest.TestCase):
-    def test_strict_preapply_accepts_legacy_mounts_and_defers_candidate_verification(self):
+    def test_strict_preapply_accepts_known_hardened_legacy_mounts_and_defers_candidate_verification(self):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
@@ -442,6 +448,11 @@ class TestDeployPhases(unittest.TestCase):
                         "RW": True,
                     },
                     {
+                        "Source": "/var/lib/asrsub/state",
+                        "Destination": "/var/lib/asrsub/state",
+                        "RW": True,
+                    },
+                    {
                         "Source": "/mnt/nas/share/media",
                         "Destination": "/mnt/nas/share/media",
                         "RW": True,
@@ -453,7 +464,27 @@ class TestDeployPhases(unittest.TestCase):
                     },
                     {
                         "Source": "/var/lib/asrsub/runtime-secrets/control_key",
-                        "Destination": "/run/secrets/control_key",
+                        "Destination": "/run/secrets/control_api_key",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/var/lib/asrsub/runtime-secrets/discord_webhook",
+                        "Destination": "/run/secrets/discord_webhook",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children",
+                        "Destination": "/run/asrsub/children-cgroup",
+                        "RW": True,
+                    },
+                    {
+                        "Source": "/usr/local/libexec/asrsub/asrsub",
+                        "Destination": "/usr/local/bin/asrsub",
+                        "RW": False,
+                    },
+                    {
+                        "Source": "/var/lib/asrsub/egress-policy/egress-policy.json",
+                        "Destination": "/run/asrsub/egress-policy.json",
                         "RW": False,
                     },
                 ],

@@ -46,16 +46,19 @@ DEFAULT_WEBHOOK_PORT = "8085"
 DEFAULT_NAS_MEDIA_PREFIX = "/mnt/nas/share/media"
 DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
 DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
+DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
 DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
 DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
 DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
+STATE_CONTAINER_PATH = "/var/lib/asrsub/state"
 SECRETS_CONTAINER_PATH = "/run/secrets"
 MEDIA_CONTAINER_PATH = "/media"
 MANAGED_CONTAINER_PATHS = (
     CONFIG_CONTAINER_PATH,
     CACHE_CONTAINER_PATH,
+    STATE_CONTAINER_PATH,
     MEDIA_CONTAINER_PATH,
     SECRETS_CONTAINER_PATH,
 )
@@ -64,6 +67,7 @@ RESERVED_MEDIA_PREFIXES = (
     "/run",
     CONFIG_CONTAINER_PATH,
     CACHE_CONTAINER_PATH,
+    STATE_CONTAINER_PATH,
     MEDIA_CONTAINER_PATH,
     SECRETS_CONTAINER_PATH,
 )
@@ -404,11 +408,14 @@ def validate_template_text(text: str) -> None:
         "WEBHOOK_PORT",
         "NAS_MEDIA_PREFIX",
         "required: false",
-        "/run/secrets/control_key",
         DEFAULT_CONFIG_SOURCE,
         DEFAULT_CACHE_SOURCE,
+        DEFAULT_STATE_SOURCE,
         DEFAULT_RUNTIME_SECRETS_SOURCE,
+        DEFAULT_CONTROL_KEY_PATH,
         DEFAULT_PROVIDER_KEYS_FILE,
+        SECRETS_CONTAINER_PATH + "/control_api_key",
+        SECRETS_CONTAINER_PATH + "/discord_webhook",
     )
     if any(value not in text for value in required):
         raise ValueError("simple Compose template is missing an approved contract")
@@ -422,7 +429,6 @@ def validate_template_text(text: str) -> None:
         "source: /home/user/.config/asr-pipeline",
         "source: /home/user/.cache/asr-pipeline",
         "source: /home/user/.config/asr-pipeline/secrets",
-        "/var/lib/asrsub/state",
     ):
         if forbidden in text:
             raise ValueError("simple Compose template contains retired hardened runtime wiring")
@@ -764,11 +770,13 @@ FORBIDDEN = frozenset({"down", "prune", "rm", "restart", "systemctl", "daemon-re
 EXPECTED_LISTENER_PROCESS = "asrsub"
 DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
 DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
+DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
 DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
 DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
 DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
+STATE_CONTAINER_PATH = "/var/lib/asrsub/state"
 SECRETS_CONTAINER_PATH = "/run/secrets"
 MEDIA_CONTAINER_PATH = "/media"
 RESERVED_MEDIA_PREFIXES = (
@@ -776,6 +784,7 @@ RESERVED_MEDIA_PREFIXES = (
     "/run",
     CONFIG_CONTAINER_PATH,
     CACHE_CONTAINER_PATH,
+    STATE_CONTAINER_PATH,
     MEDIA_CONTAINER_PATH,
     SECRETS_CONTAINER_PATH,
 )
@@ -1210,9 +1219,11 @@ def expected_mounts(payload):
     return [
         (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
         (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
+        (DEFAULT_STATE_SOURCE, STATE_CONTAINER_PATH, True),
         (media, prefix, True),
         (media, MEDIA_CONTAINER_PATH, False),
         (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
+        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_api_key", False),
     ]
 
 
@@ -1259,42 +1270,44 @@ def mounts_match(identity, payload):
 
 
 def legacy_mounts_match(identity, payload):
-    """Accept only the known pre-simple data layout, never an unknown source."""
+    """Accept only the known hardened legacy layout, never an unknown source."""
     validate_nas_media_prefix(payload["nas_media_prefix"])
-    actual = set(contract_tuples(mount_contract(identity)))
+    entries = contract_tuples(mount_contract(identity))
+    if len(entries) != len(set(entries)):
+        return False
+    actual = set(entries)
     media = "/mnt/nas/share/media"
     required = {
         (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
         (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
+        (DEFAULT_STATE_SOURCE, STATE_CONTAINER_PATH, True),
         (media, payload["nas_media_prefix"], True),
         (media, MEDIA_CONTAINER_PATH, False),
+        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_api_key", False),
     }
-    if not required.issubset(actual):
-        return False
-    if any(destination == "/var/lib/asrsub/state" or destination.startswith("/var/lib/asrsub/state/") for _source, destination, _rw in actual):
-        return False
-    secret_mounts = {
-        (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
-        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_key", False),
-        (DEFAULT_RUNTIME_SECRETS_SOURCE + "/discord_webhook", SECRETS_CONTAINER_PATH + "/discord_webhook", False),
+    optional = {
+        (
+            DEFAULT_RUNTIME_SECRETS_SOURCE + "/discord_webhook",
+            SECRETS_CONTAINER_PATH + "/discord_webhook",
+            False,
+        ),
+        (
+            "/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children",
+            "/run/asrsub/children-cgroup",
+            True,
+        ),
+        (
+            "/usr/local/libexec/asrsub/asrsub",
+            "/usr/local/bin/asrsub",
+            False,
+        ),
+        (
+            "/var/lib/asrsub/egress-policy/egress-policy.json",
+            "/run/asrsub/egress-policy.json",
+            False,
+        ),
     }
-    secret_entries = {
-        entry for entry in actual
-        if entry[1] == SECRETS_CONTAINER_PATH or entry[1].startswith(SECRETS_CONTAINER_PATH + "/")
-    }
-    if not secret_entries or not secret_entries.issubset(secret_mounts):
-        return False
-    managed_destinations = {
-        CONFIG_CONTAINER_PATH,
-        CACHE_CONTAINER_PATH,
-        MEDIA_CONTAINER_PATH,
-        SECRETS_CONTAINER_PATH,
-        payload["nas_media_prefix"],
-    }
-    for entry in actual:
-        if entry[1] in managed_destinations and entry not in required and entry not in secret_mounts:
-            return False
-    return True
+    return required.issubset(actual) and actual.issubset(required | optional)
 
 
 def collect(payload, *, strict):
@@ -1310,6 +1323,7 @@ def collect(payload, *, strict):
     for name, path in (
         ("config", Path(DEFAULT_CONFIG_SOURCE)),
         ("cache", Path(DEFAULT_CACHE_SOURCE)),
+        ("state", Path(DEFAULT_STATE_SOURCE)),
         ("media", Path("/mnt/nas/share/media")),
         ("secrets", Path(DEFAULT_RUNTIME_SECRETS_SOURCE)),
     ):

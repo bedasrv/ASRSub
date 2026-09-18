@@ -25,27 +25,29 @@ The routine model is one Docker Compose service and one immutable image:
 
 The tracked candidate is `deploy/compose.simple.yaml`. It has one
 `orchestrator`, host networking, `restart: unless-stopped`, and no build
-directive. It deliberately preserves the target's existing legacy data layout:
+directive. It deliberately preserves the target's existing data layout:
 `/var/lib/asrsub/config` is bound to the container config target
 `/home/user/.config/asr-pipeline`, `/var/lib/asrsub/cache` is bound to
-`/home/user/.cache/asr-pipeline`, and `/var/lib/asrsub/runtime-secrets` is
-bound read-only to `/run/secrets`. The config mount owns the current pipeline
-ledgers (`state.jsonl`, `actions.jsonl`, `subtitle_registry.jsonl`, and related
-files). There is **no separate `/var/lib/asrsub/state` mount**, no copy or
-migration step, and the simple template does not set `ASRSUB_CONFIG_DIR` or
-`STATE_FILE`; the existing ledgers, cache, and secret files stay at their
-legacy host paths. The provider key file is the optional
-`/var/lib/asrsub/config/provider_keys.env` Compose `env_file`. The control key
-is projected as `/run/secrets/control_key` and `CONTROL_API_KEY_FILE` points to
-that legacy filename; an absent optional `discord_webhook` file disables that
-optional integration. The template contains no secret values and no top-level
-Compose `secrets:` file.
+`/home/user/.cache/asr-pipeline`, and the production Discord StateFs at
+`/var/lib/asrsub/state` is bound read-write to the same container path. The
+production Discord StateFs remains mounted and is not migrated, copied, or
+relocated. The config mount continues to own the ordinary application ledgers
+(`state.jsonl`, `refine_state.jsonl`, `actions.jsonl`,
+`subtitle_registry.jsonl`, and related files); the separate StateFs mount owns
+Discord notification state. The runtime-secrets directory is bound read-only
+to `/run/secrets` so its optional webhook remains available at
+`/run/secrets/discord_webhook`; the existing `control_key` file is additionally
+projected at `/run/secrets/control_api_key`, and `CONTROL_API_KEY_FILE` points
+to that fixed daemon interface. The provider key file is the optional
+`/var/lib/asrsub/config/provider_keys.env` Compose `env_file`. The template
+contains no secret values and no top-level Compose `secrets:` file.
 
 The no-migration contract is exact: preflight accepts the candidate mount set
-or the known legacy data mount set only. It rejects an unsafe or unknown
-config, cache, media, or secret source before any candidate file is written.
-The first simple deployment therefore changes the Compose wiring, not the
-location or contents of the existing ledgers/cache/secrets.
+or the known hardened legacy mount set only. It rejects an unsafe or unknown
+config, cache, state, media, or secret source before any candidate file is
+written. The first simple deployment therefore changes the Compose wiring, not
+the location or contents of the existing ledgers, Discord StateFs, cache, or
+secrets.
 
 `ASRSUB_IMAGE` must be the exact lowercase digest reference. A tag, including a
 full-SHA lookup tag, is rejected by the tool. The tool never resolves a tag and
@@ -59,8 +61,9 @@ The operator machine needs Python 3 and an SSH client. The target needs:
 - Docker Engine, the Docker Compose plugin, `findmnt`, and `ss`;
 - the active project, Compose file, non-secret `.env`, and `orchestrator` service;
 - `/var/lib/asrsub/config` (which is mounted at the container config target and
-  owns the current pipeline ledgers), `/var/lib/asrsub/cache`, and the mounted
-  `/mnt/nas/share/media` directory;
+  owns the ordinary application ledgers), `/var/lib/asrsub/cache`, and
+  `/var/lib/asrsub/state` (the production Discord StateFs) as real directories;
+- the mounted `/mnt/nas/share/media` directory;
 - `/var/lib/asrsub/runtime-secrets` as a real directory, with the required
   `control_key` file and optional `discord_webhook` file;
 - the optional `/var/lib/asrsub/config/provider_keys.env` file;
@@ -183,9 +186,10 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding=
 
 Before any target write, the streamed remote script verifies the target
 hostname and runs the pre-apply safety checks. The first simple deployment may
-start from the target's **known legacy Compose shape** (for example, a
+start from the target's **known hardened legacy Compose shape** (for example, a
 `/var/lib/asrsub/runtime-secrets/control_key` source projected at
-`/run/secrets/control_key`), as long as the current service is owned, healthy,
+`/run/secrets/control_api_key`, with the production StateFs mounted at
+`/var/lib/asrsub/state`), as long as the current service is owned, healthy,
 safely provisioned, and has a recoverable previous repo digest. The preflight
 rejects an unsafe or unknown legacy layout before this point. It then:
 
@@ -299,7 +303,7 @@ secret values and the deploy tool accepts no secret argument.
 | Control API key | `/var/lib/asrsub/runtime-secrets/control_key` | runtime-secrets directory `0700`, file `0600`, root/owner-controlled |
 | Optional Discord webhook | `/var/lib/asrsub/runtime-secrets/discord_webhook` | if present, file `0600`; absence disables it |
 | Provider key env file | `/var/lib/asrsub/config/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
-| Container projection | `/run/secrets` | read-only bind mount; control key remains named `control_key` |
+| Container projection | `/run/secrets` plus `/run/secrets/control_api_key` | read-only parent bind keeps the optional webhook path; the control key is projected at the daemon's fixed interface |
 
 The operator must enforce `chmod 600` on each present secret file and `chmod 700`
 on the secret directory without displaying its contents.
@@ -398,6 +402,7 @@ executed.
 - **Missing path or media mount:** create/fix the approved legacy directory or
   NFS mount under the target change process. The required data paths are
   `/var/lib/asrsub/config`, `/var/lib/asrsub/cache`, and
+  `/var/lib/asrsub/state` (production Discord StateFs), plus
   `/var/lib/asrsub/runtime-secrets`; `findmnt -T /mnt/nas/share/media` must
   identify a real mount, not merely a directory.
 - **Unsafe project directory:** stop. The project must be a current-owner,

@@ -48,24 +48,29 @@ def remote_payload(project: Path) -> dict[str, object]:
 
 
 class TestLegacyLayoutSafety(unittest.TestCase):
-    def test_candidate_uses_the_tracked_legacy_data_sources_without_state_mount(self):
+    def test_candidate_preserves_state_and_legacy_data_sources(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         for needle in (
-            "CONTROL_API_KEY_FILE: /run/secrets/control_key",
+            "CONTROL_API_KEY_FILE: /run/secrets/control_api_key",
             "path: ${PROVIDER_KEYS_FILE:-/var/lib/asrsub/config/provider_keys.env}",
             "source: /var/lib/asrsub/config",
             "target: /home/user/.config/asr-pipeline",
             "source: /var/lib/asrsub/cache",
             "target: /home/user/.cache/asr-pipeline",
+            "source: /var/lib/asrsub/state",
+            "target: /var/lib/asrsub/state",
             "source: /var/lib/asrsub/runtime-secrets",
             "target: /run/secrets",
+            "source: /var/lib/asrsub/runtime-secrets/control_key",
+            "target: /run/secrets/control_api_key",
+            "/var/lib/asrsub/runtime-secrets/discord_webhook",
+            "/run/secrets/discord_webhook",
         ):
             self.assertIn(needle, text)
         self.assertNotIn("source: /home/user/.config/asr-pipeline", text)
         self.assertNotIn("source: /home/user/.cache/asr-pipeline", text)
-        self.assertNotIn("/var/lib/asrsub/state", text)
 
-    def test_expected_mount_contract_is_the_no_migration_legacy_contract(self):
+    def test_expected_mount_contract_preserves_state_and_control_interface(self):
         remote = load_remote_namespace()
         expected = set(remote["expected_mounts"]({"nas_media_prefix": "/mnt/nas/share/media"}))
         self.assertEqual(
@@ -73,10 +78,95 @@ class TestLegacyLayoutSafety(unittest.TestCase):
             {
                 ("/var/lib/asrsub/config", "/home/user/.config/asr-pipeline", True),
                 ("/var/lib/asrsub/cache", "/home/user/.cache/asr-pipeline", True),
+                ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
                 ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                 ("/mnt/nas/share/media", "/media", False),
                 ("/var/lib/asrsub/runtime-secrets", "/run/secrets", False),
+                (
+                    "/var/lib/asrsub/runtime-secrets/control_key",
+                    "/run/secrets/control_api_key",
+                    False,
+                ),
             },
+        )
+
+    def test_current_known_hardened_legacy_mount_layout_is_accepted(self):
+        remote = load_remote_namespace()
+        identity = {
+            "mounts": [
+                {"Source": source, "Destination": destination, "RW": rw}
+                for source, destination, rw in (
+                    ("/var/lib/asrsub/config", "/home/user/.config/asr-pipeline", True),
+                    ("/var/lib/asrsub/cache", "/home/user/.cache/asr-pipeline", True),
+                    ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
+                    ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
+                    ("/mnt/nas/share/media", "/media", False),
+                    (
+                        "/var/lib/asrsub/runtime-secrets/control_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
+                    (
+                        "/var/lib/asrsub/runtime-secrets/discord_webhook",
+                        "/run/secrets/discord_webhook",
+                        False,
+                    ),
+                    (
+                        "/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children",
+                        "/run/asrsub/children-cgroup",
+                        True,
+                    ),
+                    (
+                        "/usr/local/libexec/asrsub/asrsub",
+                        "/usr/local/bin/asrsub",
+                        False,
+                    ),
+                    (
+                        "/var/lib/asrsub/egress-policy/egress-policy.json",
+                        "/run/asrsub/egress-policy.json",
+                        False,
+                    ),
+                )
+            ]
+        }
+        self.assertTrue(
+            remote["legacy_mounts_match"](
+                identity,
+                {"nas_media_prefix": "/mnt/nas/share/media"},
+            )
+        )
+
+    def test_known_legacy_mount_layout_rejects_unknown_extra_bind(self):
+        remote = load_remote_namespace()
+        identity = {
+            "mounts": [
+                {"Source": source, "Destination": destination, "RW": rw}
+                for source, destination, rw in (
+                    ("/var/lib/asrsub/config", "/home/user/.config/asr-pipeline", True),
+                    ("/var/lib/asrsub/cache", "/home/user/.cache/asr-pipeline", True),
+                    ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
+                    ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
+                    ("/mnt/nas/share/media", "/media", False),
+                    (
+                        "/var/lib/asrsub/runtime-secrets/control_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
+                )
+            ]
+        }
+        identity["mounts"].append(
+            {
+                "Source": "/var/lib/asrsub/unknown",
+                "Destination": "/opt/unknown",
+                "RW": True,
+            }
+        )
+        self.assertFalse(
+            remote["legacy_mounts_match"](
+                identity,
+                {"nas_media_prefix": "/mnt/nas/share/media"},
+            )
         )
 
     def test_unknown_legacy_mount_layout_is_not_accepted(self):
@@ -184,12 +274,17 @@ class TestActiveEnvBoundary(unittest.TestCase):
             payload = remote_payload(project)
             original = {name: remote[name] for name in ("require_path", "metadata", "checked", "active_container", "inspect_container", "validate_env_file")}
             called = mock.Mock()
+            required_paths = []
             remote["validate_env_file"] = called
             def fake_metadata(path):
                 is_project = Path(path) == project
                 return {"present": True, "regular": not is_project, "directory": is_project, "symlink": False, "mode": 0o700 if is_project else 0o600, "uid": os.geteuid()}
             remote["metadata"] = fake_metadata
-            remote["require_path"] = lambda path, **kwargs: {"present": True, "regular": kwargs.get("directory") is False, "directory": kwargs.get("directory") is True, "symlink": False, "mode": 0o700, "uid": os.geteuid()}
+            def fake_require_path(path, **kwargs):
+                required_paths.append(Path(path))
+                return {"present": True, "regular": kwargs.get("directory") is False, "directory": kwargs.get("directory") is True, "symlink": False, "mode": 0o700, "uid": os.geteuid()}
+
+            remote["require_path"] = fake_require_path
             remote["checked"] = lambda argv, label, **kwargs: (
                 'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("asrsub",pid=1,fd=1))\n'
                 if argv[0] == "ss"
@@ -216,6 +311,7 @@ class TestActiveEnvBoundary(unittest.TestCase):
             finally:
                 remote.update(original)
             called.assert_called_once_with(project / ".env")
+            self.assertIn(Path("/var/lib/asrsub/state"), required_paths)
 
 
 class TestTemplateAndHostnameBoundaries(unittest.TestCase):
