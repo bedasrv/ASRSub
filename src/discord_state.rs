@@ -203,11 +203,11 @@ mod tests {
     fn retry_after_and_backoff_are_checked() {
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86400").is_ok());
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86401").is_err());
+        let backoff = super::super::discord_state_clock::next_backoff(0).unwrap();
+        assert_eq!(backoff, 900);
         assert_eq!(
-            super::super::discord_state_clock::first_retry_deadline(0, 0, 0, Some(1))
-                .unwrap()
-                .0,
-            900
+            super::super::discord_state_clock::next_deadline(0, 0, backoff, Some(1)),
+            Some(900_000_000_000)
         );
     }
     #[test]
