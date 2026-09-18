@@ -25,16 +25,27 @@ The routine model is one Docker Compose service and one immutable image:
 
 The tracked candidate is `deploy/compose.simple.yaml`. It has one
 `orchestrator`, host networking, `restart: unless-stopped`, and no build
-directive. It mounts the existing config, cache, and media paths. The application
-source defines `cfg_dir()` as `/home/user/.config/asr-pipeline` by default, so
-that config mount owns the current pipeline ledgers (`state.jsonl`,
-`actions.jsonl`, `subtitle_registry.jsonl`, and related files). There is **no separate `/var/lib/asrsub/state` mount** and the simple template does not set
-`ASRSUB_CONFIG_DIR` or `STATE_FILE`; those ledgers are not silently relocated.
-The provider key file is an optional Compose `env_file`; its absence does not
-make Compose invalid. The host secret directory is mounted read-only at
-`/run/secrets`, so `/run/secrets/control_api_key` is available when present and
-an absent optional `discord_webhook` file disables that optional integration.
-The template contains no secret values and no top-level Compose `secrets:` file.
+directive. It deliberately preserves the target's existing legacy data layout:
+`/var/lib/asrsub/config` is bound to the container config target
+`/home/user/.config/asr-pipeline`, `/var/lib/asrsub/cache` is bound to
+`/home/user/.cache/asr-pipeline`, and `/var/lib/asrsub/runtime-secrets` is
+bound read-only to `/run/secrets`. The config mount owns the current pipeline
+ledgers (`state.jsonl`, `actions.jsonl`, `subtitle_registry.jsonl`, and related
+files). There is **no separate `/var/lib/asrsub/state` mount**, no copy or
+migration step, and the simple template does not set `ASRSUB_CONFIG_DIR` or
+`STATE_FILE`; the existing ledgers, cache, and secret files stay at their
+legacy host paths. The provider key file is the optional
+`/var/lib/asrsub/config/provider_keys.env` Compose `env_file`. The control key
+is projected as `/run/secrets/control_key` and `CONTROL_API_KEY_FILE` points to
+that legacy filename; an absent optional `discord_webhook` file disables that
+optional integration. The template contains no secret values and no top-level
+Compose `secrets:` file.
+
+The no-migration contract is exact: preflight accepts the candidate mount set
+or the known legacy data mount set only. It rejects an unsafe or unknown
+config, cache, media, or secret source before any candidate file is written.
+The first simple deployment therefore changes the Compose wiring, not the
+location or contents of the existing ledgers/cache/secrets.
 
 `ASRSUB_IMAGE` must be the exact lowercase digest reference. A tag, including a
 full-SHA lookup tag, is rejected by the tool. The tool never resolves a tag and
@@ -47,19 +58,21 @@ The operator machine needs Python 3 and an SSH client. The target needs:
 - the expected hostname and non-interactive SSH access;
 - Docker Engine, the Docker Compose plugin, `findmnt`, and `ss`;
 - the active project, Compose file, non-secret `.env`, and `orchestrator` service;
-- `/home/user/.config/asr-pipeline` (which owns the current pipeline ledgers),
-  `/home/user/.cache/asr-pipeline`, and the mounted `/mnt/nas/share/media`
-  directory;
-- `/home/user/.config/asr-pipeline/secrets` as a real directory;
-- an existing healthy service for a deploy backup. Provider keys are optional,
-  but a deployment without resolvable provider keys will not be ready.
+- `/var/lib/asrsub/config` (which is mounted at the container config target and
+  owns the current pipeline ledgers), `/var/lib/asrsub/cache`, and the mounted
+  `/mnt/nas/share/media` directory;
+- `/var/lib/asrsub/runtime-secrets` as a real directory, with the required
+  `control_key` file and optional `discord_webhook` file;
+- the optional `/var/lib/asrsub/config/provider_keys.env` file;
+- an existing healthy service for a deploy backup. A deployment without
+  resolvable provider keys will not be ready.
 
 Run these commands from the repository checkout. They are read-only. `status`
 reads the current service's legacy-compatible safety metadata. `preflight`
 performs the full **pre-apply safety checks**: ownership, paths, real media
 mount, secret metadata, intended port ownership, health, and a recoverable
-immutable previous repo digest. Neither operation requires the candidate simple
-mount shape before the first apply.
+immutable previous repo digest. It accepts only the known legacy data layout or
+an already-applied candidate layout; it never guesses an unknown source.
 
 ```bash
 ./tools/asrsub_deploy.py status \
@@ -154,9 +167,9 @@ This changes nothing. It is the required gate immediately before `deploy`.
 It verifies Docker/Compose, active `asrsub`/`orchestrator` ownership, required
 paths, `findmnt -T /mnt/nas/share/media`, secret-file metadata, bounded
 ownership by the intended `asrsub` listener on `WEBHOOK_PORT`, healthy current
-service status, and an immutable previous repo digest. It deliberately does
-not require the candidate simple mount contract; that is checked only after
-apply.
+service status, active non-secret env validation, and an immutable previous repo
+digest. It also rejects any source layout outside the exact legacy or candidate
+contract before deploy can write the project.
 
 ### Deploy/apply (the only routine mutating command)
 
@@ -170,10 +183,11 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding=
 
 Before any target write, the streamed remote script verifies the target
 hostname and runs the pre-apply safety checks. The first simple deployment may
-start from the target's **legacy Compose shape** (for example, a direct
-`/run/secrets/control_api_key` file mount), as long as the current service is
-owned, healthy, safely provisioned, and has a recoverable previous repo digest.
-It then:
+start from the target's **known legacy Compose shape** (for example, a
+`/var/lib/asrsub/runtime-secrets/control_key` source projected at
+`/run/secrets/control_key`), as long as the current service is owned, healthy,
+safely provisioned, and has a recoverable previous repo digest. The preflight
+rejects an unsafe or unknown legacy layout before this point. It then:
 
 1. creates a timestamped `.asrsub-rollback/<timestamp>/` backup containing the
    active `compose.yaml`, active non-secret `.env`, the previous immutable repo
@@ -185,8 +199,11 @@ It then:
    action is the equivalent of `docker compose pull orchestrator` with the
    candidate digest, never a tag);
 5. applies only `docker compose ... up -d --no-build --pull=never orchestrator`;
-6. waits a bounded 60 seconds for both `/health` and `/ready` to return HTTP 200;
-7. performs the **post-apply candidate mount verification** and verifies
+6. waits a bounded 60 seconds for both `/health` and `/ready` to return HTTP 200
+   within the one total readiness budget;
+7. after both HTTP probes pass, polls Docker health in that same deadline until
+   the container reports `healthy`;
+8. performs the **post-apply candidate mount verification** and verifies
    `candidate_mounts_verified:true`, the running container's exact image
    reference and repo digest, image ID, mounts, and Docker health status.
 
@@ -228,7 +245,10 @@ For a `simple` backup, the saved `.env` and metadata restore the previous
 `ASRSUB_IMAGE` digest; a `legacy` backup may retain a tag only when its local
 `RepoDigests` match the recorded digest. It then runs
 `docker compose ... up -d --no-build --pull=never orchestrator`. It does not
-pull, retag, prune, stop first, or use a mutable tag. A `simple` backup must
+pull, retag, prune, stop first, or use a mutable tag. The rollback path uses the
+same one-budget HTTP-then-Docker-health helper as automatic recovery: `/health`
+and `/ready` must pass, then Docker must report `healthy` before mount and digest
+verification. A `simple` backup must
 restore the exact digest in `Config.Image`, and its repo digest must also match.
 Its verification reports `config_reference: legacy/tag` and
 `repo_digest_matched:true` only for the legacy/tag case. Both kinds must match
@@ -238,12 +258,15 @@ files.
 
 ## 5. Health gates and automatic recovery
 
-The deployment gate is bounded. Both endpoints must return 200 within 60
-seconds after apply:
+The deployment gate is bounded. Both endpoints must return 200 within the same
+60-second readiness budget after apply, and Docker health must then reach
+`healthy` before the deployment is successful:
 
 - `/health` proves the daemon is live;
 - `/ready` proves the configured readiness checks, including media/state and
-  provider readiness, pass.
+  provider readiness, pass;
+- Docker health proves the container healthcheck has converged after the HTTP
+  probes, closing the post-apply health race.
 
 Expected success output is a short structured result similar to this; image
 IDs and paths are non-secret metadata:
@@ -273,10 +296,10 @@ secret values and the deploy tool accepts no secret argument.
 
 | Input | Host location | Required metadata |
 | --- | --- | --- |
-| Control API key | `/home/user/.config/asr-pipeline/secrets/control_api_key` | parent directory `0700`, file `0600`, root/owner-controlled |
-| Optional Discord webhook | `/home/user/.config/asr-pipeline/secrets/discord_webhook` | if present, file `0600`; absence disables it |
-| Provider key env file | `/home/user/.config/asr-pipeline/secrets/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
-| Container projection | `/run/secrets` | read-only bind mount |
+| Control API key | `/var/lib/asrsub/runtime-secrets/control_key` | runtime-secrets directory `0700`, file `0600`, root/owner-controlled |
+| Optional Discord webhook | `/var/lib/asrsub/runtime-secrets/discord_webhook` | if present, file `0600`; absence disables it |
+| Provider key env file | `/var/lib/asrsub/config/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
+| Container projection | `/run/secrets` | read-only bind mount; control key remains named `control_key` |
 
 The operator must enforce `chmod 600` on each present secret file and `chmod 700`
 on the secret directory without displaying its contents.
@@ -296,7 +319,22 @@ stop, rotate it out-of-band, and treat the log as compromised.
 Non-secret values belong in the target `.env` and are represented by
 `deploy/asrsub.env.example`. The tool may stage `ASRSUB_IMAGE`, `WEBHOOK_PORT`,
 `NAS_MEDIA_PREFIX`, `PROVIDER_KEYS_FILE`, and other explicitly non-secret
-settings. It will not read `provider_keys.env` as a candidate env source.
+settings. Strict preflight validates the active `.env` before success and
+rejects secret-bearing keys, URL userinfo, inline bearer/basic credentials,
+private-key material, and secret query parameters. Ordinary non-secret URLs and
+managed legacy paths remain valid. The tool will not read `provider_keys.env` as
+a candidate env source.
+
+`--compose-source` is not an extension point for this routine deployment. The
+local CLI resolves it and accepts only the repository's tracked
+`DEFAULT_TEMPLATE` (`deploy/compose.simple.yaml`); an alternate privileged or
+extra-service template is rejected before any target request. The textual
+contract check remains defense in depth.
+
+`NAS_MEDIA_PREFIX` must be an absolute, normalized, non-root container path. It
+must not overlap `/media`, `/run`, `/run/secrets`, the config/cache targets, or
+another managed destination. The source/export contract is unchanged: the
+preflight still requires `/mnt/nas/share/media` to be on the approved NFS mount.
 
 ## 7. Forbidden routine commands
 
@@ -357,21 +395,32 @@ executed.
 - **Project/service ownership failure:** inspect only safe `docker compose ps`
   metadata and labels. Confirm project `asrsub` and service `orchestrator`; do
   not take over an unrelated project.
-- **Missing path or media mount:** create/fix the approved non-secret directory
-  or NFS mount under the target change process. `findmnt -T
-  /mnt/nas/share/media` must identify a real mount, not merely a directory.
+- **Missing path or media mount:** create/fix the approved legacy directory or
+  NFS mount under the target change process. The required data paths are
+  `/var/lib/asrsub/config`, `/var/lib/asrsub/cache`, and
+  `/var/lib/asrsub/runtime-secrets`; `findmnt -T /mnt/nas/share/media` must
+  identify a real mount, not merely a directory.
+- **Unsafe project directory:** stop. The project must be a current-owner,
+  non-group-writable `0700` directory before lock, pending, or rollback paths
+  are opened; symlinks and wrong types are rejected.
 - **Port ownership failure:** confirm `WEBHOOK_PORT` and that the intended
   service owns the listening port. Do not stop an unrelated listener.
 - **Compose config failure:** inspect the non-secret `.env` names and the
   Compose plugin version. Do not print the rendered config or provider env
+  values. Strict preflight rejects URL credentials and obvious inline secret
   values. The optional provider file requires Compose v2.24+ for
-  `required: false`.
+  `required: false`. Do not pass an alternate `--compose-source`.
+- **Invalid media prefix:** use a normalized absolute non-root destination
+  outside `/media`, `/run`, `/run/secrets`, config, cache, and other managed
+  paths. Do not change the NFS source/export contract.
 - **Pull failure:** confirm that CI published the exact digest in `release.json`
   and that target access is authorized. Never replace it with a tag.
-- **Readiness 503 or timeout:** read the safe `/health`/`/ready` status and
-  application diagnostics. Check the media mount, the config mount that owns
-  the current pipeline ledgers, and provider-key presence without opening key
-  files. Automatic rollback reports its `rollback.ok` status.
+- **Readiness 503, Docker `starting`, or timeout:** read the safe
+  `/health`/`/ready` status and application diagnostics. Check the media mount,
+  the config mount that owns the current pipeline ledgers, provider-key
+  presence without opening key files, and Docker health convergence. The same
+  bounded health helper is used during automatic and manual rollback; automatic
+  rollback reports its `rollback.ok` status.
 - **Digest or mount verification failure:** do not retry with `--pull=always`,
   `latest`, or a manual container replacement. Use the manual rollback command
   and preserve the backup for investigation.

@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import parse_qsl, urlsplit
 
 
 IMAGE_RE = re.compile(r"^ghcr\.io/bedasrv/asrsub@sha256:[0-9a-f]{64}$")
@@ -43,7 +44,29 @@ DEFAULT_SERVICE = "orchestrator"
 DEFAULT_PROJECT_NAME = "asrsub"
 DEFAULT_WEBHOOK_PORT = "8085"
 DEFAULT_NAS_MEDIA_PREFIX = "/mnt/nas/share/media"
-DEFAULT_PROVIDER_KEYS_FILE = "/home/user/.config/asr-pipeline/secrets/provider_keys.env"
+DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
+DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
+DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
+DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
+DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
+CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
+CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
+SECRETS_CONTAINER_PATH = "/run/secrets"
+MEDIA_CONTAINER_PATH = "/media"
+MANAGED_CONTAINER_PATHS = (
+    CONFIG_CONTAINER_PATH,
+    CACHE_CONTAINER_PATH,
+    MEDIA_CONTAINER_PATH,
+    SECRETS_CONTAINER_PATH,
+)
+RESERVED_MEDIA_PREFIXES = (
+    "/",
+    "/run",
+    CONFIG_CONTAINER_PATH,
+    CACHE_CONTAINER_PATH,
+    MEDIA_CONTAINER_PATH,
+    SECRETS_CONTAINER_PATH,
+)
 DEFAULT_LISTENER_PROCESS = "asrsub"
 DEFAULT_TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "compose.simple.yaml"
 MANAGED_ENV_KEYS = frozenset(
@@ -51,6 +74,14 @@ MANAGED_ENV_KEYS = frozenset(
 )
 SENSITIVE_ENV_KEY = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|ACCESS_TOKEN|API_KEY|AUTHORIZATION|BEARER|CERT|CERTIFICATE|COOKIE|CREDENTIALS?|ENCRYPTION_KEY|KEY|PASSWORD|PASSWD|PRIVATE_KEY|SECRET|TOKEN|WEBHOOK)(?:_|$)",
+    re.IGNORECASE,
+)
+SENSITIVE_VALUE = re.compile(
+    r"(?:-----BEGIN [^-\n]*PRIVATE KEY-----|(?:^|[\s,;&])(?:basic|bearer)\s+[^\s,;&]+|(?:^|[\"']?)(?:password|passwd|pass|secret|token|api[_-]?key|authorization|cookie|credentials?)\s*[:=]\s*[\"']?[^\"'\s,;&]+)",
+    re.IGNORECASE,
+)
+SENSITIVE_RESULT_KEY = re.compile(
+    r"(?:password|passwd|private[-_]?key|authorization|cookie|secret|token|credential|webhook|api[-_]?key)",
     re.IGNORECASE,
 )
 FORBIDDEN_COMMAND_TOKENS = frozenset(
@@ -77,6 +108,10 @@ DROPPED_RESULT_KEYS = frozenset(
 
 class DeployError(Exception):
     """A local validation, transport, or structured remote-operation error."""
+
+
+class ComposeSourceError(ValueError):
+    """The routine path was given a template other than DEFAULT_TEMPLATE."""
 
 
 class RecoveryRequired(DeployError):
@@ -125,6 +160,7 @@ class DeploymentConfig:
     def __post_init__(self) -> None:
         validate_compose_identifier(self.service, "service")
         validate_compose_identifier(self.project_name, "project name")
+        validate_nas_media_prefix(self.nas_media_prefix)
         _validate_timeout(self.timeout)
 
 
@@ -188,6 +224,42 @@ def _safe_text(value: str, *, name: str) -> str:
     return value
 
 
+def _paths_overlap(left: str, right: str) -> bool:
+    left = left.rstrip("/") or "/"
+    right = right.rstrip("/") or "/"
+    return left == right or left.startswith(right + "/") or right.startswith(left + "/")
+
+
+def validate_nas_media_prefix(value: str) -> str:
+    """Validate a non-overlapping absolute container destination."""
+    value = _safe_text(value, name="NAS_MEDIA_PREFIX")
+    if not value.startswith("/") or value == "/" or value.startswith("//") or "\\" in value:
+        raise ValueError("NAS_MEDIA_PREFIX must be an absolute non-root container path")
+    if os.path.normpath(value) != value or any(part in {".", ".."} for part in Path(value).parts):
+        raise ValueError("NAS_MEDIA_PREFIX must be a normalized container path")
+    if any(_paths_overlap(value, reserved) for reserved in RESERVED_MEDIA_PREFIXES):
+        raise ValueError("NAS_MEDIA_PREFIX overlaps a reserved managed container path")
+    return value
+
+
+def _validate_non_secret_value(value: str, *, key: str) -> None:
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"\"", "'"}:
+        candidate = candidate[1:-1]
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError as exc:
+        raise ValueError(f"non-secret env value for {key} is invalid") from exc
+    if parsed.scheme and parsed.netloc:
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError(f"non-secret env value for {key} contains credentials")
+        for query_key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+            if query_value and SENSITIVE_ENV_KEY.search(query_key):
+                raise ValueError(f"non-secret env value for {key} contains a secret")
+    if SENSITIVE_VALUE.search(candidate):
+        raise ValueError(f"non-secret env value for {key} contains a secret")
+
+
 def _remote_path(project_directory: str, value: str) -> str:
     project = _safe_text(project_directory, name="project directory")
     if not project.startswith("/"):
@@ -244,7 +316,7 @@ def _result_value(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, child in value.items():
             lowered = str(key).lower()
-            if lowered in DROPPED_RESULT_KEYS or "api_key" in lowered or lowered.endswith("_token"):
+            if lowered in DROPPED_RESULT_KEYS or SENSITIVE_RESULT_KEY.search(lowered):
                 continue
             result[str(key)] = _result_value(child)
         return result
@@ -277,9 +349,10 @@ def _validate_non_secret_env(text: str) -> None:
             continue
         if "=" not in line:
             raise ValueError(f"non-secret env line {line_number} is not KEY=value")
-        key, _value = line.split("=", 1)
+        key, value = line.split("=", 1)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
             raise ValueError(f"non-secret env line {line_number} has an invalid key")
+        _validate_non_secret_value(value, key=key)
         if key in MANAGED_ENV_KEYS:
             continue
         if SENSITIVE_ENV_KEY.search(key):
@@ -297,8 +370,10 @@ def build_candidate_env(
     """Build only non-secret interpolation values; secret files are never read."""
     validate_image_reference(image)
     webhook_port = _validate_port(webhook_port)
-    nas_media_prefix = _safe_text(nas_media_prefix, name="NAS_MEDIA_PREFIX")
+    nas_media_prefix = validate_nas_media_prefix(nas_media_prefix)
     provider_keys_file = _safe_text(provider_keys_file, name="PROVIDER_KEYS_FILE")
+    if provider_keys_file != DEFAULT_PROVIDER_KEYS_FILE:
+        raise ValueError("PROVIDER_KEYS_FILE must use the managed legacy path")
     lines: list[str] = []
     if source is not None:
         source = Path(source)
@@ -329,13 +404,26 @@ def validate_template_text(text: str) -> None:
         "WEBHOOK_PORT",
         "NAS_MEDIA_PREFIX",
         "required: false",
-        "/run/secrets",
+        "/run/secrets/control_key",
+        DEFAULT_CONFIG_SOURCE,
+        DEFAULT_CACHE_SOURCE,
+        DEFAULT_RUNTIME_SECRETS_SOURCE,
+        DEFAULT_PROVIDER_KEYS_FILE,
     )
     if any(value not in text for value in required):
         raise ValueError("simple Compose template is missing an approved contract")
     if re.search(r"(?m)^secrets:\s*$", text):
         raise ValueError("simple Compose template must not declare top-level Compose secrets")
-    for forbidden in ("cgroup", "egress-policy", "/usr/local/libexec", "systemd"):
+    for forbidden in (
+        "cgroup",
+        "egress-policy",
+        "/usr/local/libexec",
+        "systemd",
+        "source: /home/user/.config/asr-pipeline",
+        "source: /home/user/.cache/asr-pipeline",
+        "source: /home/user/.config/asr-pipeline/secrets",
+        "/var/lib/asrsub/state",
+    ):
         if forbidden in text:
             raise ValueError("simple Compose template contains retired hardened runtime wiring")
 
@@ -445,6 +533,7 @@ def run_remote(
     validate_compose_identifier(merged["service"], "service")
     validate_compose_identifier(merged["project_name"], "project name")
     _validate_timeout(merged["timeout"])
+    validate_nas_media_prefix(merged["nas_media_prefix"])
     result = runner(
         ssh_command(config.target),
         remote_program(operation, merged),
@@ -487,6 +576,10 @@ def _valid_mount_contract(value: Any) -> bool:
     return True
 
 
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def _valid_backup_record(path: Path, *, compose_file: str | None = None, env_file: str | None = None) -> bool:
     if not path.is_dir() or path.is_symlink():
         return False
@@ -508,11 +601,8 @@ def _valid_backup_record(path: Path, *, compose_file: str | None = None, env_fil
         or not _valid_mount_contract(record.get("previous_mount_contract"))
         or not _safe_backup_filename(record.get("compose_file"))
         or not _safe_backup_filename(record.get("env_file"))
-        or record.get("compose_sha256") != record.get("compose_sha256", "").lower()
-        or not isinstance(record.get("compose_sha256"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", record.get("compose_sha256", ""))
-        or not isinstance(record.get("env_sha256"), str)
-        or not re.fullmatch(r"[0-9a-f]{64}", record.get("env_sha256", ""))
+        or not _valid_sha256(record.get("compose_sha256"))
+        or not _valid_sha256(record.get("env_sha256"))
     ):
         return False
     if compose_file is not None and record["compose_file"] != compose_file:
@@ -554,8 +644,21 @@ def select_latest_verified_backup(backups: Iterable[Path]) -> Path:
     return max(candidates, key=lambda item: (item[0], item[1]))[2]
 
 
+def validate_compose_source(source: Path) -> Path:
+    """Allow only the tracked simple template, even through a symlink."""
+    try:
+        resolved = Path(source).resolve(strict=True)
+        expected = DEFAULT_TEMPLATE.resolve(strict=True)
+    except OSError as exc:
+        raise ComposeSourceError("--compose-source must resolve to the tracked simple Compose template") from exc
+    if resolved != expected:
+        raise ComposeSourceError("--compose-source must be the tracked DEFAULT_TEMPLATE")
+    return resolved
+
+
 def _payload_for_deploy(config: DeploymentConfig, image: str, template: Path, env_source: Path | None) -> dict[str, Any]:
     validate_image_reference(image)
+    template = validate_compose_source(template)
     compose_text = template.read_text(encoding="utf-8")
     validate_template_text(compose_text)
     env_text = build_candidate_env(
@@ -615,6 +718,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_remote(config, args.operation, payload)
         print(json.dumps(public_result(result), sort_keys=True, separators=(",", ":")))
         return 0 if result.get("ok") is True else 2
+    except ComposeSourceError as exc:
+        print(f"asrsub-deploy: {exc}", file=sys.stderr)
+        return 2
     except (DeployError, OSError, UnicodeError, ValueError) as exc:
         # Never echo remote stderr, env files, or exception payloads.  A caller
         # can use the bounded operation status and target-side logs separately.
@@ -643,6 +749,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 
 IMAGE_RE = re.compile(r"^ghcr\.io/bedasrv/asrsub@sha256:[0-9a-f]{64}$")
@@ -655,9 +762,30 @@ MAX_TIMEOUT = 3600.0
 READINESS_TIMEOUT = 60.0
 FORBIDDEN = frozenset({"down", "prune", "rm", "restart", "systemctl", "daemon-reload"})
 EXPECTED_LISTENER_PROCESS = "asrsub"
+DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
+DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
+DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
+DEFAULT_CONTROL_KEY_PATH = DEFAULT_RUNTIME_SECRETS_SOURCE + "/control_key"
+DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
+CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
+CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
+SECRETS_CONTAINER_PATH = "/run/secrets"
+MEDIA_CONTAINER_PATH = "/media"
+RESERVED_MEDIA_PREFIXES = (
+    "/",
+    "/run",
+    CONFIG_CONTAINER_PATH,
+    CACHE_CONTAINER_PATH,
+    MEDIA_CONTAINER_PATH,
+    SECRETS_CONTAINER_PATH,
+)
 MANAGED_ENV_KEYS = frozenset({"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"})
 SENSITIVE_ENV_KEY = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|ACCESS_TOKEN|API_KEY|AUTHORIZATION|BEARER|CERT|CERTIFICATE|COOKIE|CREDENTIALS?|ENCRYPTION_KEY|KEY|PASSWORD|PASSWD|PRIVATE_KEY|SECRET|TOKEN|WEBHOOK)(?:_|$)",
+    re.IGNORECASE,
+)
+SENSITIVE_VALUE = re.compile(
+    r"(?:-----BEGIN [^-\n]*PRIVATE KEY-----|(?:^|[\s,;&])(?:basic|bearer)\s+[^\s,;&]+|(?:^|[\"']?)(?:password|passwd|pass|secret|token|api[_-]?key|authorization|cookie|credentials?)\s*[:=]\s*[\"']?[^\"'\s,;&]+)",
     re.IGNORECASE,
 )
 ACTIVE_DEADLINE = None
@@ -691,6 +819,40 @@ def validate_timeout(value):
     if not math.isfinite(value) or value <= 0 or value > MAX_TIMEOUT:
         raise RemoteFailure("operation timeout is invalid")
     return value
+
+
+def validate_nas_media_prefix(value):
+    if not isinstance(value, str) or not value or "\x00" in value or "\n" in value or "\r" in value:
+        raise RemoteFailure("NAS_MEDIA_PREFIX is invalid")
+    if not value.startswith("/") or value == "/" or value.startswith("//") or "\\" in value:
+        raise RemoteFailure("NAS_MEDIA_PREFIX must be an absolute non-root container path")
+    if os.path.normpath(value) != value or any(part in {".", ".."} for part in Path(value).parts):
+        raise RemoteFailure("NAS_MEDIA_PREFIX must be a normalized container path")
+    def overlaps(left, right):
+        left = left.rstrip("/") or "/"
+        right = right.rstrip("/") or "/"
+        return left == right or left.startswith(right + "/") or right.startswith(left + "/")
+    if any(overlaps(value, reserved) for reserved in RESERVED_MEDIA_PREFIXES):
+        raise RemoteFailure("NAS_MEDIA_PREFIX overlaps a reserved managed container path")
+    return value
+
+
+def validate_non_secret_value(value, key):
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {"\"", "'"}:
+        candidate = candidate[1:-1]
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError as exc:
+        raise RemoteFailure("non-secret env value is invalid") from exc
+    if parsed.scheme and parsed.netloc:
+        if parsed.username is not None or parsed.password is not None:
+            raise RemoteFailure("non-secret env file contains URL credentials")
+        for query_key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+            if query_value and SENSITIVE_ENV_KEY.search(query_key):
+                raise RemoteFailure("non-secret env file contains a secret value")
+    if SENSITIVE_VALUE.search(candidate):
+        raise RemoteFailure("non-secret env file contains a secret value")
 
 
 def _remaining_timeout(timeout, deadline=None):
@@ -735,6 +897,19 @@ def checked(argv, label, *, cwd=None, timeout=None, deadline=None):
     if result.returncode != 0:
         raise RemoteFailure(label)
     return result.stdout
+
+
+def validate_expected_hostname(payload):
+    expected = payload.get("expected_hostname")
+    if not isinstance(expected, str) or not expected or "\x00" in expected or "\n" in expected or "\r" in expected:
+        raise RemoteFailure("expected hostname is invalid")
+    try:
+        actual = socket.gethostname()
+        fqdn = socket.getfqdn()
+    except OSError as exc:
+        raise RemoteFailure("target hostname could not be checked") from exc
+    if actual != expected and fqdn != expected:
+        raise RemoteFailure("target hostname did not match before writes")
 
 
 def project_paths(payload):
@@ -798,9 +973,10 @@ def validate_non_secret_env(text):
             continue
         if "=" not in line:
             raise RemoteFailure("non-secret env file is malformed")
-        key, _value = line.split("=", 1)
+        key, value = line.split("=", 1)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
             raise RemoteFailure("non-secret env file is malformed")
+        validate_non_secret_value(value, key)
         if key in MANAGED_ENV_KEYS:
             continue
         if SENSITIVE_ENV_KEY.search(key):
@@ -825,7 +1001,7 @@ def env_values(path):
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                if key in {"WEBHOOK_PORT", "NAS_MEDIA_PREFIX"}:
+                if key in {"WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"}:
                     values[key] = value
     except (OSError, UnicodeError) as exc:
         raise RemoteFailure("non-secret env file cannot be read") from exc
@@ -1021,15 +1197,22 @@ def _validate_role(path, info, *, directory, role):
             raise RemoteFailure("rollback directory permissions are unsafe")
 
 
+def require_project_directory(payload):
+    project, _compose, _env = project_paths(payload)
+    require_path(project, directory=True, role="project")
+    return project
+
+
 def expected_mounts(payload):
+    validate_nas_media_prefix(payload["nas_media_prefix"])
     prefix = payload["nas_media_prefix"]
     media = "/mnt/nas/share/media"
     return [
-        ("/home/user/.config/asr-pipeline", "/home/user/.config/asr-pipeline", True),
-        ("/home/user/.cache/asr-pipeline", "/home/user/.cache/asr-pipeline", True),
+        (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
+        (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
         (media, prefix, True),
-        (media, "/media", False),
-        ("/home/user/.config/asr-pipeline/secrets", "/run/secrets", False),
+        (media, MEDIA_CONTAINER_PATH, False),
+        (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
     ]
 
 
@@ -1075,28 +1258,71 @@ def mounts_match(identity, payload):
     return len(actual) == len(expected) and set(actual) == set(expected)
 
 
+def legacy_mounts_match(identity, payload):
+    """Accept only the known pre-simple data layout, never an unknown source."""
+    validate_nas_media_prefix(payload["nas_media_prefix"])
+    actual = set(contract_tuples(mount_contract(identity)))
+    media = "/mnt/nas/share/media"
+    required = {
+        (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
+        (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
+        (media, payload["nas_media_prefix"], True),
+        (media, MEDIA_CONTAINER_PATH, False),
+    }
+    if not required.issubset(actual):
+        return False
+    if any(destination == "/var/lib/asrsub/state" or destination.startswith("/var/lib/asrsub/state/") for _source, destination, _rw in actual):
+        return False
+    secret_mounts = {
+        (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
+        (DEFAULT_CONTROL_KEY_PATH, SECRETS_CONTAINER_PATH + "/control_key", False),
+        (DEFAULT_RUNTIME_SECRETS_SOURCE + "/discord_webhook", SECRETS_CONTAINER_PATH + "/discord_webhook", False),
+    }
+    secret_entries = {
+        entry for entry in actual
+        if entry[1] == SECRETS_CONTAINER_PATH or entry[1].startswith(SECRETS_CONTAINER_PATH + "/")
+    }
+    if not secret_entries or not secret_entries.issubset(secret_mounts):
+        return False
+    managed_destinations = {
+        CONFIG_CONTAINER_PATH,
+        CACHE_CONTAINER_PATH,
+        MEDIA_CONTAINER_PATH,
+        SECRETS_CONTAINER_PATH,
+        payload["nas_media_prefix"],
+    }
+    for entry in actual:
+        if entry[1] in managed_destinations and entry not in required and entry not in secret_mounts:
+            return False
+    return True
+
+
 def collect(payload, *, strict):
+    validate_expected_hostname(payload)
+    validate_nas_media_prefix(payload["nas_media_prefix"])
     project, compose, env = project_paths(payload)
     paths = {
         "project": require_path(project, directory=True, role="project"),
         "compose": require_path(compose, directory=False, role="project_file"),
         "env": require_path(env, directory=False, role="project_file"),
     }
+    validate_env_file(env)
     for name, path in (
-        ("config", Path("/home/user/.config/asr-pipeline")),
-        ("cache", Path("/home/user/.cache/asr-pipeline")),
+        ("config", Path(DEFAULT_CONFIG_SOURCE)),
+        ("cache", Path(DEFAULT_CACHE_SOURCE)),
         ("media", Path("/mnt/nas/share/media")),
-        ("secrets", Path("/home/user/.config/asr-pipeline/secrets")),
+        ("secrets", Path(DEFAULT_RUNTIME_SECRETS_SOURCE)),
     ):
         paths[name] = require_path(path, directory=True)
     secret_metadata = {
-        name: metadata(Path("/home/user/.config/asr-pipeline/secrets") / name)
-        for name in ("control_api_key", "discord_webhook", "provider_keys.env")
+        "control_key": metadata(Path(DEFAULT_CONTROL_KEY_PATH)),
+        "discord_webhook": metadata(Path(DEFAULT_RUNTIME_SECRETS_SOURCE) / "discord_webhook"),
+        "provider_keys.env": metadata(Path(DEFAULT_PROVIDER_KEYS_FILE)),
     }
     if strict:
         if paths["secrets"]["mode"] & 0o077:
             raise RemoteFailure("secret directory permissions are too broad")
-        control = secret_metadata["control_api_key"]
+        control = secret_metadata["control_key"]
         if not control.get("present") or not control.get("regular") or control.get("symlink") or control.get("mode", 0) & 0o077:
             raise RemoteFailure("control secret metadata is not safe")
         for name in ("discord_webhook", "provider_keys.env"):
@@ -1112,7 +1338,11 @@ def collect(payload, *, strict):
         ),
         "/mnt/nas/share/media",
     )
-    port = env_values(env).get("WEBHOOK_PORT", payload["webhook_port"])
+    values = env_values(env)
+    if values.get("PROVIDER_KEYS_FILE", DEFAULT_PROVIDER_KEYS_FILE) != DEFAULT_PROVIDER_KEYS_FILE:
+        raise RemoteFailure("PROVIDER_KEYS_FILE does not match the managed legacy path")
+    validate_nas_media_prefix(values.get("NAS_MEDIA_PREFIX", payload["nas_media_prefix"]))
+    port = values.get("WEBHOOK_PORT", payload["webhook_port"])
     if not re.fullmatch(r"[1-9][0-9]{0,4}", port or "") or int(port) > 65535:
         raise RemoteFailure("WEBHOOK_PORT is invalid")
     container, row = active_container(payload)
@@ -1125,6 +1355,7 @@ def collect(payload, *, strict):
         and identity["labels"].get("com.docker.compose.service") == payload["service"]
     )
     current_mounts = mounts_match(identity, payload)
+    known_legacy_mounts = legacy_mounts_match(identity, payload)
     previous_repo_digest = immutable_repo_digest(identity)
     if strict and not owned:
         raise RemoteFailure("active container project/service ownership does not match")
@@ -1134,6 +1365,8 @@ def collect(payload, *, strict):
         raise RemoteFailure("active container is not healthy")
     if strict and previous_repo_digest is None:
         raise RemoteFailure("active service has no recoverable immutable RepoDigest")
+    if strict and not current_mounts and not known_legacy_mounts:
+        raise RemoteFailure("active service uses an unsafe or unknown data layout")
     current_mount_contract = "simple" if current_mounts else "legacy-compatible"
     return {
         "ok": True,
@@ -1286,13 +1519,7 @@ def valid_contract(value):
 
 
 def backup_root(payload):
-    project = Path(payload["project_directory"])
-    if not project.is_absolute():
-        raise RemoteFailure("rollback project directory is unsafe")
-    _check_parent_components(project)
-    project_info = metadata(project)
-    if not project_info.get("present") or project_info.get("symlink") or not project_info.get("directory"):
-        raise RemoteFailure("rollback project directory is unsafe")
+    project = require_project_directory(payload)
     root = project / ".asrsub-rollback"
     if not os.path.lexists(root):
         raise RemoteFailure("rollback directory is unavailable or unsafe")
@@ -1300,8 +1527,16 @@ def backup_root(payload):
     return root
 
 
+def valid_sha256(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
 def read_backup_record(payload, backup):
+    project = require_project_directory(payload)
     backup = Path(backup)
+    root = project / ".asrsub-rollback"
+    if backup.parent != root:
+        raise RemoteFailure("rollback backup is outside the managed rollback directory")
     require_path(backup, directory=True, role="rollback")
     metadata_path = backup / "metadata.json"
     require_path(metadata_path, directory=False, role="project_file")
@@ -1323,8 +1558,8 @@ def read_backup_record(payload, backup):
         or record.get("env_file") != env_name
         or not safe_backup_filename(record.get("compose_file"))
         or not safe_backup_filename(record.get("env_file"))
-        or not re.fullmatch(r"[0-9a-f]{64}", record.get("compose_sha256", ""))
-        or not re.fullmatch(r"[0-9a-f]{64}", record.get("env_sha256", ""))
+        or not valid_sha256(record.get("compose_sha256"))
+        or not valid_sha256(record.get("env_sha256"))
         or not valid_contract(record.get("previous_mount_contract"))
     ):
         raise RemoteFailure("rollback metadata is not a complete immutable backup contract")
@@ -1348,7 +1583,8 @@ def read_backup_record(payload, backup):
 
 @contextlib.contextmanager
 def mutation_lock(payload, timeout=None):
-    project, _compose, _env = project_paths(payload)
+    validate_expected_hostname(payload)
+    project = require_project_directory(payload)
     lock_path = project / ".asrsub-deploy.lock"
     try:
         nofollow = getattr(os, "O_NOFOLLOW", 0)
@@ -1385,13 +1621,7 @@ def mutation_lock(payload, timeout=None):
 
 
 def pending_marker_path(payload):
-    project = Path(payload["project_directory"])
-    if not project.is_absolute():
-        raise RemoteFailure("project directory is not a real directory")
-    _check_parent_components(project)
-    project_info = metadata(project)
-    if not project_info.get("present") or project_info.get("symlink") or not project_info.get("directory"):
-        raise RemoteFailure("project directory is not a real directory")
+    project = require_project_directory(payload)
     return project / ".asrsub-pending.json"
 
 
@@ -1467,7 +1697,8 @@ def clear_pending(payload):
 
 
 def create_backup(payload, preflight):
-    project, compose, env = project_paths(payload)
+    project = require_project_directory(payload)
+    _project, compose, env = project_paths(payload)
     root = project / ".asrsub-rollback"
     if os.path.lexists(root):
         require_path(root, directory=True, role="rollback")
@@ -1528,7 +1759,8 @@ def create_backup(payload, preflight):
 
 
 def restore_backup(payload, backup):
-    project, compose, env = project_paths(payload)
+    project = require_project_directory(payload)
+    _project, compose, env = project_paths(payload)
     record = read_backup_record(payload, backup)
     saved_compose = Path(backup) / record["compose_file"]
     saved_env = Path(backup) / record["env_file"]
@@ -1571,11 +1803,17 @@ def probe(port, path, *, deadline=None):
         return False
 
 
+def _readiness_deadline(timeout=READINESS_TIMEOUT, deadline=None):
+    phase_deadline = deadline if deadline is not None else time.monotonic() + validate_timeout(timeout)
+    if ACTIVE_DEADLINE is not None:
+        phase_deadline = min(phase_deadline, ACTIVE_DEADLINE)
+    if phase_deadline <= time.monotonic():
+        raise RemoteFailure("bounded readiness deadline exceeded")
+    return phase_deadline
+
+
 def wait_ready(port, timeout=READINESS_TIMEOUT, deadline=None):
-    phase_deadline = time.monotonic() + validate_timeout(timeout)
-    active = deadline if deadline is not None else ACTIVE_DEADLINE
-    if active is not None:
-        phase_deadline = min(phase_deadline, active)
+    phase_deadline = _readiness_deadline(timeout, deadline)
     while True:
         remaining = phase_deadline - time.monotonic()
         if remaining <= 0:
@@ -1585,6 +1823,30 @@ def wait_ready(port, timeout=READINESS_TIMEOUT, deadline=None):
         if health and ready:
             return {"health": True, "ready": True}
         time.sleep(min(1.0, max(0.001, phase_deadline - time.monotonic())))
+
+
+def wait_docker_health(payload, timeout=READINESS_TIMEOUT, deadline=None):
+    """Poll Docker health within the caller's existing readiness deadline."""
+    phase_deadline = _readiness_deadline(timeout, deadline)
+    while True:
+        remaining = phase_deadline - time.monotonic()
+        if remaining <= 0:
+            raise RemoteFailure("Docker health did not become healthy within the readiness budget")
+        container, _row = active_container(payload)
+        identity = inspect_container(container)
+        status = identity.get("health") if isinstance(identity, dict) else None
+        if status == "healthy":
+            return identity
+        if status in {"unhealthy", "none"}:
+            raise RemoteFailure("Docker health check failed")
+        time.sleep(min(1.0, max(0.001, phase_deadline - time.monotonic())))
+
+
+def wait_for_runtime_ready(payload, port):
+    """Run HTTP readiness and Docker health under one 60-second deadline."""
+    deadline = _readiness_deadline()
+    wait_ready(port, deadline=deadline)
+    return wait_docker_health(payload, deadline=deadline)
 
 
 def verify_rollback_runtime(payload, record, port):
@@ -1660,7 +1922,7 @@ def rollback_to(payload, backup):
         "Compose rollback",
         cwd=Path(payload["project_directory"]),
     )
-    wait_ready(str(port))
+    wait_for_runtime_ready(payload, str(port))
     verification = verify_rollback_runtime(payload, record, str(port))
     clear_pending(payload)
     return {"ok": True, "backup": backup.name, "image": record.get("previous_image"), "verification": verification}
@@ -1674,11 +1936,8 @@ def _pending_recovery_required(payload):
 
 
 def _deploy_locked(payload):
+    validate_expected_hostname(payload)
     ensure_no_pending(payload)
-    expected = payload["expected_hostname"]
-    actual = socket.gethostname()
-    if actual != expected and socket.getfqdn() != expected:
-        raise RemoteFailure("target hostname did not match before writes")
     preflight = collect(payload, strict=True)
     image = payload.get("image")
     if not immutable(image):
@@ -1694,7 +1953,7 @@ def _deploy_locked(payload):
         checked(compose_argv(payload, "pull", "--quiet", payload["service"]), "Compose digest pull", cwd=project)
         checked(compose_argv(payload, "up", "-d", "--no-build", "--pull=never", payload["service"]), "Compose apply", cwd=project)
         port = payload["webhook_port"]
-        wait_ready(port)
+        wait_for_runtime_ready(payload, port)
         verification = verify_image_and_runtime(payload, image, port)
         clear_pending(payload)
         return {"ok": True, "operation": "deploy", "backup": backup.name, "image": image, "verification": verification}
@@ -1719,16 +1978,15 @@ def _deploy_locked(payload):
 
 
 def deploy(payload):
+    validate_expected_hostname(payload)
+    collect(payload, strict=True)
     with mutation_lock(payload):
         return _deploy_locked(payload)
 
 
 def rollback(payload):
+    validate_expected_hostname(payload)
     with mutation_lock(payload):
-        expected = payload["expected_hostname"]
-        actual = socket.gethostname()
-        if actual != expected and socket.getfqdn() != expected:
-            raise RemoteFailure("target hostname did not match before writes")
         pending = _load_pending(payload)
         backup = latest_backup(payload)
         if pending is None:

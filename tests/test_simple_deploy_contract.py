@@ -215,7 +215,7 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
                     f"ASRSUB_IMAGE={VALID_IMAGE}",
                     "WEBHOOK_PORT=8085",
                     "NAS_MEDIA_PREFIX=/mnt/nas/share/media",
-                    "PROVIDER_KEYS_FILE=/home/user/.config/asr-pipeline/secrets/provider_keys.env",
+                    "PROVIDER_KEYS_FILE=/var/lib/asrsub/config/provider_keys.env",
                     "",
                 )
             ),
@@ -310,11 +310,14 @@ class TestComposeTemplateContract(unittest.TestCase):
             "NAS_MEDIA_PREFIX",
             "provider_keys.env",
             "required: false",
+            "/var/lib/asrsub/config",
+            "/var/lib/asrsub/cache",
+            "/var/lib/asrsub/runtime-secrets",
             "/home/user/.config/asr-pipeline",
             "/home/user/.cache/asr-pipeline",
             "/mnt/nas/share/media",
-            "/home/user/.config/asr-pipeline/secrets",
             "/run/secrets",
+            "/run/secrets/control_key",
         ):
             self.assertIn(needle, text, needle)
         self.assertNotIn("cgroup", text)
@@ -374,7 +377,7 @@ class TestDeployDocumentationContract(unittest.TestCase):
             "/ready",
             "automatic rollback",
             "rollback status",
-            "/home/user/.config/asr-pipeline/secrets/control_api_key",
+            "/var/lib/asrsub/runtime-secrets/control_key",
             "chmod 600",
             "never print or read secret values",
             "docker compose down",
@@ -409,11 +412,12 @@ class TestDeployPhases(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             (project / "compose.yaml").write_text("legacy", encoding="utf-8")
             (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
             payload = {
                 "project_directory": str(project),
+                "expected_hostname": remote["socket"].gethostname(),
                 "compose_file": "compose.yaml",
                 "env_file": ".env",
                 "service": "orchestrator",
@@ -428,12 +432,12 @@ class TestDeployPhases(unittest.TestCase):
                 },
                 "mounts": [
                     {
-                        "Source": "/home/user/.config/asr-pipeline",
+                        "Source": "/var/lib/asrsub/config",
                         "Destination": "/home/user/.config/asr-pipeline",
                         "RW": True,
                     },
                     {
-                        "Source": "/home/user/.cache/asr-pipeline",
+                        "Source": "/var/lib/asrsub/cache",
                         "Destination": "/home/user/.cache/asr-pipeline",
                         "RW": True,
                     },
@@ -448,8 +452,8 @@ class TestDeployPhases(unittest.TestCase):
                         "RW": False,
                     },
                     {
-                        "Source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
-                        "Destination": "/run/secrets/control_api_key",
+                        "Source": "/var/lib/asrsub/runtime-secrets/control_key",
+                        "Destination": "/run/secrets/control_key",
                         "RW": False,
                     },
                 ],
@@ -494,7 +498,7 @@ class TestRemoteFilesystemSafety(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             (project / "compose.yaml").write_text("legacy", encoding="utf-8")
             (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
             payload = {
@@ -584,7 +588,7 @@ class TestRollbackContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             (project / "compose.yaml").write_text("legacy", encoding="utf-8")
             (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
             payload = {
@@ -596,14 +600,14 @@ class TestRollbackContracts(unittest.TestCase):
             }
             mounts = [
                 {
-                    "Source": "/home/user/.config/asr-pipeline",
+                    "Source": "/var/lib/asrsub/config",
                     "Destination": "/home/user/.config/asr-pipeline",
                     "RW": True,
                     "Mode": "rw",
                 },
                 {
-                    "Source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
-                    "Destination": "/run/secrets/control_api_key",
+                    "Source": "/var/lib/asrsub/runtime-secrets/control_key",
+                    "Destination": "/run/secrets/control_key",
                     "RW": False,
                     "Propagation": "rprivate",
                 },
@@ -625,13 +629,13 @@ class TestRollbackContracts(unittest.TestCase):
                 record["previous_mount_contract"],
                 [
                     {
-                        "source": "/home/user/.config/asr-pipeline",
+                        "source": "/var/lib/asrsub/config",
                         "destination": "/home/user/.config/asr-pipeline",
                         "rw": True,
                     },
                     {
-                        "source": "/home/user/.config/asr-pipeline/secrets/control_api_key",
-                        "destination": "/run/secrets/control_api_key",
+                        "source": "/var/lib/asrsub/runtime-secrets/control_key",
+                        "destination": "/run/secrets/control_key",
                         "rw": False,
                     },
                 ],
@@ -645,7 +649,7 @@ class TestRollbackContracts(unittest.TestCase):
         remote = load_remote_namespace()
         contract = [
             {
-                "source": "/home/user/.config/asr-pipeline",
+                "source": "/var/lib/asrsub/config",
                 "destination": "/home/user/.config/asr-pipeline",
                 "rw": True,
             }
@@ -664,7 +668,7 @@ class TestRollbackContracts(unittest.TestCase):
             "image_id": "image-id",
             "mounts": [
                 {
-                    "Source": "/home/user/.config/asr-pipeline",
+                    "Source": "/var/lib/asrsub/config",
                     "Destination": "/home/user/.config/asr-pipeline",
                     "RW": True,
                 }
@@ -689,7 +693,7 @@ class TestRollbackContracts(unittest.TestCase):
             "previous_repo_digest": VALID_IMAGE,
             "previous_mount_contract": [
                 {
-                    "source": "/home/user/.config/asr-pipeline",
+                    "source": "/var/lib/asrsub/config",
                     "destination": "/home/user/.config/asr-pipeline",
                     "rw": True,
                 }
@@ -703,7 +707,7 @@ class TestRollbackContracts(unittest.TestCase):
             "image_id": "image-id",
             "mounts": [
                 {
-                    "Source": "/home/user/.config/asr-pipeline",
+                    "Source": "/var/lib/asrsub/config",
                     "Destination": "/home/user/.config/asr-pipeline",
                     "RW": True,
                 }
@@ -726,10 +730,11 @@ class TestRemoteRollbackSelection(unittest.TestCase):
             project = Path(directory) / "project"
             root = project / ".asrsub-rollback"
             root.mkdir(parents=True, mode=0o700)
+            project.chmod(0o700)
             root.chmod(0o700)
             contract = [
                 {
-                    "source": "/home/user/.config/asr-pipeline",
+                    "source": "/var/lib/asrsub/config",
                     "destination": "/home/user/.config/asr-pipeline",
                     "rw": True,
                 }
@@ -757,7 +762,11 @@ class TestRemoteRollbackSelection(unittest.TestCase):
                 (backup / "metadata.json").write_text(json.dumps(record), encoding="utf-8")
                 for filename in ("compose.yaml", ".env", "metadata.json"):
                     (backup / filename).chmod(0o600)
-            payload = {"project_directory": str(project)}
+            payload = {
+                "project_directory": str(project),
+                "compose_file": "compose.yaml",
+                "env_file": ".env",
+            }
             self.assertEqual(remote["latest_backup"](payload).name, "20260103T000000Z")
 
 
@@ -790,7 +799,7 @@ class TestRollbackSelection(unittest.TestCase):
                             "backup_kind": "legacy",
                             "previous_mount_contract": [
                                 {
-                                    "source": "/home/user/.config/asr-pipeline",
+                                    "source": "/var/lib/asrsub/config",
                                     "destination": "/home/user/.config/asr-pipeline",
                                     "rw": True,
                                 }
@@ -898,8 +907,8 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
-            payload = {"project_directory": str(project), "compose_file": "compose.yaml", "env_file": ".env"}
+            project.mkdir(mode=0o700)
+            payload = {"project_directory": str(project), "expected_hostname": remote["socket"].gethostname(), "compose_file": "compose.yaml", "env_file": ".env"}
             lock_path = project / ".asrsub-deploy.lock"
             with remote["mutation_lock"](payload, timeout=0.2):
                 self.assertTrue(lock_path.is_file())
@@ -912,9 +921,10 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             payload = {
                 "project_directory": str(project),
+                "expected_hostname": remote["socket"].gethostname(),
                 "compose_file": "compose.yaml",
                 "env_file": ".env",
                 "service": "orchestrator",
@@ -931,9 +941,10 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             payload = {
                 "project_directory": str(project),
+                "expected_hostname": remote["socket"].gethostname(),
                 "compose_file": "compose.yaml",
                 "env_file": ".env",
                 "service": "orchestrator",
@@ -956,9 +967,10 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             payload = {
                 "project_directory": str(project),
+                "expected_hostname": remote["socket"].gethostname(),
                 "compose_file": "compose.yaml",
                 "env_file": ".env",
                 "service": "orchestrator",
@@ -1101,7 +1113,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
                         nas_media_prefix="/mnt/nas/share/media",
                     )
             source = Path(directory) / "managed.env"
-            source.write_text("PROVIDER_KEYS_FILE=/home/user/.config/asr-pipeline/secrets/provider_keys.env\n", encoding="utf-8")
+            source.write_text("PROVIDER_KEYS_FILE=/var/lib/asrsub/config/provider_keys.env\n", encoding="utf-8")
             env_text = deploy.build_candidate_env(
                 source,
                 image=VALID_IMAGE,
@@ -1114,7 +1126,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         remote = load_remote_namespace()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             (project / "compose.yaml").write_text("legacy", encoding="utf-8")
             (project / ".env").write_text("AWS_ACCESS_KEY_ID=placeholder-only\n", encoding="utf-8")
             payload = {
@@ -1134,7 +1146,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
                     "repo_digests": [VALID_IMAGE],
                     "mounts": [
                         {
-                            "Source": "/home/user/.config/asr-pipeline",
+                            "Source": "/var/lib/asrsub/config",
                             "Destination": "/home/user/.config/asr-pipeline",
                             "RW": True,
                         }
@@ -1149,7 +1161,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
         deploy = load_tool()
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            project.mkdir()
+            project.mkdir(mode=0o700)
             payload = {
                 "project_directory": str(project),
                 "compose_file": "compose.yaml",
@@ -1176,7 +1188,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
                         "env_sha256": "0" * 64,
                         "previous_mount_contract": [
                             {
-                                "source": "/home/user/.config/asr-pipeline",
+                                "source": "/var/lib/asrsub/config",
                                 "destination": "/home/user/.config/asr-pipeline",
                                 "rw": "false",
                             }
@@ -1210,6 +1222,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
 
     @staticmethod
     def _complete_backup(remote, project, name):
+        project.chmod(0o700)
         root = project / ".asrsub-rollback"
         root.mkdir(mode=0o700, exist_ok=True)
         root.chmod(0o700)
@@ -1232,7 +1245,7 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
             "env_sha256": hashlib.sha256(env).hexdigest(),
             "previous_mount_contract": [
                 {
-                    "source": "/home/user/.config/asr-pipeline",
+                    "source": "/var/lib/asrsub/config",
                     "destination": "/home/user/.config/asr-pipeline",
                     "rw": True,
                 }
