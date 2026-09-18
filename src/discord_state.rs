@@ -177,7 +177,7 @@ mod tests {
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86400").is_ok());
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86401").is_err());
         assert_eq!(
-            super::super::discord_state_engine::first_retry_deadline(0, 0, 0, Some(1))
+            super::super::discord_state_clock::first_retry_deadline(0, 0, 0, Some(1))
                 .unwrap()
                 .0,
             900

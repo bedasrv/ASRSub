@@ -16,14 +16,10 @@ mod discord_state;
 mod discord_state_clock;
 #[path = "../discord_state_codec.rs"]
 mod discord_state_codec;
-#[path = "../discord_state_engine.rs"]
-mod discord_state_engine;
 #[path = "../discord_state_lane.rs"]
 mod discord_state_lane;
 #[path = "../discord_state_local.rs"]
 mod discord_state_local;
-#[path = "../discord_state_outbox.rs"]
-mod discord_state_outbox;
 #[path = "../discord_state_schema.rs"]
 mod discord_state_schema;
 #[path = "../discord_text.rs"]

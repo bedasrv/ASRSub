@@ -26,3 +26,16 @@ pub(crate) fn next_deadline(
         .checked_add(response_epoch)?;
     Some(floor.max(retry).max(header))
 }
+
+pub(crate) fn first_retry_deadline(
+    attempt_start: u64,
+    response_epoch: u64,
+    previous: u64,
+    retry_after: Option<u64>,
+) -> Option<(u64, u64)> {
+    let backoff = next_backoff(previous)?;
+    Some((
+        backoff,
+        next_deadline(attempt_start, response_epoch, backoff, retry_after)?,
+    ))
+}

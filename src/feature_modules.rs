@@ -19,14 +19,10 @@ pub(crate) mod discord_state;
 pub(crate) mod discord_state_clock;
 #[path = "discord_state_codec.rs"]
 pub(crate) mod discord_state_codec;
-#[path = "discord_state_engine.rs"]
-pub(crate) mod discord_state_engine;
 #[path = "discord_state_lane.rs"]
 pub(crate) mod discord_state_lane;
 #[path = "discord_state_local.rs"]
 pub(crate) mod discord_state_local;
-#[path = "discord_state_outbox.rs"]
-pub(crate) mod discord_state_outbox;
 #[path = "discord_state_schema.rs"]
 pub(crate) mod discord_state_schema;
 #[path = "discord_text.rs"]
