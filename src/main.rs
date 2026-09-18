@@ -968,7 +968,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_only_constructs_discord() {
-        let (sender, _join) = crate::feature_modules::discord_coordinator::start();
+        let (sender, _join) = crate::feature_modules::discord_coordinator::start_with_lane(None);
         drop(sender);
     }
 
