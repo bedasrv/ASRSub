@@ -59,7 +59,7 @@ Path(os.environ["ASRSUB_ARGV_LOG"]).write_text(json.dumps(sys.argv[1:]), encodin
 print(json.dumps({
     "Id": "sha256:" + "a" * 64,
     "RepoDigests": ["ghcr.io/bedasrv/asrsub@sha256:" + "a" * 64],
-    "CONTROL_API_KEY": "super-secret-docker-output",
+    "PROVIDER_SECRET": "super-secret-docker-output",
     "bare": os.environ.get("ASRSUB_SECRET", ""),
 }))
 """,
@@ -78,7 +78,7 @@ print(json.dumps({
         }
         manifest = {
             "schema": "runtime-bundle-manifest-v1",
-            "signing_mode": "test-seam",
+            "integrity_mode": "unsigned",
             "release_sha": SHA,
             "members": [member],
         }
@@ -86,25 +86,15 @@ print(json.dumps({
         manifest_path.write_bytes(canonical(manifest) + b"\n")
         approval = self.root / "approval.json"
         approval.write_text(
-            json.dumps({"schema": "approval-v1", "signing_mode": "test-seam", "release_sha": SHA}), encoding="utf-8"
+            json.dumps({"schema": "approval-v1", "integrity_mode": "unsigned", "release_sha": SHA}), encoding="utf-8"
         )
-        verifier = self.write_executable(
-            "verify.py",
-            """#!/usr/bin/env python3
-import os
-import sys
-from pathlib import Path
-Path(os.environ.get("ASRSUB_VERIFY_LOG", "/dev/null")).write_text("verified\\n" + " ".join(sys.argv[1:]), encoding="utf-8")
-print("CONTROL_API_KEY=super-secret-verifier-output")
-""",
-        )
-        return bundle, manifest_path, approval, verifier, hashlib.sha256(canonical(manifest)).hexdigest()
+        return bundle, manifest_path, approval, hashlib.sha256(canonical(manifest)).hexdigest()
 
     def make_rollout_inputs(self):
         deployment = self.root / "deployment"
         deployment.mkdir()
         (deployment / "state.jsonl").write_text("{}\n", encoding="utf-8")
-        bundle, manifest, approval, verifier, manifest_hash = self.make_bundle()
+        bundle, manifest, approval, manifest_hash = self.make_bundle()
         docker_evidence = self.root / "docker-evidence.json"
         docker_evidence.write_text(
             json.dumps(
@@ -118,7 +108,7 @@ print("CONTROL_API_KEY=super-secret-verifier-output")
                         "image_ref": DIGEST,
                         "RepoDigests": [DIGEST],
                     },
-                    "stdout": "CONTROL_API_KEY=secret-from-adapter",
+                    "stdout": "PROVIDER_SECRET=secret-from-adapter",
                 }
             ),
             encoding="utf-8",
@@ -132,7 +122,7 @@ print("CONTROL_API_KEY=super-secret-verifier-output")
         cgroup.mkdir()
         (cgroup / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
         (cgroup / "cgroup.procs").write_text(str(os.getpid()) + "\n", encoding="utf-8")
-        return deployment, bundle, manifest, docker_evidence, systemd, cgroup, manifest_hash, approval, verifier
+        return deployment, bundle, manifest, docker_evidence, systemd, cgroup, manifest_hash, approval
 
 
 class TestProductionEntrypoints(AdapterTestCase):
@@ -552,7 +542,7 @@ class TestProductionStateFs(AdapterTestCase):
 
 
 class TestProductionBundleInstall(AdapterTestCase):
-    def production_install_args(self, bundle, manifest, approval, verifier, target, output):
+    def production_install_args(self, bundle, manifest, approval, target, output):
         return (
             "--test-seam",
             "--bundle-root",
@@ -561,8 +551,6 @@ class TestProductionBundleInstall(AdapterTestCase):
             manifest,
             "--approval",
             approval,
-            "--verify-command",
-            verifier,
             "--release-sha",
             SHA,
             "--target-root",
@@ -572,16 +560,15 @@ class TestProductionBundleInstall(AdapterTestCase):
         )
 
     def test_bundle_installs_atomically_with_hash_manifest_and_dry_run(self):
-        bundle, manifest, approval, verifier, manifest_hash = self.make_bundle()
+        bundle, manifest, approval, manifest_hash = self.make_bundle()
         target = self.root / "installed"
         output = self.root / "install-receipt.json"
         env = os.environ.copy()
-        env["ASRSUB_VERIFY_LOG"] = str(self.root / "verify.log")
         result = subprocess.run(
             [
                 PYTHON,
                 str(ROOT / "tools" / "install_runtime_bundle.py"),
-                *map(str, self.production_install_args(bundle, manifest, approval, verifier, target, output)),
+                *map(str, self.production_install_args(bundle, manifest, approval, target, output)),
             ],
             cwd=ROOT,
             env=env,
@@ -593,8 +580,6 @@ class TestProductionBundleInstall(AdapterTestCase):
         self.assertEqual(stat.S_IMODE((target / "bin" / "asrsub").stat().st_mode), 0o755)
         receipt = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(receipt["manifest_sha256"], manifest_hash)
-        self.assertTrue((self.root / "verify.log").exists())
-        self.assertNotIn("super-secret-verifier-output", output.read_text(encoding="utf-8"))
 
         dry_target = self.root / "dry-target"
         dry_output = self.root / "dry-receipt.json"
@@ -602,7 +587,7 @@ class TestProductionBundleInstall(AdapterTestCase):
             [
                 PYTHON,
                 str(ROOT / "tools" / "install_runtime_bundle.py"),
-                *map(str, self.production_install_args(bundle, manifest, approval, verifier, dry_target, dry_output)),
+                *map(str, self.production_install_args(bundle, manifest, approval, dry_target, dry_output)),
                 "--dry-run",
             ],
             cwd=ROOT,
@@ -618,24 +603,19 @@ class TestProductionBundleInstall(AdapterTestCase):
         wrong_mode_target.mkdir(mode=0o700)
         wrong_mode = run_tool(
             "install_runtime_bundle.py",
-            *self.production_install_args(bundle, manifest, approval, verifier, wrong_mode_target, self.root / "wrong-mode.json"),
+            *self.production_install_args(bundle, manifest, approval, wrong_mode_target, self.root / "wrong-mode.json"),
         )
         self.assertNotEqual(wrong_mode.returncode, 0)
         self.assertEqual(stat.S_IMODE(wrong_mode_target.stat().st_mode), 0o700)
 
-    def test_bundle_rejects_hash_traversal_symlink_and_missing_approval_or_verifier(self):
-        bundle, manifest, approval, verifier, _ = self.make_bundle()
+    def test_bundle_rejects_hash_traversal_symlink_and_missing_approval(self):
+        bundle, manifest, approval, _ = self.make_bundle()
         target = self.root / "installed"
         output = self.root / "receipt.json"
-        base = list(self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        base = list(self.production_install_args(bundle, manifest, approval, target, output))
         missing_approval = base.copy()
         missing_approval[missing_approval.index("--approval") + 1] = self.root / "missing-approval.json"
         result = run_tool("install_runtime_bundle.py", *missing_approval)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(target.exists())
-        missing_verifier = base.copy()
-        missing_verifier[missing_verifier.index("--verify-command") + 1] = self.root / "missing-verifier"
-        result = run_tool("install_runtime_bundle.py", *missing_verifier)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(target.exists())
 
@@ -646,44 +626,21 @@ class TestProductionBundleInstall(AdapterTestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(target.exists())
 
-        bundle, manifest, approval, verifier, _ = self.make_bundle()
+        bundle, manifest, approval, _ = self.make_bundle()
         (bundle / "outside-link").symlink_to(self.root / "outside")
-        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, target, output))
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(target.exists())
 
         manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
         manifest_value["members"][0]["path"] = "../outside"
         manifest.write_bytes(canonical(manifest_value) + b"\n")
-        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, verifier, target, output))
+        result = run_tool("install_runtime_bundle.py", *self.production_install_args(bundle, manifest, approval, target, output))
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "outside").exists())
 
-    def test_production_rejects_arbitrary_verifier_even_when_executable(self):
-        bundle, manifest, approval, _, _ = self.make_bundle()
-        result = run_tool(
-            "install_runtime_bundle.py",
-            "--production",
-            "--bundle-root",
-            bundle,
-            "--manifest",
-            manifest,
-            "--approval",
-            approval,
-            "--verify-command",
-            "/usr/bin/true",
-            "--release-sha",
-            SHA,
-            "--target-root",
-            self.root / "installed",
-            "--output",
-            self.root / "receipt.json",
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("fixed", (result.stdout + result.stderr).lower())
-        self.assertFalse((self.root / "installed").exists())
 
-    def test_test_seam_installs_signed_systemd_members_separately(self):
+    def test_test_seam_installs_validated_systemd_members_separately(self):
         sys.path.insert(0, str(ROOT / "tools"))
         try:
             installer = __import__("install_runtime_bundle")
@@ -714,12 +671,11 @@ class TestProductionBundleInstall(AdapterTestCase):
                     "mode": f"{mode:04o}",
                 }
             )
-        manifest = {"schema": "runtime-bundle-manifest-v1", "signing_mode": "test-seam", "release_sha": SHA, "members": manifest_members}
+        manifest = {"schema": "runtime-bundle-manifest-v1", "integrity_mode": "unsigned", "release_sha": SHA, "members": manifest_members}
         manifest_path = bundle / "manifest.json"
         manifest_path.write_bytes(canonical(manifest) + b"\n")
         approval = self.root / "approval.json"
-        approval.write_text('{"schema":"approval-v1","signing_mode":"test-seam"}\n', encoding="utf-8")
-        verifier = self.write_executable("systemd-verifier.py", "#!/usr/bin/env python3\nprint('fixture verifier')\n")
+        approval.write_text('{"schema":"approval-v1","integrity_mode":"unsigned"}\n', encoding="utf-8")
         target = self.root / "installed"
         systemd = self.root / "systemd"
         systemd.mkdir(mode=0o755)
@@ -734,8 +690,6 @@ class TestProductionBundleInstall(AdapterTestCase):
             manifest_path,
             "--approval",
             approval,
-            "--verify-command",
-            verifier,
             "--release-sha",
             SHA,
             "--target-root",
@@ -763,7 +717,7 @@ class TestProductionBundleInstall(AdapterTestCase):
 
 class TestProductionRollout(AdapterTestCase):
     def rollout_args(self, inputs, output):
-        deployment, bundle, manifest, docker, systemd, cgroup, manifest_hash, _, _ = inputs
+        deployment, bundle, manifest, docker, systemd, cgroup, manifest_hash, _ = inputs
         return (
             "--test-seam",
             "--deployment-root",
@@ -797,7 +751,7 @@ class TestProductionRollout(AdapterTestCase):
         self.assertEqual(receipt["release_sha"], SHA)
         self.assertEqual(receipt["image_ref"], DIGEST)
         self.assertEqual(receipt["image_digest"], "a" * 64)
-        self.assertEqual(receipt["bundle_sha256"], inputs[-3])
+        self.assertEqual(receipt["bundle_sha256"], inputs[6])
         self.assertTrue(receipt["evidence"]["deployment_root"]["observed"])
         self.assertTrue(receipt["evidence"]["cgroup"]["available"])
         self.assertNotIn("secret-from-adapter", output.read_text(encoding="utf-8"))
@@ -957,7 +911,7 @@ class TestProductionRollout(AdapterTestCase):
                 )
             manifest = {
                 "schema": "runtime-bundle-manifest-v1",
-                "signing_mode": "production",
+                "integrity_mode": "unsigned",
                 "release_sha": "1" * 40,
                 "members": manifest_members,
             }
@@ -999,13 +953,13 @@ class TestProductionRollout(AdapterTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((runtime / "__pycache__").exists(), result.stderr)
 
-    def test_production_preflight_requires_signed_manifest_and_install_receipt(self):
+    def test_production_preflight_requires_validated_manifest_and_install_receipt(self):
         entrypoint = (ROOT / "tools" / "production_entrypoint.py").read_text(encoding="utf-8")
         for needle in (
-            "approval.sig",
-            "bundle-manifest.sig",
+            "approval.json",
+            "bundle-manifest.json",
             "runtime-bundle-install.json",
-            "_verify_detached",
+            "integrity_mode",
             "sha256_file",
             "installed runtime",
         ):
@@ -1103,16 +1057,6 @@ class TestProductionRollout(AdapterTestCase):
             self.assertEqual(installer.RUNTIME_MEMBER_MODES[name], 0o755)
         self.assertEqual(installer.RUNTIME_MEMBER_MODES["media-runtime-dependencies.json"], 0o644)
 
-    def test_signer_policy_uses_real_production_signer_contract(self):
-        policy = json.loads((ROOT / "tools" / "signer_argv_policy.json").read_text(encoding="utf-8"))
-        for name, fd in (("bundle", "3"), ("approval", "4")):
-            command = policy[name]["command"]
-            self.assertIn("--production", command)
-            self.assertIn(fd, command)
-            self.assertNotIn("--fixture", command)
-        source = (ROOT / "tools" / "create_approval.py").read_text(encoding="utf-8")
-        self.assertIn("fixture", source.lower())
-        self.assertIn("/usr/bin/openssl", source)
 
     def test_production_docker_rejects_unapproved_digest_before_command(self):
         sys.path.insert(0, str(ROOT / "tools"))
@@ -1161,22 +1105,10 @@ class TestProductionRollout(AdapterTestCase):
                     "schema": "runtime-bundle-install-receipt-v1",
                     "dry_run": False,
                     "evidence_eligible": True,
-                    "approval": {"verified": False},
+                    "approval": {"validated": False},
                 },
             )
 
-    def test_missing_detached_signature_is_a_production_blocker(self):
-        sys.path.insert(0, str(ROOT / "tools"))
-        try:
-            installer = __import__("install_runtime_bundle")
-        finally:
-            sys.path.pop(0)
-        with self.assertRaises(Exception):
-            installer._require_fixed_path(
-                self.root / "missing.sig",
-                self.root / "missing.sig",
-                name="bundle signature",
-            )
 
     def test_health_docs_match_digest_and_systemd_contract(self):
         health = (ROOT / "docs" / "HEALTH.md").read_text(encoding="utf-8")

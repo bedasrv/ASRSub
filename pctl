@@ -2,8 +2,8 @@
 """Control CLI for the unified ASRSub control API (stdlib only).
 
 The daemon serves unversioned and `/api2/*` routes on one port (default
-http://127.0.0.1:8085); there is no separate dashboard/API host. Reads are
-unauthenticated, while every mutation requires the control key.
+http://127.0.0.1:8085); there is no separate dashboard/API host. Reads and mutations are served by the daemon without in-process user
+authentication. Pomerium/Pocket ID and HTTPS provide the external boundary.
 """
 import json
 import os
@@ -19,52 +19,8 @@ def get_host():
     return os.environ.get("PIPE_HOST", DEFAULT_HOST)
 
 
-def secret_candidates():
-    """Control-key file locations, in precedence order."""
-    candidates = []
-    for name in ("CONTROL_API_KEY_FILE",):
-        path = os.environ.get(name)
-        if path:
-            candidates.append(path)
-    candidates.append("/run/secrets/control_api_key")
-    config_dir = os.environ.get("ASRSUB_CONFIG_DIR") or os.path.join(
-        os.path.expanduser("~"), ".config", "asr-pipeline"
-    )
-    candidates.append(os.path.join(config_dir, "secrets", "control_api_key"))
-    return candidates
-
-
-def read_token(required=True):
-    """Return the control key without reading it from `pipeline.env`.
-
-    `pipeline.env` holds non-secret settings; `CONTROL_API_KEY` must not be
-    stored there. Prefer the explicit `PIPE_TOKEN` override and the configured
-    secret file.
-    """
-    for name in ("PIPE_TOKEN", "CONTROL_API_KEY"):
-        token = os.environ.get(name, "").strip()
-        if token:
-            return token
-    for path in secret_candidates():
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                token = fh.read().strip()
-        except OSError:
-            continue
-        if token:
-            return token
-    if required:
-        fail(
-            "control key required: set PIPE_TOKEN or CONTROL_API_KEY, "
-            "set CONTROL_API_KEY_FILE, or provide the Compose secret file"
-        )
-    return None
-
-
-def request(method, path, token=None, body=None):
+def request(method, path, body=None):
     req = urllib.request.Request(get_host() + path, method=method)
-    if token:
-        req.add_header("X-API-Key", token)
     if body is not None:
         req.add_header("Content-Type", "application/json")
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -95,7 +51,7 @@ def get(path):
 
 
 def post(path, body=None):
-    code, data = request("POST", path, token=read_token(), body=body)
+    code, data = request("POST", path, body=body)
     print(json.dumps(data, indent=2))
     sys.exit(0 if code == 200 else 1)
 
@@ -141,7 +97,6 @@ def main(argv):
             )
         get("/config")
     if cmd in ("wake", "pause", "resume", "run-once"):
-        # The server denies tokenless control writes, including wake.
         post("/" + cmd)
     if cmd in ("api-status", "activity", "wanted"):
         get(

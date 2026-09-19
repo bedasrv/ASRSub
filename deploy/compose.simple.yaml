@@ -1,0 +1,57 @@
+name: asrsub
+
+services:
+  orchestrator:
+    image: ${ASRSUB_IMAGE:?ASRSUB_IMAGE must be an immutable digest}
+    user: "1000:1000"
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Jakarta
+      WEBHOOK_PORT: "${WEBHOOK_PORT:?WEBHOOK_PORT must be set}"
+      NAS_MEDIA_PREFIX: "${NAS_MEDIA_PREFIX:?NAS_MEDIA_PREFIX must be set}"
+    env_file:
+      - path: ${PROVIDER_KEYS_FILE:-/var/lib/asrsub/config/provider_keys.env}
+        required: false
+    volumes:
+      - type: bind
+        source: /var/lib/asrsub/config
+        target: /home/user/.config/asr-pipeline
+        read_only: false
+        bind: { propagation: rprivate, create_host_path: false }
+      - type: bind
+        source: /var/lib/asrsub/cache
+        target: /home/user/.cache/asr-pipeline
+        read_only: false
+        bind: { propagation: rprivate, create_host_path: false }
+      - type: bind
+        source: /var/lib/asrsub/state
+        target: /var/lib/asrsub/state
+        read_only: false
+        bind: { propagation: rprivate, create_host_path: false }
+      - type: bind
+        source: /mnt/nas/share/media
+        target: ${NAS_MEDIA_PREFIX:?NAS_MEDIA_PREFIX must be set}
+        read_only: false
+        bind: { propagation: rprivate, create_host_path: false }
+      - type: bind
+        source: /mnt/nas/share/media
+        target: /media
+        read_only: true
+        bind: { propagation: rprivate, create_host_path: false }
+      - type: bind
+        source: /var/lib/asrsub/runtime-secrets
+        target: /run/secrets
+        read_only: true
+        bind: { propagation: rprivate, create_host_path: false }
+      # The parent bind exposes the optional
+      # /var/lib/asrsub/runtime-secrets/discord_webhook at
+      # /run/secrets/discord_webhook without a direct optional-file bind.
+      # The deployment tool never reads or copies secret values.
+    command: ["daemon"]
+    healthcheck:
+      test: ["CMD", "/usr/bin/curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:${WEBHOOK_PORT:?WEBHOOK_PORT must be set}/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

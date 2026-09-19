@@ -2,7 +2,7 @@ name: Release
 
 # The only path that publishes images. Every push to main builds the image
 # once and pushes the full-40-character git SHA digest to GHCR. Production
-# deploys bind the exact image digest through the signed approval manifest.
+# deploys bind the exact image digest through the validated approval manifest.
 # NOTE: the image name is hardcoded lowercase — github.repository would
 # expand to bedasrv/ASRSub, which GHCR rejects (must be lowercase).
 
@@ -31,7 +31,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Guard full-SHA tag
         run: echo "${{ github.sha }}" | grep -qE '^[0-9a-f]{40}$'
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           push: true
@@ -43,7 +44,9 @@ jobs:
         run: |
           cat > release.json <<EOF
           {
-            "asrsub_image": "ghcr.io/bedasrv/asrsub:${{ github.sha }}",
+            "asrsub_image": "ghcr.io/bedasrv/asrsub@${{ steps.build.outputs.digest }}",
+            "image_digest": "${{ steps.build.outputs.digest }}",
+            "lookup_tag": "ghcr.io/bedasrv/asrsub:${{ github.sha }}",
             "git_sha": "${{ github.sha }}",
             "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }

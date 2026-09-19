@@ -1,16 +1,16 @@
 //! Control + telemetry HTTP API (axum).
 //!
 //! Unversioned routes (`/status /config /pause /resume /run-once /wake
-//! /health`) preserve the operator control contract; `/api2/*` exposes the
-//! richer telemetry surface. GETs are open (browser dashboard holds no
-//! token); POSTs require `X-API-Key == CONTROL_API_KEY`.
+//! /health`) preserve the operator API; `/api2/*` exposes the richer telemetry
+//! surface. The daemon does not authenticate users: Pomerium/Pocket ID and
+//! HTTPS provide the external access boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
 use serde_json::{json, Value};
@@ -59,37 +59,6 @@ impl AppState {
             wanted_cache: Mutex::new(None),
         })
     }
-}
-
-pub(crate) fn check_token(cfg: &Config, headers: &HeaderMap) -> bool {
-    // Deny-by-default when no key is configured: an unconfigured daemon
-    // never accepts control POSTs.
-    let key = cfg.control_key();
-    if key.is_empty() {
-        return false;
-    }
-    // Accept either sender header: `X-API-Key` (dashboard/pctl) or
-    // `X-Control-Key` (media-server notification plugins). Either must equal
-    // CONTROL_API_KEY.
-    let token = headers
-        .get("x-api-key")
-        .or_else(|| headers.get("x-control-key"))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    secure_eq(token, &key)
-}
-
-/// Constant-time string equality for the control token (lengths leak, the
-/// key itself does not).
-fn secure_eq(a: &str, b: &str) -> bool {
-    let (x, y) = (a.as_bytes(), b.as_bytes());
-    if x.len() != y.len() {
-        return false;
-    }
-    x.iter()
-        .zip(y.iter())
-        .fold(0u8, |acc, (p, q)| acc | (p ^ q))
-        == 0
 }
 
 pub fn router(state: Arc<AppState>) -> axum::Router {
@@ -371,12 +340,7 @@ async fn h_config(State(s): State<Arc<AppState>>) -> Json<Value> {
 /// of `{KEY: value}`; only keys exposed by the settings schema are accepted, so
 /// a typo cannot pin an ignored key. Persists to `config.overrides.json`; the
 /// daemon applies it on the next restart.
-async fn h_config_put(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
+async fn h_config_put(Json(body): Json<Value>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let Some(obj) = body.as_object() else {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -575,35 +539,14 @@ async fn h_exclusions(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"exclusions": ids}))
 }
 
-/// Token check for control POSTs (deny-by-default when unconfigured).
-async fn authed_state(
-    s: &Arc<AppState>,
-    headers: HeaderMap,
-) -> Result<(), (StatusCode, Json<Value>)> {
-    if check_token(&s.cfg, &headers) {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "unauthorized"})),
-        ))
-    }
-}
-
-async fn h_pause(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
+async fn h_pause(State(s): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     s.paused.store(true, Ordering::Relaxed);
     Ok(Json(json!({"ok": true, "paused": true})))
 }
 
 async fn h_resume(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
     s.paused.store(false, Ordering::Relaxed);
     s.wake.notify_one();
     Ok(Json(json!({"ok": true, "paused": false})))
@@ -611,19 +554,13 @@ async fn h_resume(
 
 async fn h_run_once(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
     s.run_once.store(true, Ordering::Relaxed);
     s.wake.notify_one();
     Ok(Json(json!({"ok": true})))
 }
 
-async fn h_wake(
-    State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
+async fn h_wake(State(s): State<Arc<AppState>>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     s.wake.notify_one();
     Ok(Json(json!({"ok": true})))
 }
@@ -690,13 +627,11 @@ fn body_kind_lang(body: &Option<Json<Value>>, path_kind: &'static str) -> (Strin
 /// override, action enqueue, wake. `skip` passes no body and no wake.
 async fn id_action(
     s: &Arc<AppState>,
-    headers: HeaderMap,
     raw: &str,
     body: &Option<Json<Value>>,
     typ: &str,
     wake: bool,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(s, headers).await?;
     let (id, path_kind) =
         parse_episode_id(raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     let (kind, lang) = body_kind_lang(body, path_kind);
@@ -710,36 +645,31 @@ async fn id_action(
 
 async fn h_retry(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(raw): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    id_action(&s, headers, &raw, &body, "retry", true).await
+    id_action(&s, &raw, &body, "retry", true).await
 }
 
 async fn h_skip(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    id_action(&s, headers, &raw, &None, "skip", false).await
+    id_action(&s, &raw, &None, "skip", false).await
 }
 
 async fn h_delete(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(raw): Path<String>,
     body: Option<Json<Value>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    id_action(&s, headers, &raw, &body, "delete", true).await
+    id_action(&s, &raw, &body, "delete", true).await
 }
 
 async fn h_exclude(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
     let (id, _) =
         parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     let rec =
@@ -755,10 +685,8 @@ async fn h_exclude(
 
 async fn h_unexclude(
     State(s): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    authed_state(&s, headers).await?;
     let (id, _) =
         parse_episode_id(&raw).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?;
     #[derive(serde::Deserialize, serde::Serialize)]
@@ -842,40 +770,6 @@ mod tests {
         assert_eq!(items[2].get("ai"), Some(&serde_json::Value::Bool(true)));
         // Cap honored.
         assert_eq!(activity_items(2, &p).len(), 2);
-    }
-
-    #[test]
-    fn control_token_accepts_either_sender_header() {
-        // Either sender header authorizes: dashboard/pctl use X-API-Key,
-        // while media-server notification plugins use X-Control-Key.
-        let dir = tempfile::tempdir().unwrap();
-        let kf = dir.path().join("control_api_key");
-        std::fs::write(&kf, "s3cret\n").unwrap();
-        std::env::set_var("CONTROL_API_KEY_FILE", kf.to_str().unwrap());
-        let cfg = crate::config::Config::load().expect("config loads");
-        std::env::remove_var("CONTROL_API_KEY_FILE");
-
-        let hdr = |name: axum::http::HeaderName, val: &str| {
-            let mut h = HeaderMap::new();
-            h.insert(name, val.parse().unwrap());
-            h
-        };
-        assert!(check_token(
-            &cfg,
-            &hdr(axum::http::HeaderName::from_static("x-api-key"), "s3cret")
-        ));
-        assert!(check_token(
-            &cfg,
-            &hdr(
-                axum::http::HeaderName::from_static("x-control-key"),
-                "s3cret"
-            )
-        ));
-        assert!(!check_token(
-            &cfg,
-            &hdr(axum::http::HeaderName::from_static("x-api-key"), "wrong")
-        ));
-        assert!(!check_token(&cfg, &HeaderMap::new()));
     }
 
     #[tokio::test]

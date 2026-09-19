@@ -32,7 +32,7 @@ echo "==> Building immutable release ${IMAGE} (build-only, non-destructive, no p
 echo "    - No 'docker compose down', no 'docker rmi', no 'builder prune', no 'up -d'"
 echo "    - Data mounts retained: /home/user/.config/asr-pipeline, /home/user/.cache/asr-pipeline, host media (MEDIA_HOST_PATH)"
 echo "    - Single daemon serves the dashboard/API; no separate read-only dashboard replica (see docker-compose.yml)"
-echo "    - Secret handling: CONTROL_API_KEY via Docker Compose secret file /run/secrets/control_api_key (or CONTROL_API_KEY_FILE), env only for tests"
+echo "    - Secret handling: provider keys stay in the dedicated provider env file; Discord webhook remains an optional runtime secret"
 
 # Build explicit immutable tag directly (no mutable latest, no compose build fallback).
 docker build -t "${IMAGE}" .

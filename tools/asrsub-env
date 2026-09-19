@@ -1,10 +1,9 @@
 #!/usr/bin/python3
 """Run ASRSub commands in a private, invocation-scoped environment.
 
-The signer policy invokes this wrapper with an explicit interpreter and key FD.
-Signer commands never copy host Cargo state.  Cargo commands may receive a
-symlink-safe copy of the public registry/git caches inside the private root.
-"""
+The wrapper never inherits pipeline, provider, credential, or proxy state.
+Cargo commands may receive a symlink-safe copy of public registry/git caches
+inside the private root."""
 from __future__ import annotations
 
 import errno
@@ -248,24 +247,12 @@ def _prepare_cargo_cache(root: Path, *, copy_public_cache: bool) -> Path:
     return cargo_home
 
 
-def _validate_pass_fd(fd: int) -> None:
-    if fd not in (3, 4):
-        raise SystemExit("asrsub-env: --pass-fd must be 3 or 4")
-    try:
-        st = os.fstat(fd)
-    except OSError as exc:  # pragma: no cover - exercised by the fixture runner
-        raise SystemExit(f"asrsub-env: invalid pass fd: {exc}") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise SystemExit("asrsub-env: pass fd is not a regular file")
-    os.set_inheritable(fd, False)
-
-
 def _needs_cargo_cache(argv: list[str]) -> bool:
     return bool(argv) and Path(argv[0]).name in CARGO_COMMANDS
 
 
-def _environment(root: Path, pass_fd: int | None, *, cargo_home: Path, target_root: Path) -> dict[str, str]:
-    env = {
+def _environment(root: Path, *, cargo_home: Path, target_root: Path) -> dict[str, str]:
+    return {
         "LANG": "C",
         "LC_ALL": "C",
         "PATH": "/home/user/.cargo/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin",
@@ -279,26 +266,13 @@ def _environment(root: Path, pass_fd: int | None, *, cargo_home: Path, target_ro
         "RUSTUP_TOOLCHAIN": "stable",
         "TMPDIR": str(root / "tmp"),
     }
-    if pass_fd is not None:
-        env["ASRSUB_SIGNING_FD"] = str(pass_fd)
-    return env
 
 
 def main(argv: list[str]) -> int:
     global _child_process, _cancel_signal
 
-    pass_fd: int | None = None
-    if argv[:1] == ["--pass-fd"]:
-        if len(argv) < 3:
-            raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
-        try:
-            pass_fd = int(argv[1])
-        except ValueError as exc:
-            raise SystemExit("asrsub-env: invalid pass fd") from exc
-        _validate_pass_fd(pass_fd)
-        argv = argv[2:]
     if not argv:
-        raise SystemExit("usage: asrsub-env [--pass-fd 3|4] COMMAND [ARGS...]")
+        raise SystemExit("usage: asrsub-env COMMAND [ARGS...]")
 
     parent = _secure_scratch_parent()
     try:
@@ -311,13 +285,12 @@ def main(argv: list[str]) -> int:
             _mkdir_private(root / name)
         cargo_home = _prepare_cargo_cache(root, copy_public_cache=_needs_cargo_cache(argv))
         target_root = root / "target"
-        env = _environment(root, pass_fd, cargo_home=cargo_home, target_root=target_root)
+        env = _environment(root, cargo_home=cargo_home, target_root=target_root)
         for key in env:
             if any(fragment in key.upper() for fragment in FORBIDDEN_ENV_FRAGMENTS):
-                if key not in {"ASRSUB_SIGNING_FD", "CARGO_TARGET_DIR"}:
+                if key != "CARGO_TARGET_DIR":
                     raise SystemExit(f"asrsub-env: forbidden environment key {key}")
 
-        pass_fds = (pass_fd,) if pass_fd is not None else ()
         previous_handlers: dict[signal.Signals, object] = {}
         _cancel_signal = None
         for signum in CANCELLATION_SIGNALS:
@@ -331,7 +304,6 @@ def main(argv: list[str]) -> int:
                 stdout=None,
                 stderr=None,
                 close_fds=True,
-                pass_fds=pass_fds,
                 start_new_session=True,
             )
             _child_process = proc
@@ -342,23 +314,10 @@ def main(argv: list[str]) -> int:
             _child_process = None
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
-        if pass_fd is not None:
-            try:
-                os.close(pass_fd)
-            except OSError as exc:
-                if exc.errno != errno.EBADF:
-                    raise
-            pass_fd = None
         if _cancel_signal is not None:
             return 128 + _cancel_signal
         return returncode
     finally:
-        if pass_fd is not None:
-            try:
-                os.close(pass_fd)
-            except OSError as exc:
-                if exc.errno != errno.EBADF:
-                    raise
         shutil.rmtree(root, ignore_errors=True)
 
 

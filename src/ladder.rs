@@ -17,12 +17,19 @@ use crate::srt::{self, Cue};
 /// A cheap text source for one language: on-disk sidecar or Jimaku direct.
 /// `source` is the registry provenance (`jpn`/`eng`); `source_kind` is
 /// `external` for these paths (the embedded sweep is a separate writer).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum LadderSource {
+    Sidecar,
+    Jimaku,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LadderHit {
     pub(crate) cues: Vec<Cue>,
     pub(crate) src_lang: String,
     pub(crate) source: String,
     pub(crate) source_kind: Option<String>,
+    pub(crate) generation_source: LadderSource,
 }
 
 /// Ladder lookup key: everything `ladder_source` needs beyond `&self`.
@@ -85,6 +92,7 @@ impl Pipeline {
                     src_lang,
                     source,
                     source_kind: Some("external".to_string()),
+                    generation_source: LadderSource::Sidecar,
                 });
             }
         }
@@ -233,6 +241,7 @@ impl Pipeline {
             src_lang: "ja".to_string(),
             source: "jpn".to_string(),
             source_kind: Some("external".to_string()),
+            generation_source: LadderSource::Jimaku,
         })
     }
 

@@ -1,1 +1,1 @@
-# Fixture placeholder for the signed installed adapter support module.
+# Fixture placeholder for the validated installed adapter support module.

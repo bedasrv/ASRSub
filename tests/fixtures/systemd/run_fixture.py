@@ -32,7 +32,7 @@ def recovery():
 def bundle():
     value = inventory()
     assert value["schema"] == "runtime-bundle-inventory-v1" and len(value["members"]) == 9
-    assert set(value["signed_members"]) == set(value["members"]) | set(value["runtime_support_members"]) | set(value["systemd_members"])
+    assert set(value["validated_members"]) == set(value["members"]) | set(value["runtime_support_members"]) | set(value["systemd_members"])
     staged = ROOT / "staged/usr/local/libexec/asrsub"
     for member in value["members"]:
         path = staged / member

@@ -39,7 +39,7 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
             "--expected-current-state-generation" => {
                 expected_generation = Some(value.parse::<u64>()?)
             }
-            "--lock-fd" | "--lock-proof-fd" | "--control-key-fd" => {
+            "--lock-fd" | "--lock-proof-fd" => {
                 fds.insert(flag.clone());
                 value.parse::<i32>()?;
             }
@@ -62,22 +62,22 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     }
     match operation.as_str() {
         "snapshot" | "post-snapshot" => {
-            if nonce.is_none() || fds.len() != 3 {
-                anyhow::bail!("authenticated snapshot descriptors required");
+            if nonce.is_none() || fds.len() != 2 {
+                anyhow::bail!("state snapshot descriptors required");
             }
         }
         "restore" => {
             if nonce.is_none()
                 || expected_hash.is_none()
                 || expected_generation.is_none()
-                || fds.len() != 3
+                || fds.len() != 2
             {
-                anyhow::bail!("authenticated restore arguments required");
+                anyhow::bail!("state restore arguments required");
             }
         }
         "reset" => {
-            if expected_hash.is_none() || (!fds.is_empty() && fds.len() != 3) {
-                anyhow::bail!("authenticated reset arguments required");
+            if expected_hash.is_none() || (!fds.is_empty() && fds.len() != 2) {
+                anyhow::bail!("state reset arguments required");
             }
         }
         _ => anyhow::bail!("unknown state operation"),

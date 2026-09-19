@@ -68,7 +68,7 @@ class TestReleaseDescriptorEmission(unittest.TestCase):
         self.assertIn(f"GIT_SHA={self.sha}", env_text)
         self.assertRegex(env_text, r"BUILD_TIME=")
         # No secrets in descriptor
-        for secret in ("CONTROL_API_KEY", "BAZARR_API_KEY", "SONARR_API_KEY"):
+        for secret in ("BAZARR_API_KEY", "SONARR_API_KEY"):
             self.assertNotIn(secret, env_text)
         self.assertNotIn(secret, release_json.read_text())
         j = json.loads(release_json.read_text())
@@ -105,7 +105,7 @@ class TestPlanningReceipt(unittest.TestCase):
         self.assertEqual(value["phase"], "provisional")
         for key in ("baseline_commit", "core_implementation_commit", "receipt_parent_commit"):
             self.assertRegex(value[key], r"^[0-9a-f]{40}$")
-        for key in ("core_plan_sha256", "hardening_plan_sha256", "bundle_signer_sha256", "approval_signer_sha256", "asrsub_env_sha256", "signer_argv_policy_sha256"):
+        for key in ("core_plan_sha256", "hardening_plan_sha256", "asrsub_env_sha256"):
             self.assertRegex(value[key], r"^[0-9a-f]{64}$")
         self.assertIsNone(value["package_bundle_sha256"])
         self.assertIsNone(value["create_approval_sha256"])
@@ -156,8 +156,6 @@ class TestEnvironmentWrapper(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(cargo_home.exists())
 
-    def test_signer_wrapper_pins_its_interpreter(self):
-        self.assertTrue((REPO / "tools/asrsub-env").read_text(encoding="utf-8").startswith("#!/usr/bin/python3\n"))
 
     def test_wrapper_is_executable(self):
         self.assertTrue(os.access(REPO / "tools/asrsub-env", os.X_OK))

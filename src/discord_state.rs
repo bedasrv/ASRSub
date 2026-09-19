@@ -70,6 +70,33 @@ mod tests {
     fn state_v1_canonical_vector() {
         assert_eq!(lane().inspect().unwrap().state_generation(), 0);
     }
+
+    #[test]
+    fn empty_enqueue_is_durable_noop() {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let path = dir.path().join("state.json");
+        let lock = dir.path().join("state.json.lock");
+        let l = StateLaneHandle::open(path.clone(), lock.clone()).unwrap();
+        let before = l.inspect().unwrap();
+        let persisted_before = l.snapshot().unwrap();
+        let (empty, omitted) = BoundedReports::from_reports(std::iter::empty()).unwrap();
+        assert_eq!(omitted, 0);
+
+        let commit = l.enqueue(empty, clock()).unwrap();
+
+        assert_eq!(commit.state_generation(), before.state_generation());
+        assert_eq!(commit.state_hash(), before.state_hash());
+        let persisted_after = l.snapshot().unwrap();
+        assert_eq!(
+            persisted_after.source_state_hash(),
+            persisted_before.source_state_hash()
+        );
+        let reopened = StateLaneHandle::open(path, lock).unwrap();
+        let persisted = reopened.inspect().unwrap();
+        assert_eq!(persisted.state_generation(), before.state_generation());
+        assert_eq!(persisted.state_hash(), before.state_hash());
+    }
+
     #[test]
     fn inspect_returns_bounded_snapshot() {
         let l = lane();
@@ -176,11 +203,11 @@ mod tests {
     fn retry_after_and_backoff_are_checked() {
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86400").is_ok());
         assert!(super::super::discord_state_schema::RetryAfterSeconds::parse("86401").is_err());
+        let backoff = super::super::discord_state_clock::next_backoff(0).unwrap();
+        assert_eq!(backoff, 900);
         assert_eq!(
-            super::super::discord_state_engine::first_retry_deadline(0, 0, 0, Some(1))
-                .unwrap()
-                .0,
-            900
+            super::super::discord_state_clock::next_deadline(0, 0, backoff, Some(1)),
+            Some(900_000_000_000)
         );
     }
     #[test]

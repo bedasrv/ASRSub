@@ -2,14 +2,18 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::feature_modules::discord_types::{TargetRunResult, TargetStatus, WarningClass};
+use crate::feature_modules::discord_types::{
+    GenerationMethod, GenerationSource, TargetRunResult, TargetStatus, WarningClass,
+};
 use crate::feature_modules::pipeline_commit::LedgerPaths;
+use crate::ladder::{LadderHit, LadderSource};
+use crate::lang::normalize_lang;
 use crate::pipeline::{Candidate, Pipeline};
 use crate::srt::{self, Cue};
 
 use super::episode_commit::{
     cleanup_failed_install, install_sidecar, publish_target_ledgers, target_ledger_rows,
-    target_result, InstalledSidecar, RegistryCommit, TargetFailure,
+    target_result_with_method, InstalledSidecar, RegistryCommit, TargetFailure,
 };
 
 /// Per-language source bundle from phase 1 (ladder hit or shared ASR
@@ -24,6 +28,34 @@ pub(super) struct LangWork {
     pub(super) reg_kind: Option<String>,
     /// Chosen audio stream index (ASR rows only; ladder rows are None).
     pub(super) src_stream: Option<u32>,
+    pub(super) generation_source: GenerationSource,
+    pub(super) whisper_models: Vec<String>,
+}
+
+pub(super) type SourceBundle = (
+    Vec<Cue>,
+    String,
+    bool,
+    String,
+    Option<String>,
+    Option<u32>,
+    GenerationSource,
+    Vec<String>,
+);
+
+pub(super) struct SourceContext<'a> {
+    pub(super) cand: &'a Candidate,
+    pub(super) mapped: &'a [crate::asr::AudioStream],
+    pub(super) original_lang: Option<&'a str>,
+    pub(super) media_path: &'a str,
+    pub(super) duration_s: Option<f64>,
+    pub(super) bit_rate: Option<u64>,
+    pub(super) asr_cache: &'a mut std::collections::HashMap<String, crate::asr::Transcript>,
+}
+
+pub(super) enum SourceFailure {
+    Selection(anyhow::Error),
+    Transcription(anyhow::Error),
 }
 
 /// Episode-scoped context shared (by reference) across one episode's
@@ -40,12 +72,105 @@ pub(super) struct EpisodeCtx<'a> {
 }
 
 impl Pipeline {
+    /// Resolve one target's ladder or shared ASR source for phase 2.
+    pub(super) async fn source_bundle(
+        &self,
+        lang: &str,
+        ladder: Option<LadderHit>,
+        ctx: SourceContext<'_>,
+    ) -> std::result::Result<SourceBundle, SourceFailure> {
+        match ladder {
+            Some(hit) => {
+                let need = normalize_lang(&hit.src_lang) != normalize_lang(lang);
+                let generation_source = match hit.generation_source {
+                    LadderSource::Sidecar => GenerationSource::Sidecar,
+                    LadderSource::Jimaku => GenerationSource::Jimaku,
+                };
+                Ok((
+                    hit.cues,
+                    hit.src_lang.clone(),
+                    need,
+                    hit.source,
+                    hit.source_kind,
+                    None,
+                    generation_source,
+                    Vec::new(),
+                ))
+            }
+            None => {
+                let Some(choice) = crate::asr::choose_source(ctx.mapped, lang, ctx.original_lang)
+                else {
+                    return Err(SourceFailure::Selection(anyhow::anyhow!(
+                        "no audio streams"
+                    )));
+                };
+                // Cache key is stable before the language is known (the
+                // tag, or the chosen stream when it must be detected),
+                // so two targets sharing one track share one transcription.
+                let cache_key = choice.cache_key();
+                let transcript = match ctx.asr_cache.get(&cache_key) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let key = format!("ep{}_{}", ctx.cand.episode_id, cache_key);
+                        let fresh = match crate::asr::transcribe_episode(
+                            &self.pool,
+                            crate::asr::TranscribeJob {
+                                tmp_dir: &self.cfg.tmp_dir,
+                                tools: &self.tools,
+                                media_path: ctx.media_path,
+                                choice: &choice,
+                                episode_key: &key,
+                                duration_s: ctx.duration_s,
+                                audio_bytes: crate::asr::est_audio_bytes(
+                                    ctx.duration_s,
+                                    ctx.bit_rate,
+                                ),
+                                fanout: self.cfg.asr_concurrency,
+                                max_cue_ms: self.cfg.max_cue_ms,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(transcript) => transcript,
+                            Err(error) => return Err(SourceFailure::Transcription(error)),
+                        };
+                        ctx.asr_cache.insert(cache_key, fresh.clone());
+                        fresh
+                    }
+                };
+                // The effective language is the code actually sent as a
+                // pin, or the detected code — never a fabricated one. It
+                // decides both the translation step and the provenance
+                // row: the comparison uses the effective source, so a tag
+                // the wire gate dropped (which took detection) is judged
+                // by what was really transcribed, not by the tag's
+                // provisional answer.
+                let src = transcript.lang.clone();
+                let need = if choice.wire_pin().is_some() {
+                    choice.needs_translate
+                } else {
+                    normalize_lang(&src) != normalize_lang(lang)
+                };
+                Ok((
+                    transcript.cues,
+                    src,
+                    need,
+                    "asr".to_string(),
+                    None,
+                    Some(choice.stream_index),
+                    GenerationSource::Whisper,
+                    transcript.whisper_models.clone(),
+                ))
+            }
+        }
+    }
+
     /// Translate one language's source cues (knowledge block included).
     pub(super) async fn translate_lang(
         &self,
         series_title: &str,
         w: &LangWork,
-    ) -> Result<Vec<String>> {
+    ) -> Result<crate::translate::TranslationTrace> {
         let knowledge = if series_title.is_empty() || series_title == "?" {
             String::new()
         } else {
@@ -53,7 +178,7 @@ impl Pipeline {
             self.glossary
                 .knowledge_block_for_cues(series_title, &texts, crate::glossary::MAX_REFS)
         };
-        crate::translate::translate_lines(
+        crate::translate::translate_lines_with_trace(
             &self.pool,
             crate::translate::TranslateJob {
                 lines: w.src_cues.iter().map(|c| c.text.clone()).collect(),
@@ -81,6 +206,7 @@ impl Pipeline {
         ctx: EpisodeCtx<'_>,
         w: LangWork,
         translated: Vec<String>,
+        llm_models: Vec<String>,
     ) -> std::result::Result<TargetRunResult, TargetFailure> {
         let lang = &w.lang;
         let cand = ctx.cand;
@@ -170,10 +296,13 @@ impl Pipeline {
                 return Err(error);
             }
         };
-        target_result(
+        let generation_method =
+            GenerationMethod::new(w.generation_source, &w.whisper_models, &llm_models);
+        target_result_with_method(
             lang,
             TargetStatus::Completed { warning },
             Some(artifact_sha256),
+            Some(generation_method),
         )
         .map_err(TargetFailure::storage_error)
     }

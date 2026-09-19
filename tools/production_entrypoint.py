@@ -3,8 +3,8 @@
 
 The systemd wrappers invoke this file from the installed runtime root.  The
 runtime root contains the adapter modules and rendered Compose projection; no
-checkout path is consulted by production.
-"""
+checkout path is consulted by production.  Release and member hashes are
+validated directly from the local manifest and receipt."""
 from __future__ import annotations
 
 import hashlib
@@ -44,7 +44,6 @@ STATE_ROOT = Path("/var/lib/asrsub/state")
 DEPLOY_STATE_ROOT = Path("/var/lib/asrsub/deploy-state")
 SYSTEMD_ROOT = Path("/etc/systemd/system")
 DOCKER = Path("/usr/bin/docker")
-OPENSSL = Path("/usr/bin/openssl")
 APPROVAL = DEPLOY_STATE_ROOT / "approval.json"
 BUNDLE_MANIFEST = DEPLOY_STATE_ROOT / "bundle-manifest.json"
 APPROVED_IMAGE = DEPLOY_STATE_ROOT / "approved-image.json"
@@ -54,30 +53,16 @@ IMAGE_EVIDENCE = EVIDENCE_ROOT / "image-inspect.json"
 COMPOSE_EVIDENCE = EVIDENCE_ROOT / "compose-config.json"
 PULL_EVIDENCE = EVIDENCE_ROOT / "image-pull.json"
 UP_EVIDENCE = EVIDENCE_ROOT / "compose-up.json"
-TRUST_ROOT = DEPLOY_STATE_ROOT / "trust"
-APPROVAL_SIGNATURE = TRUST_ROOT / "approval.sig"
-APPROVAL_PUBLIC_KEY = TRUST_ROOT / "approval-key.pub"
-BUNDLE_SIGNATURE = TRUST_ROOT / "bundle-manifest.sig"
-BUNDLE_PUBLIC_KEY = TRUST_ROOT / "bundle-signing-key.pub"
 PRODUCTION_UID = 1000
 PRODUCTION_GID = 1000
 SYSTEMD_UID = 0
 SYSTEMD_GID = 0
-TRUST_UID = 0
-TRUST_GID = 0
 RUNTIME_ROOT_MODE = 0o755
 STATE_ROOT_MODE = 0o700
 DEPLOY_STATE_ROOT_MODE = 0o700
 EVIDENCE_ROOT_MODE = 0o700
 SYSTEMD_ROOT_MODE = 0o755
 SYSTEMD_DIRECTORY_MODE = 0o755
-TRUST_ROOT_MODE = 0o700
-TRUST_FILE_MODES = {
-    "approval.sig": 0o600,
-    "approval-key.pub": 0o644,
-    "bundle-manifest.sig": 0o600,
-    "bundle-signing-key.pub": 0o644,
-}
 INSTALL_RECEIPT_AUTHORITY = "non-authoritative-install-record-v1"
 HEALTH_PROBE = RUNTIME_ROOT / "asrsub-health-probe"
 HEALTH_EVIDENCE = EVIDENCE_ROOT / "health.json"
@@ -86,8 +71,9 @@ HEALTH_PROBE_ATTEMPTS = 6
 HEALTH_PROBE_DELAY = 1.0
 
 # The nine operational members are kept closed.  Adapter support and the
-# rendered Compose file are additional signed runtime members, not checkout
-# files.  Systemd descriptors are signed members installed outside RUNTIME_ROOT.
+# rendered Compose file are additional validated runtime members, not checkout
+# files.  Systemd descriptors are validated members installed outside
+# RUNTIME_ROOT.
 CLOSED_RUNTIME_MEMBERS = frozenset(
     {
         "asrsub",
@@ -152,16 +138,11 @@ _REQUIRED_ARTIFACTS = (
     ("deployment state", DEPLOY_STATE_ROOT, True),
     ("deployment evidence root", EVIDENCE_ROOT, True),
     ("Docker executable", DOCKER, False),
-    ("OpenSSL executable", OPENSSL, False),
     ("rendered Compose", COMPOSE_FILE, False),
-    ("authenticated approval", APPROVAL, False),
+    ("approval", APPROVAL, False),
     ("bundle manifest", BUNDLE_MANIFEST, False),
     ("approved image", APPROVED_IMAGE, False),
     ("install receipt", INSTALL_RECEIPT, False),
-    ("approval signature", APPROVAL_SIGNATURE, False),
-    ("approval trust anchor", APPROVAL_PUBLIC_KEY, False),
-    ("bundle signature", BUNDLE_SIGNATURE, False),
-    ("bundle trust anchor", BUNDLE_PUBLIC_KEY, False),
 )
 
 
@@ -205,15 +186,7 @@ def _validate_host_metadata() -> None:
         gid=SYSTEMD_GID,
         name="systemd root metadata",
     )
-    ensure_directory_metadata(
-        TRUST_ROOT,
-        mode=TRUST_ROOT_MODE,
-        uid=TRUST_UID,
-        gid=TRUST_GID,
-        name="trust directory metadata",
-    )
     ensure_regular_file(DOCKER, mode=0o755, uid=0, gid=0, name="Docker executable metadata")
-    ensure_regular_file(OPENSSL, mode=0o755, uid=0, gid=0, name="OpenSSL executable metadata")
     protected_files = {
         APPROVAL: 0o600,
         BUNDLE_MANIFEST: 0o600,
@@ -222,17 +195,6 @@ def _validate_host_metadata() -> None:
     }
     for path, mode in protected_files.items():
         ensure_regular_file(path, mode=mode, uid=PRODUCTION_UID, gid=PRODUCTION_GID, name=f"{path.name} metadata")
-    trust_names = {entry.name for entry in TRUST_ROOT.iterdir()}
-    if trust_names != set(TRUST_FILE_MODES):
-        raise AdapterError("trust directory inventory is not closed")
-    for name, mode in TRUST_FILE_MODES.items():
-        ensure_regular_file(
-            TRUST_ROOT / name,
-            mode=mode,
-            uid=TRUST_UID,
-            gid=TRUST_GID,
-            name=f"trust artifact {name} metadata",
-        )
     dropin = SYSTEMD_ROOT / "docker.service.d"
     ensure_directory_metadata(
         dropin,
@@ -305,8 +267,8 @@ def _read_manifest() -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     manifest = read_json(BUNDLE_MANIFEST, name="bundle manifest")
     if not isinstance(manifest, dict) or manifest.get("schema") not in {"runtime-bundle-manifest-v1", "bundle-manifest-v1"}:
         raise _blocked("bundle manifest schema")
-    if manifest.get("signing_mode") != "production":
-        raise _blocked("bundle manifest signing mode")
+    if manifest.get("integrity_mode") != "unsigned":
+        raise _blocked("bundle manifest integrity mode")
     members = manifest.get("members")
     if not isinstance(members, list) or not members:
         raise _blocked("bundle manifest members")
@@ -336,31 +298,13 @@ def _read_manifest() -> tuple[dict[str, Any], list[dict[str, Any]], str]:
     return manifest, normalized, manifest_hash
 
 
-def _verify_detached(*, signature: Path, public_key: Path, data: Path, label: str) -> None:
-    if signature != (BUNDLE_SIGNATURE if label == "bundle" else APPROVAL_SIGNATURE):
-        raise _blocked(f"{label} signature path")
-    if public_key != (BUNDLE_PUBLIC_KEY if label == "bundle" else APPROVAL_PUBLIC_KEY):
-        raise _blocked(f"{label} trust-anchor path")
-    _require_artifact(f"{label} signature", signature, False)
-    _require_artifact(f"{label} trust anchor", public_key, False)
-    try:
-        run_argv(
-            [OPENSSL, "dgst", "-sha256", "-verify", public_key, "-signature", signature, data],
-            cwd=TRUST_ROOT,
-            secret_values=environment_secret_values(),
-            env=production_command_environment(),
-        )
-    except AdapterError as exc:
-        raise _blocked(f"invalid {label} detached signature") from exc
-
-
 def _approved_transaction(manifest_hash: str, compose_sha256: str) -> dict[str, str]:
-    approval = read_json(APPROVAL, name="authenticated approval")
+    approval = read_json(APPROVAL, name="approval")
     image = read_json(APPROVED_IMAGE, name="approved image")
     if not isinstance(approval, dict) or approval.get("schema") != "approval-v1":
-        raise _blocked("authenticated approval schema")
-    if approval.get("signing_mode") != "production":
-        raise _blocked("authenticated approval signing mode")
+        raise _blocked("approval schema")
+    if approval.get("integrity_mode") != "unsigned":
+        raise _blocked("approval integrity mode")
     if not isinstance(image, dict) or image.get("schema") != "approved-image-v1":
         raise _blocked("approved image schema")
     if image.get("fixture_only") is True:
@@ -487,8 +431,6 @@ def preflight() -> dict[str, Any]:
     compose_sha256 = sha256_file(COMPOSE_FILE, name="rendered Compose")
     if manifest.get("compose_sha256") not in (None, compose_sha256):
         raise _blocked("bundle Compose hash")
-    _verify_detached(signature=BUNDLE_SIGNATURE, public_key=BUNDLE_PUBLIC_KEY, data=BUNDLE_MANIFEST, label="bundle")
-    _verify_detached(signature=APPROVAL_SIGNATURE, public_key=APPROVAL_PUBLIC_KEY, data=APPROVAL, label="approval")
     approved = _approved_transaction(manifest_hash, compose_sha256)
     receipt = read_json(INSTALL_RECEIPT, name="install receipt")
     if (
@@ -564,7 +506,7 @@ def _wait_for_ready(
 
 def reconcile() -> int:
     approved = preflight()
-    # The module is a signed member beside this entrypoint.  Importing it from
+    # The module is a validated member beside this entrypoint.  Importing it from
     # the fixed runtime directory avoids any dependency on the source checkout.
     if str(RUNTIME_ROOT) not in sys.path:
         sys.path.insert(0, str(RUNTIME_ROOT))

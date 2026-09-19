@@ -17,20 +17,19 @@ mod episode_target;
 
 use crate::asr;
 use crate::feature_modules::discord_types::{
-    EpisodeKind, EpisodeRunResult, FailureClass, NoTargetCase, TargetStatus,
+    EpisodeKind, EpisodeRunResult, FailureClass, GenerationMethod, NoTargetCase, TargetStatus,
 };
 use crate::ladder::LadderQuery;
 use crate::lang::normalize_lang;
 use crate::pipeline::{Candidate, Pipeline};
 use crate::sonarr::Episode;
-use crate::srt::Cue;
 use crate::state::{self, StateEntry};
 
 use episode_commit::{
-    existing_target_digest, target_is_verified, target_result, validated_report_title,
-    TargetFailure,
+    existing_target_digest, target_is_verified, target_result, target_result_with_method,
+    validated_report_title, TargetFailure,
 };
-use episode_target::{EpisodeCtx, LangWork};
+use episode_target::{EpisodeCtx, LangWork, SourceBundle, SourceContext, SourceFailure};
 
 impl Pipeline {
     /// Process one episode/movie for all its missing languages.
@@ -107,10 +106,11 @@ impl Pipeline {
                 tracing::info!(episode = cand.episode_id, lang = %lang, "skip: sidecar already exists");
                 match existing_target_digest(&verified.target_path) {
                     Ok(digest) if digest == verified.artifact_sha256 => {
-                        target_outcomes.push(target_result(
+                        target_outcomes.push(target_result_with_method(
                             lang,
                             TargetStatus::Completed { warning: None },
                             Some(digest),
+                            Some(GenerationMethod::existing_subtitle()),
                         )?)
                     }
                     Ok(_) => {
@@ -153,115 +153,63 @@ impl Pipeline {
                     duration_s,
                 })
                 .await;
-            // (source cues, source lang, needs-translate, registry source, registry kind, stream)
-            let (src_cues, src_lang, needs_translate, reg_source, reg_kind, src_stream): (
-                Vec<Cue>,
-                String,
-                bool,
-                String,
-                Option<String>,
-                Option<u32>,
-            ) = match ladder {
-                Some(hit) => {
-                    let need = normalize_lang(&hit.src_lang) != normalize_lang(lang);
-                    (
-                        hit.cues,
-                        hit.src_lang.clone(),
-                        need,
-                        hit.source,
-                        hit.source_kind,
+            let (
+                src_cues,
+                src_lang,
+                needs_translate,
+                reg_source,
+                reg_kind,
+                src_stream,
+                generation_source,
+                whisper_models,
+            ): SourceBundle = match self
+                .source_bundle(
+                    lang,
+                    ladder,
+                    SourceContext {
+                        cand,
+                        mapped: &mapped,
+                        original_lang: original_lang.as_deref(),
+                        media_path: &media_path,
+                        duration_s,
+                        bit_rate: probe.bit_rate,
+                        asr_cache: &mut asr_cache,
+                    },
+                )
+                .await
+            {
+                Ok(bundle) => bundle,
+                Err(SourceFailure::Selection(error)) => {
+                    tracing::warn!(
+                        episode = cand.episode_id,
+                        lang = %lang,
+                        error = %error,
+                        "source selection failed"
+                    );
+                    target_outcomes.push(target_result(
+                        lang,
+                        TargetStatus::Failed {
+                            class: FailureClass::Source,
+                        },
                         None,
-                    )
+                    )?);
+                    continue;
                 }
-                None => {
-                    let Some(choice) = asr::choose_source(&mapped, lang, original_lang.as_deref())
-                    else {
-                        let error = anyhow::anyhow!("no audio streams");
-                        tracing::warn!(
-                            episode = cand.episode_id,
-                            lang = %lang,
-                            error = %error,
-                            "source selection failed"
-                        );
-                        target_outcomes.push(target_result(
-                            lang,
-                            TargetStatus::Failed {
-                                class: FailureClass::Source,
-                            },
-                            None,
-                        )?);
-                        continue;
-                    };
-                    // Cache key is stable before the language is known (the
-                    // tag, or the chosen stream when it must be detected),
-                    // so two targets sharing one track share one transcription.
-                    let cache_key = choice.cache_key();
-                    let transcript = match asr_cache.get(&cache_key) {
-                        Some(cached) => cached.clone(),
-                        None => {
-                            let key = format!("ep{}_{}", cand.episode_id, cache_key);
-                            let fresh = match asr::transcribe_episode(
-                                &self.pool,
-                                asr::TranscribeJob {
-                                    tmp_dir: &self.cfg.tmp_dir,
-                                    tools: &self.tools,
-                                    media_path: &media_path,
-                                    choice: &choice,
-                                    episode_key: &key,
-                                    duration_s: probe.duration_s,
-                                    audio_bytes: asr::est_audio_bytes(
-                                        probe.duration_s,
-                                        probe.bit_rate,
-                                    ),
-                                    fanout: self.cfg.asr_concurrency,
-                                    max_cue_ms: self.cfg.max_cue_ms,
-                                },
-                            )
-                            .await
-                            {
-                                Ok(transcript) => transcript,
-                                Err(error) => {
-                                    tracing::warn!(
-                                        episode = cand.episode_id,
-                                        lang = %lang,
-                                        error = %crate::config::mask_for_log(&error.to_string()),
-                                        "transcription failed"
-                                    );
-                                    target_outcomes.push(target_result(
-                                        lang,
-                                        TargetStatus::Failed {
-                                            class: FailureClass::Transcription,
-                                        },
-                                        None,
-                                    )?);
-                                    continue;
-                                }
-                            };
-                            asr_cache.insert(cache_key, fresh.clone());
-                            fresh
-                        }
-                    };
-                    // The effective language is the code actually sent as a
-                    // pin, or the detected code — never a fabricated one. It
-                    // decides both the translation step and the provenance
-                    // row: the comparison uses the effective source, so a tag
-                    // the wire gate dropped (which took detection) is judged
-                    // by what was really transcribed, not by the tag's
-                    // provisional answer.
-                    let src = transcript.lang.clone();
-                    let need = if choice.wire_pin().is_some() {
-                        choice.needs_translate
-                    } else {
-                        normalize_lang(&src) != normalize_lang(lang)
-                    };
-                    (
-                        transcript.cues,
-                        src,
-                        need,
-                        "asr".to_string(),
+                Err(SourceFailure::Transcription(error)) => {
+                    tracing::warn!(
+                        episode = cand.episode_id,
+                        lang = %lang,
+                        error = %crate::config::mask_for_log(&error.to_string()),
+                        "transcription failed"
+                    );
+                    target_outcomes.push(target_result(
+                        lang,
+                        TargetStatus::Failed {
+                            class: FailureClass::Transcription,
+                        },
                         None,
-                        Some(choice.stream_index),
-                    )
+                    )?);
+                    continue;
                 }
             };
             tracing::info!(
@@ -280,6 +228,8 @@ impl Pipeline {
                 reg_source,
                 reg_kind,
                 src_stream,
+                generation_source,
+                whisper_models,
             });
         }
 
@@ -314,10 +264,10 @@ impl Pipeline {
                 let result = if !w.needs_translate {
                     let translated: Vec<String> =
                         w.src_cues.iter().map(|cue| cue.text.clone()).collect();
-                    self.finish_lang(ctx, w, translated).await
+                    self.finish_lang(ctx, w, translated, Vec::new()).await
                 } else {
                     match self.translate_lang(ctx.series_title, &w).await {
-                        Ok(translated) => self.finish_lang(ctx, w, translated).await,
+                        Ok(trace) => self.finish_lang(ctx, w, trace.lines, trace.models).await,
                         Err(error) => Err(TargetFailure::translation(error)),
                     }
                 };

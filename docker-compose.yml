@@ -12,7 +12,6 @@ services:
     network_mode: host
     environment:
       TZ: Asia/Jakarta
-      CONTROL_API_KEY_FILE: /run/secrets/control_api_key
       NAS_MEDIA_PREFIX: /mnt/nas/share/media
       WEBHOOK_PORT: "8085"
       EGRESS_POLICY_FILE: /run/asrsub/egress-policy.json
@@ -53,11 +52,6 @@ services:
         read_only: true
         bind: { propagation: rprivate, create_host_path: false }
       - type: bind
-        source: /var/lib/asrsub/runtime-secrets/control_key
-        target: /run/secrets/control_api_key
-        read_only: true
-        bind: { propagation: rprivate, create_host_path: false }
-      - type: bind
         source: /sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children
         target: /run/asrsub/children-cgroup
         read_only: false
@@ -82,9 +76,5 @@ services:
     restart: "no"
 
 secrets:
-  # CONTROL_API_KEY_FILE_HOST is an operator-only staging input; the
-  # interpolation-free rendered candidate contains the fixed staged target.
   discord_webhook:
     file: /var/lib/asrsub/runtime-secrets/discord_webhook
-  control_api_key:
-    file: /var/lib/asrsub/runtime-secrets/control_key

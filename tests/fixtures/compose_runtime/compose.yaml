@@ -4,12 +4,8 @@ services:
     user: "1000:1000"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    secrets: [discord_webhook, control_api_key]
     volumes:
       - /var/lib/asrsub/runtime-secrets/discord_webhook:/run/secrets/discord_webhook:ro
-      - /var/lib/asrsub/runtime-secrets/control_key:/run/secrets/control_api_key:ro
 secrets:
   discord_webhook:
     file: /var/lib/asrsub/runtime-secrets/discord_webhook
-  control_api_key:
-    file: /var/lib/asrsub/runtime-secrets/control_key

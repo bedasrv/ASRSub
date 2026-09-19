@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::discord_types::{BoundedReports, EpisodeKind};
+use super::discord_types::BoundedReports;
 use sha2::Digest;
 
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 65_536;
@@ -183,11 +183,7 @@ impl OverflowSummaryV1 {
 #[derive(Clone, Debug)]
 pub(crate) struct DeliveryView {
     state_generation: u64,
-    captured_pending: Box<[(EpisodeKind, i64, u64)]>,
     overflow_summary: OverflowSummaryV1,
-    captured_overflow_generation: u64,
-    captured_overflow_snapshot_sha256: [u8; 32],
-    captured_transaction_ids: Box<[[u8; 32]]>,
     reports: BoundedReports,
 }
 
@@ -199,28 +195,7 @@ impl DeliveryView {
     ) -> Self {
         Self {
             state_generation,
-            captured_pending: Box::new([]),
             overflow_summary,
-            captured_overflow_generation: 0,
-            captured_overflow_snapshot_sha256: [0; 32],
-            captured_transaction_ids: Box::new([]),
-            reports,
-        }
-    }
-    pub(crate) fn with_captures(
-        state_generation: u64,
-        reports: BoundedReports,
-        overflow_summary: OverflowSummaryV1,
-        captured_pending: Box<[(EpisodeKind, i64, u64)]>,
-        captured_transaction_ids: Box<[[u8; 32]]>,
-    ) -> Self {
-        Self {
-            state_generation,
-            captured_pending,
-            overflow_summary,
-            captured_overflow_generation: 0,
-            captured_overflow_snapshot_sha256: [0; 32],
-            captured_transaction_ids,
             reports,
         }
     }
@@ -232,18 +207,6 @@ impl DeliveryView {
     }
     pub(crate) fn overflow_summary(&self) -> &OverflowSummaryV1 {
         &self.overflow_summary
-    }
-    pub(crate) fn captured_overflow_generation(&self) -> u64 {
-        self.captured_overflow_generation
-    }
-    pub(crate) fn captured_overflow_snapshot_sha256(&self) -> [u8; 32] {
-        self.captured_overflow_snapshot_sha256
-    }
-    pub(crate) fn captured_transaction_ids(&self) -> &[[u8; 32]] {
-        &self.captured_transaction_ids
-    }
-    pub(crate) fn captured_pending(&self) -> &[(EpisodeKind, i64, u64)] {
-        &self.captured_pending
     }
 }
 
@@ -403,9 +366,6 @@ impl StateSnapshotBytes {
 pub(crate) struct StateSnapshot {
     state_generation: u64,
     state_hash: [u8; 32],
-    pending_count: usize,
-    outbox_count: usize,
-    blocked_count: usize,
     overflow_summary: OverflowSummaryV1,
     disabled: bool,
 }
@@ -414,9 +374,6 @@ impl StateSnapshot {
         Self {
             state_generation,
             state_hash,
-            pending_count: 0,
-            outbox_count: 0,
-            blocked_count: 0,
             overflow_summary: Default::default(),
             disabled: false,
         }
@@ -435,15 +392,6 @@ impl StateSnapshot {
     }
     pub(crate) fn state_hash(&self) -> [u8; 32] {
         self.state_hash
-    }
-    pub(crate) fn pending_count(&self) -> usize {
-        self.pending_count
-    }
-    pub(crate) fn outbox_count(&self) -> usize {
-        self.outbox_count
-    }
-    pub(crate) fn blocked_count(&self) -> usize {
-        self.blocked_count
     }
     pub(crate) fn overflow_summary(&self) -> &OverflowSummaryV1 {
         &self.overflow_summary

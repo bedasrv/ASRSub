@@ -485,7 +485,7 @@ async fn whisper_request(
     bytes: Vec<u8>,
     filename: String,
     lang: Option<&str>,
-) -> Result<serde_json::Value> {
+) -> Result<(serde_json::Value, String)> {
     let endpoints = pool.ordered_whisper();
     if endpoints.is_empty() {
         anyhow::bail!("no whisper_stt provider configured");
@@ -535,7 +535,8 @@ async fn whisper_request(
             continue;
         }
         pool.record_whisper_success(idx);
-        return resp.json().await.context("decode whisper response");
+        let value = resp.json().await.context("decode whisper response")?;
+        return Ok((value, wp.model.clone()));
     }
     anyhow::bail!("all whisper endpoints failed; last: {last_err}")
 }
@@ -567,7 +568,7 @@ async fn transcribe_file(
         .and_then(|n| n.to_str())
         .unwrap_or("audio.mp3")
         .to_string();
-    let v = whisper_request(pool, bytes, name, lang).await?;
+    let (v, model) = whisper_request(pool, bytes, name, lang).await?;
     // Guard before the cues are built, so a contradicted pin fails the
     // language and leaves no artifact — one request or many.
     if let Some(sent) = lang {
@@ -576,6 +577,7 @@ async fn transcribe_file(
     Ok(Transcript {
         cues: cues_from_verbose(&v, 0),
         lang: effective_lang(lang, &v)?,
+        whisper_models: vec![model],
     })
 }
 
@@ -613,6 +615,7 @@ fn cues_from_verbose(v: &serde_json::Value, offset_ms: u32) -> Vec<Cue> {
 pub struct Transcript {
     pub cues: Vec<Cue>,
     pub lang: String,
+    pub whisper_models: Vec<String>,
 }
 
 /// Full ASR for one episode: extract -> (chunked) remote transcribe ->
@@ -783,16 +786,16 @@ async fn transcribe_pieces(
         });
     }
     let parts: Vec<(PathBuf, u32)> = futures::future::try_join_all(jobs).await?;
-    let (lang, mut all, rest) = match pinned {
-        Some(p) => (p.to_string(), Vec::new(), parts.as_slice()),
+    let (lang, mut all, mut models, rest) = match pinned {
+        Some(p) => (p.to_string(), Vec::new(), Vec::new(), parts.as_slice()),
         None => {
             // Detection: the first piece must be alone (its response is the
             // only place the language appears).
             let ((dest, off), rest) = parts.split_first().context("no audio pieces")?;
-            let v = post_chunk(pool, dest, None).await?;
+            let (v, model) = post_chunk(pool, dest, None).await?;
             let detected = detected_lang(&v)?;
             let all = cues_from_verbose(&v, *off);
-            (detected, all, rest)
+            (detected, all, vec![model], rest)
         }
     };
     // The follow-up requests' `language` field: the same gate, applied to the
@@ -812,19 +815,26 @@ async fn transcribe_pieces(
         let off = *off;
         tjobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
-            let v = post_chunk(&pool, dest, sent.as_deref()).await?;
+            let (v, model) = post_chunk(&pool, dest, sent.as_deref()).await?;
             // Only a request that carried a pin can be contradicted by its
             // response; one that sent nothing asserted nothing.
             if let Some(pinned) = sent.as_deref() {
                 check_pinned_lang(pinned, &v)?;
             }
-            Ok::<_, anyhow::Error>(cues_from_verbose(&v, off))
+            Ok::<_, anyhow::Error>((cues_from_verbose(&v, off), model))
         });
     }
-    for v in futures::future::try_join_all(tjobs).await? {
-        all.extend(v);
+    for (cues, model) in futures::future::try_join_all(tjobs).await? {
+        all.extend(cues);
+        models.push(model);
     }
-    Ok(Transcript { cues: all, lang })
+    models.sort();
+    models.dedup();
+    Ok(Transcript {
+        cues: all,
+        lang,
+        whisper_models: models,
+    })
 }
 
 /// One piece request; `lang == None` omits `language` (detection probe).
@@ -832,7 +842,7 @@ async fn post_chunk(
     pool: &ProviderPool,
     file: &Path,
     lang: Option<&str>,
-) -> Result<serde_json::Value> {
+) -> Result<(serde_json::Value, String)> {
     if pool.whisper_banned() {
         anyhow::bail!("whisper circuit open (recent failures); deferring");
     }
@@ -1929,13 +1939,17 @@ mod tests {
             reqwest::Client::new(),
         );
         let header = "Content-Disposition: form-data; name=\"language\"";
-        let probe = whisper_request(&pool, b"probe".to_vec(), "part.mp3".into(), None)
-            .await
-            .unwrap();
+        let (probe, probe_model) =
+            whisper_request(&pool, b"probe".to_vec(), "part.mp3".into(), None)
+                .await
+                .unwrap();
+        assert_eq!(probe_model, "stub");
         assert_eq!(detected_lang(&probe).unwrap(), "fr");
-        whisper_request(&pool, b"rest".to_vec(), "part.mp3".into(), Some("fr"))
-            .await
-            .unwrap();
+        let (_, pinned_model) =
+            whisper_request(&pool, b"rest".to_vec(), "part.mp3".into(), Some("fr"))
+                .await
+                .unwrap();
+        assert_eq!(pinned_model, "stub");
         let bodies = seen.lock().unwrap().clone();
         assert_eq!(bodies.len(), 2);
         assert!(
@@ -1974,5 +1988,67 @@ mod tests {
             "an accepted code must be sent: {}",
             bodies[3]
         );
+    }
+
+    #[tokio::test]
+    async fn whisper_trace_records_only_the_successful_fallback_model() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut request = [0u8; 4096];
+                    let Ok(size) = stream.read(&mut request).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&request[..size]);
+                    if request.starts_with("POST /primary ") {
+                        let _ = stream
+                            .write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    let body = br#"{"language":"ja","segments":[]}"#;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                });
+            }
+        });
+        let pool = ProviderPool::new(
+            crate::providers::ProvidersFile {
+                llm_translation_models: vec![],
+                whisper_stt: Some(crate::providers::WhisperProvider {
+                    endpoint: format!("http://{address}/primary"),
+                    model: "configured-only-whisper".to_string(),
+                    key_env: String::new(),
+                    api_key: "x".to_string(),
+                }),
+                whisper_stt_fallbacks: vec![crate::providers::WhisperProvider {
+                    endpoint: format!("http://{address}/fallback"),
+                    model: "provider/whisper-actual".to_string(),
+                    key_env: String::new(),
+                    api_key: "x".to_string(),
+                }],
+            },
+            reqwest::Client::new(),
+        );
+        let (_, model) = whisper_request(&pool, b"audio".to_vec(), "part.mp3".into(), None)
+            .await
+            .unwrap();
+        assert_eq!(model, "provider/whisper-actual");
+        server.abort();
     }
 }

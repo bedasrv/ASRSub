@@ -33,6 +33,24 @@ struct ChatMsg {
     content: String,
 }
 
+#[derive(Debug, Clone)]
+struct ChatSuccess {
+    content: String,
+    model: String,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkTranslation {
+    lines: Vec<String>,
+    models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct TranslationTrace {
+    pub(crate) lines: Vec<String>,
+    pub(crate) models: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResp {
     choices: Vec<ChatChoice>,
@@ -186,7 +204,7 @@ fn safe_reqwest_reason(error: &reqwest::Error) -> &'static str {
 async fn chat_across_providers(
     pool: &ProviderPool,
     messages: &[ChatMsg],
-) -> Result<Option<String>> {
+) -> Result<Option<ChatSuccess>> {
     let mut failures = Vec::new();
     for (idx, p) in pool.ordered() {
         let key = p.api_key();
@@ -205,7 +223,12 @@ async fn chat_across_providers(
         )
         .await
         {
-            Ok(Some(content)) => return Ok(Some(content)),
+            Ok(Some(content)) => {
+                return Ok(Some(ChatSuccess {
+                    content,
+                    model: p.model.clone(),
+                }))
+            }
             Ok(None) => {
                 failures.push(format!("model {}: HTTP 404", p.model));
                 continue;
@@ -264,7 +287,7 @@ async fn attempt_chunk(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> Result<Option<Vec<String>>> {
+) -> Result<Option<ChunkTranslation>> {
     let target_name = lang_name(target_lang).to_string();
     let source_name = if source_lang == "ja" {
         "Japanese"
@@ -289,10 +312,13 @@ async fn attempt_chunk(
             content: user,
         },
     ];
+    let mut models = Vec::new();
     for _ in 0..2 {
-        let raw = chat_across_providers(pool, &messages)
+        let response = chat_across_providers(pool, &messages)
             .await?
             .context("translation response missing")?;
+        let raw = response.content;
+        models.push(response.model);
         if let Some(parsed) = extract_json_array(&raw) {
             // Placeholder lines are exempt from both guards (see
             // is_placeholder): they are CJK by design.
@@ -305,7 +331,10 @@ async fn attempt_chunk(
                     .take(11.min(parsed.len()))
                     .any(|t| !is_placeholder(t, placeholders) && echo_hit(t));
             if parsed.len() == chunk.len() && script_ok && echo_ok {
-                return Ok(Some(parsed));
+                return Ok(Some(ChunkTranslation {
+                    lines: parsed,
+                    models,
+                }));
             }
         }
         messages.push(ChatMsg {
@@ -331,7 +360,7 @@ async fn translate_single_line(
     source_lang: &str,
     knowledge: &str,
     placeholders: &[String],
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     match attempt_chunk(
         pool,
         &[line.to_string()],
@@ -342,8 +371,14 @@ async fn translate_single_line(
     )
     .await
     {
-        Ok(Some(mut v)) if !v.is_empty() => {
-            Ok(v.remove(0).trim_start_matches('>').trim_start().to_string())
+        Ok(Some(mut translation)) if !translation.lines.is_empty() => {
+            let text = translation
+                .lines
+                .remove(0)
+                .trim_start_matches('>')
+                .trim_start()
+                .to_string();
+            Ok((text, translation.models))
         }
         _ => anyhow::bail!("translation failed: provider returned no valid line"),
     }
@@ -368,6 +403,15 @@ pub struct TranslateJob<'a> {
 /// tolerated via tail completion + bounded per-line fallback so output length
 /// always equals input length.
 pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
+    translate_lines_with_trace(pool, job)
+        .await
+        .map(|trace| trace.lines)
+}
+
+pub(crate) async fn translate_lines_with_trace(
+    pool: &ProviderPool,
+    job: TranslateJob<'_>,
+) -> Result<TranslationTrace> {
     let language = normalize_lang(job.target_lang);
     let deadline = pool.llm_timeouts().translation;
     let models = pool.llm_models();
@@ -388,14 +432,20 @@ pub async fn translate_lines(pool: &ProviderPool, job: TranslateJob<'_>) -> Resu
     }
 }
 
-async fn translate_lines_inner(pool: &ProviderPool, job: TranslateJob<'_>) -> Result<Vec<String>> {
+async fn translate_lines_inner(
+    pool: &ProviderPool,
+    job: TranslateJob<'_>,
+) -> Result<TranslationTrace> {
     let target_lang = normalize_lang(job.target_lang);
     let mut lines = sanitize_lines(job.lines, 10);
     if !job.skip_guard {
         lines = guard_foreign_lines(lines, job.placeholders);
     }
     if lines.is_empty() {
-        return Ok(Vec::new());
+        return Ok(TranslationTrace {
+            lines: Vec::new(),
+            models: Vec::new(),
+        });
     }
     let chunk_size = job.chunk_size.max(1);
     // Single mechanism: `TRANSLATE_CONCURRENCY` (file or env, via the global
@@ -415,11 +465,25 @@ async fn translate_lines_inner(pool: &ProviderPool, job: TranslateJob<'_>) -> Re
         jobs.push(async move {
             let _p = sem.acquire_owned().await.expect("semaphore closed");
             let out = attempt_chunk(&pool, &chunk, &tgt, &src, &know, &ph).await?;
-            Ok::<_, anyhow::Error>((ci, chunk, out))
+            let models = out
+                .as_ref()
+                .map(|translation| translation.models.clone())
+                .unwrap_or_default();
+            Ok::<_, anyhow::Error>((ci, chunk, out, models))
         });
     }
-    let mut results = futures::future::try_join_all(jobs).await?;
-    results.sort_by_key(|(ci, _, _)| *ci);
+    let mut traced_results = futures::future::try_join_all(jobs).await?;
+    traced_results.sort_by_key(|(ci, _, _, _)| *ci);
+    let mut models = Vec::new();
+    let results: Vec<ChunkResult> = traced_results
+        .into_iter()
+        .map(|(ci, chunk, out, chunk_models)| {
+            if out.is_some() {
+                models.extend(chunk_models);
+            }
+            (ci, chunk, out.map(|translation| translation.lines))
+        })
+        .collect();
     let (mut out, pending) = stitch_chunks(lines.len(), &results);
     // Fallback lines translate concurrently under a small semaphore — never
     // serially, so a dead provider chunk cannot stall the episode
@@ -438,15 +502,19 @@ async fn translate_lines_inner(pool: &ProviderPool, job: TranslateJob<'_>) -> Re
             );
             fb_jobs.push(async move {
                 let _p = fb_sem.acquire_owned().await.expect("semaphore closed");
-                let text = translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await?;
-                Ok::<_, anyhow::Error>((idx, text))
+                let (text, line_models) =
+                    translate_single_line(&pool, &line, &tgt, &src, &know, &ph).await?;
+                Ok::<_, anyhow::Error>((idx, text, line_models))
             });
         }
-        for (idx, text) in futures::future::try_join_all(fb_jobs).await? {
+        for (idx, text, line_models) in futures::future::try_join_all(fb_jobs).await? {
             out[idx] = text;
+            models.extend(line_models);
         }
     }
-    Ok(out)
+    models.sort();
+    models.dedup();
+    Ok(TranslationTrace { lines: out, models })
 }
 
 /// Merge chunk outputs into absolute positions. Pure and unit-testable:
@@ -517,9 +585,10 @@ pub async fn review_lines(
                 content: user,
             },
         ];
-        let Ok(Some(raw)) = chat_across_providers(pool, &messages).await else {
+        let Ok(Some(response)) = chat_across_providers(pool, &messages).await else {
             continue;
         };
+        let raw = response.content;
         if raw.trim() == "NONE" {
             continue;
         }

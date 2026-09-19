@@ -8,12 +8,16 @@ use super::discord_types::{
 };
 
 const MAX_ROW_SCALARS: usize = 160;
-const MAX_FIELD_NAME_SCALARS: usize = 32;
 const MAX_FIELD_VALUE_SCALARS: usize = 900;
-const MAX_DESCRIPTION_SCALARS: usize = 800;
 const MAX_EMBED_TEXT_SCALARS: usize = 4_000;
 const MAX_ROWS: usize = 8;
 const MAX_TARGET_ENTRIES: usize = 6;
+const COMPLETE_USERNAME: &str = "ASRSub · Complete";
+const PARTIAL_USERNAME: &str = "ASRSub · Partial";
+const ATTENTION_USERNAME: &str = "ASRSub · Attention";
+const COMPLETE_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/2705/128.png";
+const WARNING_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/26a0/128.png";
+const ATTENTION_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/274c/128.png";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderError {
@@ -106,6 +110,10 @@ fn truncate_title(title: &str, capacity: usize) -> String {
     out
 }
 
+fn formatted_row(kind: &str, title: &str, meta: &str, entries: &[String]) -> String {
+    format!("**{kind} {title} {meta}** - {}", entries.join(" | "))
+}
+
 fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>), RenderError> {
     let targets = report.targets().as_slice();
     let mut indexed: Vec<_> = targets
@@ -115,7 +123,20 @@ fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>)
             (
                 severity,
                 target.language().as_str().to_string(),
-                format!("{}:{token}", target.language().as_str()),
+                format!(
+                    "{}:{token}{}",
+                    target.language().as_str(),
+                    target
+                        .generation_method()
+                        .map(|method| {
+                            let display = method
+                                .display()
+                                .replace(" · ", " | ")
+                                .replace(" → ", " -> ");
+                            format!(" | {display}")
+                        })
+                        .unwrap_or_default()
+                ),
             )
         })
         .collect();
@@ -155,10 +176,8 @@ fn make_row(report: &EpisodeRunReport) -> Result<Row, RenderError> {
     if entries.is_empty() {
         return Err(RenderError::CannotFit);
     }
-    let prefix = format!("{kind} {meta} - {}", entries.join(", "));
-    let fixed = scalar_len(&prefix) + 1 + scalar_len(title);
-    if fixed <= MAX_ROW_SCALARS {
-        let text = format!("{kind} {title} {meta} - {}", entries.join(", "));
+    let text = formatted_row(kind, title, &meta, &entries);
+    if scalar_len(&text) <= MAX_ROW_SCALARS {
         return Ok(Row {
             text,
             severity: if report.item_failure().is_some() {
@@ -180,12 +199,13 @@ fn make_row(report: &EpisodeRunReport) -> Result<Row, RenderError> {
                     .any(|t| status_token(t.status()).1 < 2),
         });
     }
-    let title_budget = MAX_ROW_SCALARS.saturating_sub(scalar_len(&prefix) + 1);
+    let fixed = formatted_row(kind, "", &meta, &entries);
+    let title_budget = MAX_ROW_SCALARS.saturating_sub(scalar_len(&fixed) + 1);
     if title_budget == 0 {
         return Err(RenderError::CannotFit);
     }
     let title = truncate_title(title, title_budget.min(120));
-    let text = format!("{kind} {title} {meta} - {}", entries.join(", "));
+    let text = formatted_row(kind, &title, &meta, &entries);
     if scalar_len(&text) > MAX_ROW_SCALARS {
         return Err(RenderError::CannotFit);
     }
@@ -217,65 +237,86 @@ fn summary_rows(summary: &OverflowSummaryV1) -> (Vec<String>, Vec<String>) {
     let mut completed = Vec::new();
     if summary.attention_reports() > 0 {
         attention.push(format!(
-            "attention: at least {} additional attention reports",
+            "**Attention:** at least {} additional attention reports",
             summary.attention_reports()
         ));
     }
     if summary.warning_reports() > 0 {
         attention.push(format!(
-            "warning: at least {} additional warning reports",
+            "**Warning:** at least {} additional warning reports",
             summary.warning_reports()
         ));
     }
     if summary.blocked_admissions() > 0 {
         attention.push(format!(
-            "blocked: at least {} committed reports awaiting capacity",
+            "**Blocked:** at least {} committed reports awaiting capacity",
             summary.blocked_admissions()
         ));
     }
     if summary.target_outcomes() > 0 {
         attention.push(format!(
-            "targets: at least {} additional target outcomes",
+            "**Targets:** at least {} additional target outcomes",
             summary.target_outcomes()
         ));
     }
     if summary.pre_admission_drops() > 0 {
         attention.push(format!(
-            "state-capacity: at least {} reports rejected by state capacity",
+            "**State capacity:** at least {} reports rejected by state capacity",
             summary.pre_admission_drops()
         ));
     }
     if summary.completed_reports() > 0 {
         completed.push(format!(
-            "completed: at least {} additional completed reports",
+            "**Completed:** at least {} additional completed reports",
             summary.completed_reports()
         ));
     }
     (attention, completed)
 }
 
-fn outcome(view: &DeliveryView, rows: &[Row]) -> (String, u32) {
+fn outcome(view: &DeliveryView, rows: &[Row]) -> (&'static str, &'static str, u32) {
     let summary = view.overflow_summary();
-    let attention = summary.attention_reports() > 0
+    let failure = summary.attention_reports() > 0
         || summary.target_outcomes() > 0
         || summary.pre_admission_drops() > 0
         || summary.blocked_admissions() > 0
-        || rows.iter().any(|r| r.attention);
-    if attention {
-        ("❌ ASRSub · Attention required".to_string(), 0xED4245)
+        || rows.iter().any(|r| r.severity == 0);
+    if failure {
+        (ATTENTION_USERNAME, ATTENTION_AVATAR_URL, 0xED4245)
     } else if summary.warning_reports() > 0 || rows.iter().any(|r| r.severity == 1) {
-        ("⚠ ASRSub · Partial".to_string(), 0xFEE75C)
+        (PARTIAL_USERNAME, WARNING_AVATAR_URL, 0xFEE75C)
     } else {
-        ("✅ ASRSub · Complete".to_string(), 0x57F287)
+        (COMPLETE_USERNAME, COMPLETE_AVATAR_URL, 0x57F287)
     }
 }
 
-fn field_value(rows: &[String]) -> String {
-    if rows.is_empty() {
-        "none".to_string()
-    } else {
-        rows.join("\n")
+fn result_lines(
+    attention: &[String],
+    attention_rows: &[String],
+    completed: &[String],
+    completed_rows: &[String],
+    omitted_attention: usize,
+    omitted_completed: usize,
+) -> Vec<String> {
+    let mut results = Vec::with_capacity(
+        attention.len()
+            + attention_rows.len()
+            + completed.len()
+            + completed_rows.len()
+            + usize::from(omitted_attention > 0)
+            + usize::from(omitted_completed > 0),
+    );
+    results.extend(attention.iter().cloned());
+    results.extend(attention_rows.iter().cloned());
+    if omitted_attention > 0 {
+        results.push(format!("_+{omitted_attention} more attention episodes_"));
     }
+    results.extend(completed.iter().cloned());
+    results.extend(completed_rows.iter().cloned());
+    if omitted_completed > 0 {
+        results.push(format!("_+{omitted_completed} more completed episodes_"));
+    }
+    results
 }
 
 pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
@@ -285,7 +326,7 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         .map(make_row)
         .collect::<Result<_, _>>()?;
     episode_rows.sort_by(|a, b| (a.severity, &a.text).cmp(&(b.severity, &b.text)));
-    let (mut attention, mut completed) = summary_rows(view.overflow_summary());
+    let (attention, completed) = summary_rows(view.overflow_summary());
     let mut attention_rows: Vec<String> = episode_rows
         .iter()
         .filter(|r| r.attention)
@@ -303,7 +344,15 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         return Err(RenderError::CannotFit);
     }
     let slots = MAX_ROWS - mandatory;
-    while attention_rows.len() + completed_rows.len() > slots {
+    let total_attention = episode_rows.iter().filter(|r| r.attention).count();
+    let total_completed = episode_rows.iter().filter(|r| !r.attention).count();
+    let (omitted_attention, omitted_completed) = loop {
+        let omitted_attention = total_attention.saturating_sub(attention_rows.len());
+        let omitted_completed = total_completed.saturating_sub(completed_rows.len());
+        let marker_rows = usize::from(omitted_attention > 0) + usize::from(omitted_completed > 0);
+        if attention_rows.len() + completed_rows.len() + marker_rows <= slots {
+            break (omitted_attention, omitted_completed);
+        }
         if !completed_rows.is_empty() {
             completed_rows.pop();
         } else if !attention_rows.is_empty() {
@@ -311,85 +360,55 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         } else {
             return Err(RenderError::CannotFit);
         }
-    }
-    let omitted_attention = episode_rows
-        .iter()
-        .filter(|r| r.attention)
-        .count()
-        .saturating_sub(attention_rows.len());
-    let omitted_completed = episode_rows
-        .iter()
-        .filter(|r| !r.attention)
-        .count()
-        .saturating_sub(completed_rows.len());
-    if omitted_attention > 0 {
-        let marker = format!("+{omitted_attention} more attention episodes");
-        if let Some(last) = attention_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = attention.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
-    }
-    if omitted_completed > 0 {
-        let marker = format!("+{omitted_completed} more completed episodes");
-        if let Some(last) = completed_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = completed.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
-    }
-    let (title, color) = outcome(view, &episode_rows);
-    debug_assert!(scalar_len("Needs attention") <= MAX_FIELD_NAME_SCALARS);
-    debug_assert!(scalar_len("Completed") <= MAX_FIELD_NAME_SCALARS);
-    let needs = field_value(
-        &attention
-            .iter()
-            .chain(attention_rows.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
+    };
+    let mut results = result_lines(
+        &attention,
+        &attention_rows,
+        &completed,
+        &completed_rows,
+        omitted_attention,
+        omitted_completed,
     );
-    let done = field_value(
-        &completed
-            .iter()
-            .chain(completed_rows.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
-    if scalar_len(&needs) > MAX_FIELD_VALUE_SCALARS || scalar_len(&done) > MAX_FIELD_VALUE_SCALARS {
-        return Err(RenderError::TooLarge);
+    if results.is_empty() {
+        return Err(RenderError::CannotFit);
     }
-    let description = "ASRSub daemon pass digest";
-    if scalar_len(&title) > MAX_DESCRIPTION_SCALARS
-        || scalar_len(description) > MAX_DESCRIPTION_SCALARS
-    {
-        return Err(RenderError::TooLarge);
+    while scalar_len(&results.join("\n")) > MAX_FIELD_VALUE_SCALARS {
+        if !completed_rows.is_empty() {
+            completed_rows.pop();
+        } else if !attention_rows.is_empty() {
+            attention_rows.pop();
+        } else {
+            return Err(RenderError::TooLarge);
+        }
+        let omitted_attention = total_attention.saturating_sub(attention_rows.len());
+        let omitted_completed = total_completed.saturating_sub(completed_rows.len());
+        results = result_lines(
+            &attention,
+            &attention_rows,
+            &completed,
+            &completed_rows,
+            omitted_attention,
+            omitted_completed,
+        );
     }
-    let total = scalar_len(&title)
-        + scalar_len(description)
-        + scalar_len("Needs attention")
-        + scalar_len("Completed")
-        + scalar_len(&needs)
-        + scalar_len(&done)
-        + 4;
-    if total > MAX_EMBED_TEXT_SCALARS {
+    let results = results.join("\n");
+    if results.is_empty() || results == "none" {
+        return Err(RenderError::CannotFit);
+    }
+    let (username, avatar_url, color) = outcome(view, &episode_rows);
+    if scalar_len(&results) > MAX_EMBED_TEXT_SCALARS {
         return Err(RenderError::TooLarge);
     }
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"{\"embeds\":[{\"title\":");
-    bytes.extend_from_slice(&encode_string(&title));
-    bytes.extend_from_slice(b",\"description\":");
-    bytes.extend_from_slice(&encode_string(description));
+    bytes.extend_from_slice(b"{\"username\":");
+    bytes.extend_from_slice(&encode_string(username));
+    bytes.extend_from_slice(b",\"avatar_url\":");
+    bytes.extend_from_slice(&encode_string(avatar_url));
+    bytes.extend_from_slice(b",\"embeds\":[{\"description\":");
+    bytes.extend_from_slice(&encode_string(&results));
     bytes.extend_from_slice(b",\"color\":");
     bytes.extend_from_slice(color.to_string().as_bytes());
-    bytes.extend_from_slice(b",\"fields\":[{\"name\":\"Needs attention\",\"value\":");
-    bytes.extend_from_slice(&encode_string(&needs));
-    bytes.extend_from_slice(b",\"inline\":false},{\"name\":\"Completed\",\"value\":");
-    bytes.extend_from_slice(&encode_string(&done));
-    bytes.extend_from_slice(b",\"inline\":false}]}],\"allowed_mentions\":{\"parse\":[]}}");
+    bytes.extend_from_slice(b"}],\"allowed_mentions\":{\"parse\":[]}}");
     PayloadBytes::try_from_bytes(bytes.into_boxed_slice()).map_err(|_| RenderError::TooLarge)
 }
 
@@ -398,7 +417,8 @@ mod tests {
     use super::super::discord_state_schema::OverflowSummaryV1;
     use super::super::discord_text::SafeDisplayText;
     use super::super::discord_types::{
-        AggregateDisposition, BoundedTargets, TargetLanguage, TargetRunResult,
+        AggregateDisposition, BoundedTargets, GenerationMethod, GenerationSource, TargetLanguage,
+        TargetRunResult, MAX_GENERATION_METHOD_SCALARS,
     };
     use super::*;
 
@@ -437,12 +457,43 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
-        assert!(value.get("content").is_none());
+        assert_eq!(value["username"], "ASRSub · Complete");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/2705/128.png"
+        );
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0x57F287));
+        assert!(value["embeds"][0].get("title").is_none());
         assert_eq!(
             value["embeds"][0]["description"],
-            "ASRSub daemon pass digest"
+            "**series Show S01E02** - id:ok"
         );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
+        assert!(value["embeds"][0].get("fields").is_none());
+        assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
+        assert!(value.get("content").is_none());
+    }
+
+    #[test]
+    fn renders_formatted_overflow_summary() {
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports(std::iter::empty()).unwrap();
+        let summary = OverflowSummaryV1::new(2, 0, 4, 0, 3, 0);
+        let payload = render(&DeliveryView::new(1, reports, summary)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "**Attention:** at least 2 additional attention reports\n**State capacity:** at least 3 reports rejected by state capacity\n**Completed:** at least 4 additional completed reports"
+        );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
     }
 
     #[test]
@@ -455,7 +506,54 @@ mod tests {
         )])
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
-        assert!(String::from_utf8_lossy(payload.as_bytes()).contains("id:warn-unknown"));
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(value["username"], "ASRSub · Partial");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/26a0/128.png"
+        );
+        assert!(value["embeds"][0].get("title").is_none());
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xFEE75C));
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "**series Show S01E02** - id:warn-unknown"
+        );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
+    }
+
+    #[test]
+    fn renders_failure_with_attention_avatar_and_username() {
+        let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
+            TargetStatus::Failed {
+                class: FailureClass::Unknown,
+            },
+            "Show",
+        )])
+        .unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(value["username"], "ASRSub · Attention");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/274c/128.png"
+        );
+        assert!(value["embeds"][0].get("title").is_none());
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xED4245));
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "**series Show S01E02** - id:fail-unknown"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_results_without_bounded_summary() {
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports(std::iter::empty()).unwrap();
+        assert!(render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).is_err());
     }
 
     #[test]
@@ -471,7 +569,19 @@ mod tests {
         let (reports, _) =
             super::super::discord_types::BoundedReports::from_reports(reports).unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
-        assert!(String::from_utf8_lossy(payload.as_bytes()).contains("more completed episodes"));
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(description
+            .lines()
+            .any(|line| line == "_+3 more completed episodes_"));
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
+        assert!(description
+            .lines()
+            .all(|line| line.chars().count() <= MAX_ROW_SCALARS));
+        assert!(description.lines().count() <= MAX_ROWS);
     }
 
     #[test]
@@ -496,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn redacts_untrusted_fields() {
+    fn redacts_untrusted_description() {
         let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
             TargetStatus::Failed {
                 class: FailureClass::Unknown,
@@ -505,7 +615,132 @@ mod tests {
         )])
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
-        let text = String::from_utf8_lossy(payload.as_bytes());
-        assert!(!text.contains("https://"));
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let results = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!results.contains("https://"));
+        assert!(!results.contains("discord.com/token"));
+    }
+
+    #[test]
+    fn markdown_row_truncation_includes_formatting_overhead() {
+        let title = "A#".repeat(256);
+        let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
+            TargetStatus::Completed { warning: None },
+            &title,
+        )])
+        .unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let line = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(line.chars().count() <= MAX_ROW_SCALARS);
+        assert!(line.starts_with("**series "));
+        assert!(line.contains("** - id:ok"));
+        assert!(!line.contains('`'));
+        assert!(!line.starts_with('-'));
+    }
+
+    #[test]
+    fn renders_per_target_generation_method_and_actual_models() {
+        let method = GenerationMethod::new(
+            GenerationSource::Whisper,
+            &["provider/whisper-1".to_string()],
+            &["openai/gpt-4o-mini".to_string()],
+        );
+        let target = TargetRunResult::try_new_with_method(
+            TargetLanguage::parse("id").unwrap(),
+            TargetStatus::Completed { warning: None },
+            Some([9; 32]),
+            Some(method),
+        )
+        .unwrap();
+        let report = EpisodeRunReport::try_new(
+            EpisodeKind::Movie,
+            9,
+            SafeDisplayText::sanitize("movie").unwrap(),
+            None,
+            None,
+            BoundedTargets::try_from([target]).unwrap(),
+            None,
+            AggregateDisposition::Complete,
+        )
+        .unwrap();
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports([report]).unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let results = value["embeds"][0]["description"].as_str().unwrap();
+        assert_eq!(
+            results,
+            "**movie movie movie** - id:ok | Whisper: provider/whisper-1 -> LLM: openai/gpt-4o-mini"
+        );
+        assert!(!results.contains('`'));
+        assert!(!results.starts_with('-'));
+        assert!(results.chars().count() <= MAX_ROW_SCALARS);
+    }
+
+    #[test]
+    fn generation_method_cases_are_compact_and_safe() {
+        let cases = [
+            (
+                GenerationSource::Sidecar,
+                vec![],
+                vec!["provider/model".to_string()],
+                "Sidecar → LLM: provider/model",
+            ),
+            (
+                GenerationSource::Jimaku,
+                vec![],
+                vec!["provider:model".to_string()],
+                "Jimaku → LLM: provider:model",
+            ),
+            (
+                GenerationSource::Whisper,
+                vec!["provider/whisper-model".to_string()],
+                vec![],
+                "Whisper: provider/whisper-model",
+            ),
+            (
+                GenerationSource::Whisper,
+                vec!["provider/whisper-model".to_string()],
+                vec!["provider/translation-model".to_string()],
+                "Whisper: provider/whisper-model → LLM: provider/translation-model",
+            ),
+            (
+                GenerationSource::ExistingSubtitle,
+                vec![],
+                vec![],
+                "Existing subtitle",
+            ),
+        ];
+        for (source, whisper, llm, expected) in cases {
+            assert_eq!(
+                GenerationMethod::new(source, &whisper, &llm).display(),
+                expected
+            );
+        }
+
+        let method = GenerationMethod::new(
+            GenerationSource::Whisper,
+            &["provider/model:v1.2-name_with-dash".to_string()],
+            &[format!(
+                "https://endpoint.example/{}/{} @everyone *bad* `code` # [x] ~ {}\n",
+                "key_env",
+                "secret",
+                "x".repeat(MAX_GENERATION_METHOD_SCALARS * 2)
+            )],
+        );
+        let display = method.display();
+        assert!(display.contains("provider/model:v1.2-name_with-dash"));
+        assert!(!display.contains("https://endpoint.example"));
+        assert!(!display.contains("key_env"));
+        assert!(!display.contains("@everyone"));
+        assert!(!display.contains('*'));
+        assert!(!display.contains('`'));
+        assert!(!display.contains('#'));
+        assert!(!display.contains('['));
+        assert!(!display.contains(']'));
+        assert!(!display.contains('~'));
+        assert!(!display.contains('\n'));
+        assert!(display.chars().count() <= MAX_GENERATION_METHOD_SCALARS);
     }
 }

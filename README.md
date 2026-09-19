@@ -68,7 +68,6 @@ Env is adopted only for pipeline-owned keys (plus keys already in files).
 | `TRANSLATE_CHUNK` | Lines per LLM request (default 10) |
 | `MAX_CUE_MS` | Max cue duration in ms (default 8000) |
 | `PROVIDERS_FILE` | Path to `asrsub_providers.json` |
-| `CONTROL_API_KEY_FILE` | Control-token secret (`/run/secrets/control_api_key` in compose) |
 
 Remote endpoints, models, and keys live in `asrsub_providers.json`
 (LLM list sorted fastest-first with per-endpoint limits + breakers).
@@ -83,38 +82,34 @@ ships inside the Docker image (see `docs/DEPLOY.md`).
 
 ## Optional Discord notifications
 
-**Requirement (core):** the daemon may send a bounded digest to Discord through
-the outbound webhook stored at the fixed runtime-secret path
-`/run/secrets/discord_webhook`. Discord is a destination only: it is never an
-ASRSub command source, listener, control plane, or replacement for the
-authenticated inbound `/webhook` route.
+The long-running daemon may send one bounded log-style digest through the
+optional container-side webhook file at `/run/secrets/discord_webhook`. For a
+host-local one-shot smoke test, run
+`python3 scripts/test_discord_webhook.py --live`; it reads the protected
+`~/.config/asr-pipeline/secrets/discord_webhook` file without starting the
+daemon or a pipeline pass. The URL is validated at this boundary; missing,
+empty, malformed, or inaccessible input disables notifications without stopping
+subtitle processing. The reserved `DISCORD_WEBHOOK_URL` key remains rejected
+from configuration files, process-environment merging, and API/dashboard
+writes.
 
-Notifications are daemon-only. `asrsub run-once` continues to use the public
-stats-only pipeline wrapper and performs no Discord secret, notification-state,
-DNS, or transport access. Idle passes create no new digest; an already durable
-due digest may still be delivered. The durable notification gate enforces a
-minimum 900-second interval between HTTP attempt starts and uses at-least-once
-delivery after outbox admission, so a crash after remote acceptance can be a
-conservative duplicate.
+A meaningful pass is admitted with one bounded nonblocking `try_send` into an
+in-memory queue. The notifier renders the reports and makes exactly one
+best-effort webhook POST, then discards the work. Idle passes send nothing.
+There is no durable notification state, outbox, replay, reservation,
+acknowledgement, retry, or scheduled tick. `asrsub run-once` does not read the
+webhook secret or send a request. Discord is a destination only: this adds no
+bot, gateway, listener, command, interaction, or inbound Discord control plane,
+and does not change the existing inbound `/webhook` route.
 
-Invalid, missing, empty, or inaccessible optional secret input disables
-notifications without stopping subtitle processing. The reserved key
-`DISCORD_WEBHOOK_URL` (in any ASCII case) is rejected from configuration files,
-process environment merging, API/dashboard writes, and masked output. The URL
-is never stored in `Config::raw`, logs, public responses, or an application
-environment.
+Render and transport failures emit only a generic local classification; URL,
+payload, response-body, path, and credential values are not logged. Automated
+notifier tests use deterministic in-process fakes and local mock HTTP only. The
+live smoke helper is explicitly opt-in and deployment validation remains
+unverified.
 
-**Local evidence:** renderer/state/transport tests use bounded safe fixtures,
-an in-memory fake transport, or test-only localhost endpoints. They verify
-deterministic non-mention payloads, state quarantine, replay, and failure
-isolation without contacting Discord.
-
-**Rollout-only evidence (hardening):** production secret staging, non-root
-container mounts, child cleanup, release provenance, resolver/address
-binding, systemd recovery, and deployment journal/rollback evidence are owned
-by the deployment-hardening plan. This repository's `pipeline.env.example`
-remains non-secret and intentionally contains no Discord URL, token, enable
-flag, or outbound webhook setting.
+The repository's `pipeline.env.example` remains non-secret and intentionally
+contains no Discord URL, token, enable flag, or outbound webhook setting.
 
 Failover: every LLM chunk races all configured models fastest-first (404
 or error → next model, 3 straight failures → 60 s breaker); Whisper tries
@@ -124,7 +119,9 @@ the whole model list already *is* the fallback list.)
 
 ## Control API
 
-GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
+The daemon serves its API and dashboard without in-process user authentication.
+Access control is provided externally by Pomerium/Pocket ID over HTTPS; the
+repository does not implement a replacement authentication layer.
 
 - `/` and `/ui/status` server-rendered operator dashboard (embedded; no
   runtime asset directory). `/ui/overview` remains a compatibility alias.
@@ -132,12 +129,9 @@ GETs are open telemetry; POSTs need `X-API-Key: <control key>`.
 - `/ui/library` (with `q`, `scope`, `sort`, and `dir` filters),
   `/ui/activity`, `/ui/provenance`, and `/ui/settings`
 - `/ui/control/{action}`, `/ui/episode/{id|m:id|e:id}/{action}`, and
-  `/ui/config` use authenticated POST/redirect/GET. A successful mutation
-  returns `303 See Other`; failures return a complete HTML page with the
-  original `401`, `400`, `404`, or `500` status.
-  The small embedded browser asset keeps the control key in `sessionStorage`
-  and sends it only as `X-API-Key`; it never places the key in a form body,
-  URL, cookie, or redirect.
+  `/ui/config` use POST/redirect/GET. A successful mutation returns `303 See
+  Other`; failures return a complete HTML page with its `400`, `404`, or `500`
+  status.
 - `/health` liveness · `/ready` readiness (media/providers/state) · `/status` daemon state · `/config` masked config
 - `/pause` `/resume` `/run-once` `/wake` control · `/webhook` Tdarr wake + embedded-sub extract
 - `/api2/status /health /ready /config /provenance /wanted /library /activity /exclusions`

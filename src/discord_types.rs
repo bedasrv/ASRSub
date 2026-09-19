@@ -8,6 +8,9 @@ pub(crate) const MAX_TARGETS_PER_REPORT: usize = 32;
 pub(crate) const MAX_PASS_REPORTS: usize = 128;
 pub(crate) const MAX_PASS_REPORT_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_REPORT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_GENERATION_MODELS: usize = 3;
+pub(crate) const MAX_GENERATION_MODEL_SCALARS: usize = 48;
+pub(crate) const MAX_GENERATION_METHOD_SCALARS: usize = 112;
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Debug)]
 pub(crate) enum EpisodeKind {
@@ -93,11 +96,125 @@ impl std::fmt::Debug for TargetLanguage {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum GenerationSource {
+    ExistingSubtitle,
+    Sidecar,
+    Jimaku,
+    Whisper,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub(crate) struct GenerationMethod {
+    source: GenerationSource,
+    whisper_models: Box<[String]>,
+    llm_models: Box<[String]>,
+}
+
+impl GenerationMethod {
+    pub(crate) fn new(
+        source: GenerationSource,
+        whisper_models: &[String],
+        llm_models: &[String],
+    ) -> Self {
+        Self {
+            source,
+            whisper_models: bounded_model_names(whisper_models),
+            llm_models: bounded_model_names(llm_models),
+        }
+    }
+
+    pub(crate) fn existing_subtitle() -> Self {
+        Self::new(GenerationSource::ExistingSubtitle, &[], &[])
+    }
+
+    pub(crate) fn display(&self) -> String {
+        let llm = display_models("LLM", &self.llm_models);
+        let mut rendered = match self.source {
+            GenerationSource::ExistingSubtitle => "Existing subtitle".to_string(),
+            GenerationSource::Sidecar => append_translation("Sidecar".to_string(), llm.as_deref()),
+            GenerationSource::Jimaku => append_translation("Jimaku".to_string(), llm.as_deref()),
+            GenerationSource::Whisper => {
+                let source = display_models("Whisper", &self.whisper_models)
+                    .unwrap_or_else(|| "Whisper".to_string());
+                append_translation(source, llm.as_deref())
+            }
+        };
+        if rendered.chars().count() > MAX_GENERATION_METHOD_SCALARS {
+            rendered = rendered
+                .chars()
+                .take(MAX_GENERATION_METHOD_SCALARS)
+                .collect();
+        }
+        rendered
+    }
+
+    pub(crate) fn source(&self) -> GenerationSource {
+        self.source
+    }
+
+    pub(crate) fn whisper_models(&self) -> &[String] {
+        &self.whisper_models
+    }
+
+    pub(crate) fn llm_models(&self) -> &[String] {
+        &self.llm_models
+    }
+}
+
+fn append_translation(source: String, llm: Option<&str>) -> String {
+    match llm {
+        Some(llm) => format!("{source} → {llm}"),
+        None => source,
+    }
+}
+
+fn display_models(label: &str, models: &[String]) -> Option<String> {
+    (!models.is_empty()).then(|| format!("{label}: {}", models.join(", ")))
+}
+
+fn bounded_model_names(raw: &[String]) -> Box<[String]> {
+    let mut names: Vec<String> = raw
+        .iter()
+        .filter_map(|model| sanitize_model(model))
+        .collect();
+    names.sort();
+    names.dedup();
+    names.truncate(MAX_GENERATION_MODELS);
+    names.into_boxed_slice()
+}
+
+fn sanitize_model(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty()
+        || lowered.contains("://")
+        || lowered.starts_with("http")
+        || lowered.contains("api_key")
+        || lowered.contains("key_env")
+    {
+        return None;
+    }
+    let mut clean = String::new();
+    for c in trimmed.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '-' | '_') {
+            clean.push(c);
+        }
+    }
+    if clean.is_empty() {
+        return None;
+    }
+    Some(clean.chars().take(MAX_GENERATION_MODEL_SCALARS).collect())
+}
+
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) struct TargetRunResult {
     language: TargetLanguage,
     status: TargetStatus,
     artifact_sha256: Option<[u8; 32]>,
+    // Notification-only provenance. It is intentionally omitted from the
+    // canonical report codec and absent after state decode.
+    generation_method: Option<GenerationMethod>,
 }
 
 impl TargetRunResult {
@@ -105,6 +222,15 @@ impl TargetRunResult {
         language: TargetLanguage,
         status: TargetStatus,
         artifact_sha256: Option<[u8; 32]>,
+    ) -> Result<Self, ReportConstructionError> {
+        Self::try_new_with_method(language, status, artifact_sha256, None)
+    }
+
+    pub(crate) fn try_new_with_method(
+        language: TargetLanguage,
+        status: TargetStatus,
+        artifact_sha256: Option<[u8; 32]>,
+        generation_method: Option<GenerationMethod>,
     ) -> Result<Self, ReportConstructionError> {
         let needs_digest = matches!(status, TargetStatus::Completed { .. });
         if needs_digest != artifact_sha256.is_some() {
@@ -114,6 +240,7 @@ impl TargetRunResult {
             language,
             status,
             artifact_sha256,
+            generation_method,
         })
     }
 
@@ -125,6 +252,9 @@ impl TargetRunResult {
     }
     pub(crate) fn artifact_sha256(&self) -> Option<&[u8; 32]> {
         self.artifact_sha256.as_ref()
+    }
+    pub(crate) fn generation_method(&self) -> Option<&GenerationMethod> {
+        self.generation_method.as_ref()
     }
     pub(crate) fn severity(&self) -> u8 {
         match self.status {
@@ -302,7 +432,6 @@ impl EpisodeRunReport {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) struct BoundedReports {
     items: Box<[EpisodeRunReport]>,
-    canonical_bytes: u32,
 }
 
 impl BoundedReports {
@@ -333,8 +462,6 @@ impl BoundedReports {
         Ok((
             Self {
                 items: kept.into_boxed_slice(),
-                canonical_bytes: u32::try_from(bytes)
-                    .map_err(|_| ReportConstructionError::CounterOverflow)?,
             },
             omitted,
         ))
@@ -348,9 +475,6 @@ impl BoundedReports {
     }
     pub(crate) fn into_boxed_slice(self) -> Box<[EpisodeRunReport]> {
         self.items
-    }
-    pub(crate) fn canonical_bytes_len(&self) -> u32 {
-        self.canonical_bytes
     }
 }
 
@@ -430,5 +554,59 @@ mod tests {
             .as_str()
             .starts_with("asrsub-pipeline-v1-"));
         assert_eq!(r.pipeline_commit_id().unwrap().as_str().len(), 83);
+    }
+
+    #[test]
+    fn notification_provenance_is_omitted_from_canonical_report_bytes() {
+        let method = GenerationMethod::new(
+            GenerationSource::Whisper,
+            &["provider/whisper".to_string()],
+            &["provider/llm".to_string()],
+        );
+        let decorated = EpisodeRunReport::try_new(
+            EpisodeKind::Movie,
+            8,
+            SafeDisplayText::sanitize("movie").unwrap(),
+            None,
+            None,
+            BoundedTargets::try_from([TargetRunResult::try_new_with_method(
+                TargetLanguage::parse("id").unwrap(),
+                TargetStatus::Completed { warning: None },
+                Some([8; 32]),
+                Some(method),
+            )
+            .unwrap()])
+            .unwrap(),
+            None,
+            AggregateDisposition::Complete,
+        )
+        .unwrap();
+        let plain = EpisodeRunReport::try_new(
+            EpisodeKind::Movie,
+            8,
+            SafeDisplayText::sanitize("movie").unwrap(),
+            None,
+            None,
+            BoundedTargets::try_from([TargetRunResult::try_new(
+                TargetLanguage::parse("id").unwrap(),
+                TargetStatus::Completed { warning: None },
+                Some([8; 32]),
+            )
+            .unwrap()])
+            .unwrap(),
+            None,
+            AggregateDisposition::Complete,
+        )
+        .unwrap();
+        let bytes = discord_state_codec::encode_report(&decorated);
+        assert!(!String::from_utf8_lossy(&bytes).contains("generation_method"));
+        assert_eq!(
+            decorated.pipeline_commit_id().unwrap(),
+            plain.pipeline_commit_id().unwrap()
+        );
+        let decoded = discord_state_codec::decode_report(&bytes).unwrap();
+        assert!(decoded.targets().as_slice()[0]
+            .generation_method()
+            .is_none());
     }
 }

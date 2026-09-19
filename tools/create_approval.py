@@ -1,11 +1,9 @@
 #!/usr/bin/python3
-"""Create a detached approval signature with an explicit signer mode.
+"""Create an unsigned approval manifest with explicit integrity bindings.
 
-``--fixture`` is intentionally non-production and writes a marker signature.
-``--production`` and ``--test-seam`` require a real private-key FD and sign
-canonical approval bytes with fixed /usr/bin/openssl.  Production approval
-creation is bound to the exact lowercase HEAD SHA from fixed /usr/bin/git.
-"""
+The canonical approval bytes are validated, then copied to the fixed manifest
+path.  Release SHA, image, bundle, Compose, host-binding, and generation
+fields remain ordinary integrity data contracts."""
 from __future__ import annotations
 
 import argparse
@@ -18,12 +16,11 @@ from pathlib import Path
 from typing import Any
 
 
-OPENSSL = Path("/usr/bin/openssl")
 GIT = Path("/usr/bin/git")
 RELEASE_RE = set("0123456789abcdef")
 ALLOWED_APPROVAL_KEYS = {
     "schema",
-    "signing_mode",
+    "integrity_mode",
     "generation",
     "release_sha",
     "bundle_sha256",
@@ -200,27 +197,27 @@ def _git_repository_root(cwd: Path | None = None) -> Path:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("production signer must run from the repository root") from exc
+        raise ValueError("production approval creator must run from the repository root") from exc
     raw = completed.stdout
     if completed.returncode != 0 or raw.count("\n") != 1 or not raw.endswith("\n"):
-        raise ValueError("production signer must run from the repository root")
+        raise ValueError("production approval creator must run from the repository root")
     try:
         repository = Path(raw[:-1]).resolve(strict=True)
         current = workdir.resolve(strict=True)
     except OSError as exc:
-        raise ValueError("production signer must run from the repository root") from exc
+        raise ValueError("production approval creator must run from the repository root") from exc
     if current != repository:
-        raise ValueError("production signer must run from the repository root")
+        raise ValueError("production approval creator must run from the repository root")
     return repository
 
 
-def _validate_approval(value: dict[str, Any], *, signing_mode: str) -> None:
+def _validate_approval(value: dict[str, Any]) -> None:
     if set(value) != ALLOWED_APPROVAL_KEYS:
         raise ValueError("approval contains missing or unapproved fields")
     if value.get("schema") != "approval-v1":
         raise ValueError("approval schema must be approval-v1")
-    if value.get("signing_mode") != signing_mode:
-        raise ValueError(f"approval signing_mode must be {signing_mode}")
+    if value.get("integrity_mode") != "unsigned":
+        raise ValueError("approval integrity_mode must be unsigned")
     release_sha(value.get("release_sha"))
     for name in ("bundle_sha256", "compose_sha256", "compose_template_sha256", "image_digest"):
         digest = value.get(name)
@@ -317,83 +314,36 @@ def _remove_private_path(path: Path) -> None:
         pass
 
 
-def _sign(data: Path, signature: Path, key_fd: int) -> None:
-    if not isinstance(key_fd, int) or key_fd < 0:
-        raise ValueError("a real signing key FD is required")
-    try:
-        st = os.fstat(key_fd)
-    except OSError as exc:
-        raise ValueError("approval signing key FD is not open") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError("approval signing key FD must refer to a regular file")
-    try:
-        completed = subprocess.run(
-            [os.fspath(OPENSSL), "dgst", "-sha256", "-sign", f"/proc/self/fd/{key_fd}", "-out", os.fspath(signature), os.fspath(data)],
-            capture_output=True,
-            check=False,
-            shell=False,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
-            pass_fds=(key_fd,),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("fixed OpenSSL approval signing failed") from exc
-    if completed.returncode != 0:
-        raise ValueError("fixed OpenSSL rejected the supplied approval key")
-    os.chmod(signature, 0o600)
-    _fsync_file(signature, name="approval signature stage")
-
-
-def _publish(manifest: Path, signature: Path, raw: bytes, *, signature_bytes: bytes | None = None, key_fd: int | None = None) -> None:
+def _publish(manifest: Path, raw: bytes) -> None:
     _ensure_empty_output(manifest, name="approval manifest")
-    _ensure_empty_output(signature, name="approval signature")
-    if manifest == signature:
-        raise ValueError("approval output paths must be distinct")
     manifest_parent = manifest.parent
-    signature_parent = signature.parent
     manifest_stage: Path | None = None
-    signature_stage: Path | None = None
     try:
         manifest_stage = _new_private_stage(manifest_parent, prefix=f".{manifest.name}.stage-")
-        signature_stage = _new_private_stage(signature_parent, prefix=f".{signature.name}.stage-")
         _write_stage(manifest_stage, raw, name="approval manifest stage")
-        if signature_bytes is not None:
-            _write_stage(signature_stage, signature_bytes, name="approval signature stage")
-        else:
-            if key_fd is None:
-                raise ValueError("approval signing requires a real signing key FD")
-            _sign(manifest_stage, signature_stage, key_fd)
         os.replace(manifest_stage, manifest)
-        _fsync_directory(manifest_parent)
-        os.replace(signature_stage, signature)
         _fsync_file(manifest, name="approval manifest")
-        _fsync_file(signature, name="approval signature")
-        _fsync_directory(signature_parent)
-        if signature_parent != manifest_parent:
-            _fsync_directory(manifest_parent)
+        _fsync_directory(manifest_parent)
     except Exception:
-        for path in (manifest, signature, manifest_stage, signature_stage):
+        for path in (manifest, manifest_stage):
             if path is not None:
                 _remove_private_path(path)
-        for parent in {manifest_parent, signature_parent}:
-            try:
-                _fsync_directory(parent)
-            except ValueError:
-                pass
+        try:
+            _fsync_directory(manifest_parent)
+        except ValueError:
+            pass
         raise
 
 
-def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path]:
     _git_repository_root()
     expected = {
         "canonical approval": Path("release/approval-canonical.json"),
         "approval manifest": Path("release/approval.json"),
-        "approval signature": Path("release/approval.sig"),
     }
     values = {
         "canonical approval": args.canonical_approval_bytes,
         "approval manifest": args.approval_manifest,
-        "approval signature": args.approval_signature,
     }
     for name, value in values.items():
         if value is None or Path(value) != expected[name] or Path(value).is_absolute():
@@ -401,38 +351,35 @@ def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path, P
     return tuple(absolute(values[name], name=name) for name in expected)  # type: ignore[return-value]
 
 
-def sign_approval(args: argparse.Namespace, *, test_seam: bool) -> int:
-    required = (args.canonical_approval_bytes, args.approval_manifest, args.approval_signature, args.approval_key_fd)
+def create_approval(args: argparse.Namespace, *, test_seam: bool) -> int:
+    required = (args.canonical_approval_bytes, args.approval_manifest)
     if any(value is None for value in required):
-        raise ValueError("signing mode requires canonical bytes, manifest output, signature output, and --approval-key-fd")
+        raise ValueError("approval mode requires canonical bytes and manifest output")
     if test_seam:
         if args.release_sha_from_git:
             raise ValueError("test-seam mode rejects --release-sha-from-git")
         source = absolute(args.canonical_approval_bytes, name="canonical approval")
         manifest = absolute(args.approval_manifest, name="approval manifest")
-        signature = absolute(args.approval_signature, name="approval signature")
     else:
         if not args.release_sha_from_git:
             raise ValueError("production mode requires --release-sha-from-git")
         if "RELEASE_SHA" in os.environ:
             raise ValueError("ambient RELEASE_SHA is not accepted in production approval mode")
-        source, manifest, signature = _validate_production_layout(args)
+        source, manifest = _validate_production_layout(args)
     value, raw = _read_canonical(source)
-    expected_mode = "test-seam" if test_seam else "production"
-    _validate_approval(value, signing_mode=expected_mode)
+    _validate_approval(value)
     if not test_seam and value["release_sha"] != release_sha_from_git():
         raise ValueError("canonical approval release SHA does not match exact git HEAD")
-    _publish(manifest, signature, raw, key_fd=args.approval_key_fd)
+    _publish(manifest, raw)
     return 0
 
 
 def fixture_approval(args: argparse.Namespace) -> int:
-    if args.canonical_approval_bytes is None or args.approval_manifest is None or args.approval_signature is None:
-        raise ValueError("fixture mode requires canonical bytes, approval manifest, and approval signature")
+    if args.canonical_approval_bytes is None or args.approval_manifest is None:
+        raise ValueError("fixture mode requires canonical bytes and approval manifest")
     raw = _capture_bytes(args.canonical_approval_bytes, name="canonical approval")
     manifest = absolute(args.approval_manifest, name="approval manifest")
-    signature = absolute(args.approval_signature, name="approval signature")
-    _publish(manifest, signature, raw, signature_bytes=b"fixture-approval-signature\n")
+    _publish(manifest, raw)
     return 0
 
 
@@ -444,8 +391,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixture", action="store_true")
     parser.add_argument("--canonical-approval-bytes", type=Path)
     parser.add_argument("--approval-manifest", type=Path)
-    parser.add_argument("--approval-signature", type=Path)
-    parser.add_argument("--approval-key-fd", "--key-fd", type=int)
     parser.add_argument("--release-sha-from-git", action="store_true")
     return parser
 
@@ -460,10 +405,10 @@ def main(argv: list[str] | None = None) -> int:
         if sum((production, test_seam, fixture)) != 1:
             raise ValueError("select exactly one of --production, --test-seam, or --fixture")
         if fixture:
-            if args.approval_key_fd is not None or args.release_sha_from_git:
-                raise ValueError("fixture mode rejects signing options")
+            if args.release_sha_from_git:
+                raise ValueError("fixture mode rejects --release-sha-from-git")
             return fixture_approval(args)
-        return sign_approval(args, test_seam=test_seam)
+        return create_approval(args, test_seam=test_seam)
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         parser.error(str(exc))
     return 2

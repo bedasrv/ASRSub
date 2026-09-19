@@ -7,7 +7,7 @@ fn main() {
         std::process::exit(2);
     }
     let target = match args[3].as_str() {
-        "/run/secrets/discord_webhook" | "/run/secrets/control_api_key" => args[3].clone(),
+        "/run/secrets/discord_webhook" => args[3].clone(),
         _ => std::process::exit(2),
     };
     let mut input = Vec::new();

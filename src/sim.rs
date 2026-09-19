@@ -344,7 +344,6 @@ exit 0
         cps_merge_max_dur_ms: 7000,
         cps_merge_max_gap_ms: 1000,
         webhook_port: 18085,
-        control_api_key_file: file("control.key"),
         ladder_min_cues: 40,
         ladder_min_chars: 1500,
         ladder_min_cjk: 0.6,

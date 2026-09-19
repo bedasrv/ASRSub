@@ -1,10 +1,10 @@
 #!/usr/bin/python3
-"""Build and sign a closed ASRSub runtime bundle.
+"""Build a closed ASRSub runtime bundle with explicit unsigned integrity data.
 
 Fixture mode only emits the disposable approved-image projection.  Production
-and test-seam bundle modes require explicit existing release inputs and a real
-private-key file descriptor; signatures are produced by fixed /usr/bin/openssl.
-"""
+and test-seam bundle modes require explicit existing release inputs.  The
+manifest records the release identity, Compose hash, and every member hash;
+publication emits only the manifest and validated bundle members."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 
-OPENSSL = Path("/usr/bin/openssl")
 GIT = Path("/usr/bin/git")
 RELEASE_RE = set("0123456789abcdef")
 RUNTIME_MEMBERS = frozenset(
@@ -140,17 +139,17 @@ def _git_repository_root(cwd: Path | None = None) -> Path:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("production signer must run from the repository root") from exc
+        raise ValueError("production bundle builder must run from the repository root") from exc
     raw = completed.stdout
     if completed.returncode != 0 or raw.count("\n") != 1 or not raw.endswith("\n"):
-        raise ValueError("production signer must run from the repository root")
+        raise ValueError("production bundle builder must run from the repository root")
     try:
         repository = Path(raw[:-1]).resolve(strict=True)
         current = workdir.resolve(strict=True)
     except OSError as exc:
-        raise ValueError("production signer must run from the repository root") from exc
+        raise ValueError("production bundle builder must run from the repository root") from exc
     if current != repository:
-        raise ValueError("production signer must run from the repository root")
+        raise ValueError("production bundle builder must run from the repository root")
     return repository
 
 
@@ -300,14 +299,12 @@ def _manifest(runtime_source: Path, systemd_source: Path, release: str) -> tuple
             name="systemd release input",
         ),
     }
-    return _manifest_from_captured(captured, release, signing_mode="production")
+    return _manifest_from_captured(captured, release)
 
 
 def _manifest_from_captured(
     captured: dict[str, dict[str, bytes]],
     release: str,
-    *,
-    signing_mode: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     members: list[dict[str, Any]] = []
     for relative in sorted(RUNTIME_MEMBERS):
@@ -329,44 +326,12 @@ def _manifest_from_captured(
         })
     value = {
         "schema": "runtime-bundle-manifest-v1",
-        "signing_mode": signing_mode,
+        "integrity_mode": "unsigned",
         "release_sha": release,
         "members": members,
         "compose_sha256": hashlib.sha256(captured["runtime"]["compose.yaml"]).hexdigest(),
     }
     return value, members
-
-
-def _sign_detached(data: Path, signature: Path, key_fd: int) -> None:
-    if not isinstance(key_fd, int) or key_fd < 0:
-        raise ValueError("a real signing key FD is required")
-    try:
-        st = os.fstat(key_fd)
-    except OSError as exc:
-        raise ValueError("signing key FD is not open") from exc
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError("signing key FD must refer to a regular file")
-    signature.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        completed = subprocess.run(
-            [os.fspath(OPENSSL), "dgst", "-sha256", "-sign", f"/proc/self/fd/{key_fd}", "-out", os.fspath(signature), os.fspath(data)],
-            capture_output=True,
-            check=False,
-            shell=False,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
-            pass_fds=(key_fd,),
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ValueError("fixed OpenSSL signing failed") from exc
-    if completed.returncode != 0:
-        try:
-            signature.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ValueError("fixed OpenSSL signing rejected the supplied key")
-    os.chmod(signature, 0o600)
-    _fsync_file(signature, name="bundle signature stage")
 
 
 def _fsync_file(path: Path, *, name: str) -> None:
@@ -418,7 +383,7 @@ def _new_private_stage_file(parent: Path, *, prefix: str) -> Path:
         os.fchmod(fd, 0o600)
         os.close(fd)
     except OSError as exc:
-        raise ValueError("cannot create private signer stage") from exc
+        raise ValueError("cannot create private bundle stage") from exc
     return Path(raw)
 
 
@@ -450,21 +415,19 @@ def _remove_private_path(path: Path) -> None:
         pass
 
 
-def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path, Path, Path, Path]:
+def _validate_production_layout(args: argparse.Namespace) -> tuple[Path, Path, Path, Path]:
     _git_repository_root()
     expected = {
         "runtime source root": Path("release/runtime"),
         "systemd source root": Path("release/systemd"),
         "bundle output root": Path("release/asrsub-runtime-bundle"),
         "manifest output": Path("release/bundle-manifest.json"),
-        "signature output": Path("release/bundle-manifest.sig"),
     }
     values = {
         "runtime source root": args.runtime_source_root,
         "systemd source root": args.systemd_source_root,
         "bundle output root": args.output_root,
         "manifest output": args.manifest_output or expected["manifest output"],
-        "signature output": args.signature_output or expected["signature output"],
     }
     for name, value in values.items():
         if value is None or Path(value) != expected[name] or Path(value).is_absolute():
@@ -490,24 +453,20 @@ def package_bundle(args: argparse.Namespace, *, test_seam: bool) -> int:
         raise ValueError("bundle mode requires --runtime-source-root, --systemd-source-root, and --output-root")
     if (args.release_sha is None) == (not args.release_sha_from_git):
         raise ValueError("bundle mode requires exactly one of --release-sha or --release-sha-from-git")
-    if args.key_fd is None:
-        raise ValueError("bundle mode requires a real signing key through --key-fd")
     if test_seam:
         runtime_source = absolute(args.runtime_source_root, name="runtime source root")
         systemd_source = absolute(args.systemd_source_root, name="systemd source root")
         output_root = absolute(args.output_root, name="bundle output root")
         manifest_output = absolute(args.manifest_output or output_root.parent / "bundle-manifest.json", name="manifest output")
-        signature_output = absolute(args.signature_output or output_root.parent / "bundle-manifest.sig", name="signature output")
     else:
         if args.release_sha_from_git and "RELEASE_SHA" in os.environ:
             raise ValueError("ambient RELEASE_SHA is not accepted in production bundle mode")
-        runtime_source, systemd_source, output_root, manifest_output, signature_output = _validate_production_layout(args)
+        runtime_source, systemd_source, output_root, manifest_output = _validate_production_layout(args)
     if not runtime_source.is_dir() or not systemd_source.is_dir():
         raise ValueError("required release input directory is absent")
     _ensure_empty_publication_path(output_root, name="bundle output root")
     _ensure_empty_publication_path(manifest_output, name="manifest output")
-    _ensure_empty_publication_path(signature_output, name="signature output")
-    if len({output_root, manifest_output, signature_output}) != 3:
+    if output_root == manifest_output:
         raise ValueError("bundle publication paths must be distinct")
     release = release_sha_from_git() if args.release_sha_from_git else release_sha(args.release_sha)
     captured = {
@@ -519,42 +478,35 @@ def package_bundle(args: argparse.Namespace, *, test_seam: bool) -> int:
             name="systemd release input",
         ),
     }
-    manifest, members = _manifest_from_captured(captured, release, signing_mode="test-seam" if test_seam else "production")
+    manifest, members = _manifest_from_captured(captured, release)
     parent = output_root.parent
     manifest_parent = manifest_output.parent
-    signature_parent = signature_output.parent
-    for publication_parent in {parent, manifest_parent, signature_parent}:
+    for publication_parent in {parent, manifest_parent}:
         publication_parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         parent_fd = _open_directory(publication_parent, name="bundle publication parent")
         os.close(parent_fd)
     stage: Path | None = None
     manifest_stage: Path | None = None
-    signature_stage: Path | None = None
     try:
         stage = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.stage-", dir=parent))
         os.chmod(stage, 0o700)
         manifest_stage = _new_private_stage_file(manifest_parent, prefix=f".{manifest_output.name}.stage-")
-        signature_stage = _new_private_stage_file(signature_parent, prefix=f".{signature_output.name}.stage-")
         _copy_tree(captured, stage, members)
         _write_private_file(manifest_stage, canonical(manifest) + b"\n", mode=0o600, name="bundle manifest stage", create=False)
-        _sign_detached(manifest_stage, signature_stage, args.key_fd)
         _fsync_directory(stage)
         os.replace(stage, output_root)
         _fsync_directory(parent)
         os.replace(manifest_stage, manifest_output)
-        _fsync_directory(manifest_parent)
-        os.replace(signature_stage, signature_output)
         _fsync_file(manifest_output, name="bundle manifest")
-        _fsync_file(signature_output, name="bundle signature")
-        _fsync_directory(signature_parent)
-        for publication_parent in {parent, manifest_parent, signature_parent}:
+        _fsync_directory(manifest_parent)
+        for publication_parent in {parent, manifest_parent}:
             _fsync_directory(publication_parent)
     except Exception:
-        for path in (output_root, manifest_output, signature_output, stage, manifest_stage, signature_stage):
+        for path in (output_root, manifest_output, stage, manifest_stage):
             if path is not None:
                 _remove_private_path(path)
         try:
-            for publication_parent in {parent, manifest_parent, signature_parent}:
+            for publication_parent in {parent, manifest_parent}:
                 _fsync_directory(publication_parent)
         except ValueError:
             pass
@@ -603,8 +555,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--systemd-source-root", type=Path)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--manifest-output", type=Path)
-    parser.add_argument("--signature-output", type=Path)
-    parser.add_argument("--key-fd", type=int)
     return parser
 
 
