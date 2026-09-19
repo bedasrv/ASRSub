@@ -10,7 +10,7 @@ use super::discord_types::{
 const MAX_ROW_SCALARS: usize = 160;
 const MAX_FIELD_NAME_SCALARS: usize = 32;
 const MAX_FIELD_VALUE_SCALARS: usize = 900;
-const MAX_DESCRIPTION_SCALARS: usize = 800;
+const MAX_TITLE_SCALARS: usize = 800;
 const MAX_EMBED_TEXT_SCALARS: usize = 4_000;
 const MAX_ROWS: usize = 8;
 const MAX_TARGET_ENTRIES: usize = 6;
@@ -362,14 +362,10 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
     if scalar_len(&needs) > MAX_FIELD_VALUE_SCALARS || scalar_len(&done) > MAX_FIELD_VALUE_SCALARS {
         return Err(RenderError::TooLarge);
     }
-    let description = "ASRSub daemon pass digest";
-    if scalar_len(&title) > MAX_DESCRIPTION_SCALARS
-        || scalar_len(description) > MAX_DESCRIPTION_SCALARS
-    {
+    if scalar_len(&title) > MAX_TITLE_SCALARS {
         return Err(RenderError::TooLarge);
     }
     let total = scalar_len(&title)
-        + scalar_len(description)
         + scalar_len("Needs attention")
         + scalar_len("Completed")
         + scalar_len(&needs)
@@ -381,8 +377,6 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"{\"embeds\":[{\"title\":");
     bytes.extend_from_slice(&encode_string(&title));
-    bytes.extend_from_slice(b",\"description\":");
-    bytes.extend_from_slice(&encode_string(description));
     bytes.extend_from_slice(b",\"color\":");
     bytes.extend_from_slice(color.to_string().as_bytes());
     bytes.extend_from_slice(b",\"fields\":[{\"name\":\"Needs attention\",\"value\":");
@@ -439,10 +433,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
         assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(value.get("content").is_none());
-        assert_eq!(
-            value["embeds"][0]["description"],
-            "ASRSub daemon pass digest"
-        );
+        assert!(value["embeds"][0].get("description").is_none());
     }
 
     #[test]
