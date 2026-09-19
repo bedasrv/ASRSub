@@ -110,6 +110,10 @@ fn truncate_title(title: &str, capacity: usize) -> String {
     out
 }
 
+fn formatted_row(kind: &str, title: &str, meta: &str, entries: &[String]) -> String {
+    format!("- **{kind} {title} {meta}** — `{}`", entries.join(", "))
+}
+
 fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>), RenderError> {
     let targets = report.targets().as_slice();
     let mut indexed: Vec<_> = targets
@@ -166,10 +170,8 @@ fn make_row(report: &EpisodeRunReport) -> Result<Row, RenderError> {
     if entries.is_empty() {
         return Err(RenderError::CannotFit);
     }
-    let prefix = format!("{kind} {meta} - {}", entries.join(", "));
-    let fixed = scalar_len(&prefix) + 1 + scalar_len(title);
-    if fixed <= MAX_ROW_SCALARS {
-        let text = format!("{kind} {title} {meta} - {}", entries.join(", "));
+    let text = formatted_row(kind, title, &meta, &entries);
+    if scalar_len(&text) <= MAX_ROW_SCALARS {
         return Ok(Row {
             text,
             severity: if report.item_failure().is_some() {
@@ -191,12 +193,13 @@ fn make_row(report: &EpisodeRunReport) -> Result<Row, RenderError> {
                     .any(|t| status_token(t.status()).1 < 2),
         });
     }
-    let title_budget = MAX_ROW_SCALARS.saturating_sub(scalar_len(&prefix) + 1);
+    let fixed = formatted_row(kind, "", &meta, &entries);
+    let title_budget = MAX_ROW_SCALARS.saturating_sub(scalar_len(&fixed) + 1);
     if title_budget == 0 {
         return Err(RenderError::CannotFit);
     }
     let title = truncate_title(title, title_budget.min(120));
-    let text = format!("{kind} {title} {meta} - {}", entries.join(", "));
+    let text = formatted_row(kind, &title, &meta, &entries);
     if scalar_len(&text) > MAX_ROW_SCALARS {
         return Err(RenderError::CannotFit);
     }
@@ -228,37 +231,37 @@ fn summary_rows(summary: &OverflowSummaryV1) -> (Vec<String>, Vec<String>) {
     let mut completed = Vec::new();
     if summary.attention_reports() > 0 {
         attention.push(format!(
-            "attention: at least {} additional attention reports",
+            "- **Attention:** at least {} additional attention reports",
             summary.attention_reports()
         ));
     }
     if summary.warning_reports() > 0 {
         attention.push(format!(
-            "warning: at least {} additional warning reports",
+            "- **Warning:** at least {} additional warning reports",
             summary.warning_reports()
         ));
     }
     if summary.blocked_admissions() > 0 {
         attention.push(format!(
-            "blocked: at least {} committed reports awaiting capacity",
+            "- **Blocked:** at least {} committed reports awaiting capacity",
             summary.blocked_admissions()
         ));
     }
     if summary.target_outcomes() > 0 {
         attention.push(format!(
-            "targets: at least {} additional target outcomes",
+            "- **Targets:** at least {} additional target outcomes",
             summary.target_outcomes()
         ));
     }
     if summary.pre_admission_drops() > 0 {
         attention.push(format!(
-            "state-capacity: at least {} reports rejected by state capacity",
+            "- **State capacity:** at least {} reports rejected by state capacity",
             summary.pre_admission_drops()
         ));
     }
     if summary.completed_reports() > 0 {
         completed.push(format!(
-            "completed: at least {} additional completed reports",
+            "- **Completed:** at least {} additional completed reports",
             summary.completed_reports()
         ));
     }
@@ -289,36 +292,25 @@ fn result_lines(
     omitted_attention: usize,
     omitted_completed: usize,
 ) -> Vec<String> {
-    let mut attention = attention.to_vec();
-    let mut attention_rows = attention_rows.to_vec();
-    let mut completed = completed.to_vec();
-    let mut completed_rows = completed_rows.to_vec();
+    let mut results = Vec::with_capacity(
+        attention.len()
+            + attention_rows.len()
+            + completed.len()
+            + completed_rows.len()
+            + usize::from(omitted_attention > 0)
+            + usize::from(omitted_completed > 0),
+    );
+    results.extend(attention.iter().cloned());
+    results.extend(attention_rows.iter().cloned());
     if omitted_attention > 0 {
-        let marker = format!("+{omitted_attention} more attention episodes");
-        if let Some(last) = attention_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = attention.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
+        results.push(format!("- _+{omitted_attention} more attention episodes_"));
     }
+    results.extend(completed.iter().cloned());
+    results.extend(completed_rows.iter().cloned());
     if omitted_completed > 0 {
-        let marker = format!("+{omitted_completed} more completed episodes");
-        if let Some(last) = completed_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = completed.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
+        results.push(format!("- _+{omitted_completed} more completed episodes_"));
     }
-    attention
-        .into_iter()
-        .chain(attention_rows)
-        .chain(completed)
-        .chain(completed_rows)
-        .collect()
+    results
 }
 
 pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
@@ -346,7 +338,15 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         return Err(RenderError::CannotFit);
     }
     let slots = MAX_ROWS - mandatory;
-    while attention_rows.len() + completed_rows.len() > slots {
+    let total_attention = episode_rows.iter().filter(|r| r.attention).count();
+    let total_completed = episode_rows.iter().filter(|r| !r.attention).count();
+    let (omitted_attention, omitted_completed) = loop {
+        let omitted_attention = total_attention.saturating_sub(attention_rows.len());
+        let omitted_completed = total_completed.saturating_sub(completed_rows.len());
+        let marker_rows = usize::from(omitted_attention > 0) + usize::from(omitted_completed > 0);
+        if attention_rows.len() + completed_rows.len() + marker_rows <= slots {
+            break (omitted_attention, omitted_completed);
+        }
         if !completed_rows.is_empty() {
             completed_rows.pop();
         } else if !attention_rows.is_empty() {
@@ -354,17 +354,7 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         } else {
             return Err(RenderError::CannotFit);
         }
-    }
-    let omitted_attention = episode_rows
-        .iter()
-        .filter(|r| r.attention)
-        .count()
-        .saturating_sub(attention_rows.len());
-    let omitted_completed = episode_rows
-        .iter()
-        .filter(|r| !r.attention)
-        .count()
-        .saturating_sub(completed_rows.len());
+    };
     let mut results = result_lines(
         &attention,
         &attention_rows,
@@ -384,6 +374,8 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         } else {
             return Err(RenderError::TooLarge);
         }
+        let omitted_attention = total_attention.saturating_sub(attention_rows.len());
+        let omitted_completed = total_completed.saturating_sub(completed_rows.len());
         results = result_lines(
             &attention,
             &attention_rows,
@@ -468,11 +460,24 @@ mod tests {
         assert!(value["embeds"][0].get("title").is_none());
         assert_eq!(
             value["embeds"][0]["description"],
-            "series Show S01E02 - id:ok"
+            "- **series Show S01E02** — `id:ok`"
         );
         assert!(value["embeds"][0].get("fields").is_none());
         assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(value.get("content").is_none());
+    }
+
+    #[test]
+    fn renders_formatted_overflow_summary() {
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports(std::iter::empty()).unwrap();
+        let summary = OverflowSummaryV1::new(2, 0, 4, 0, 3, 0);
+        let payload = render(&DeliveryView::new(1, reports, summary)).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "- **Attention:** at least 2 additional attention reports\n- **State capacity:** at least 3 reports rejected by state capacity\n- **Completed:** at least 4 additional completed reports"
+        );
     }
 
     #[test]
@@ -536,7 +541,15 @@ mod tests {
         let (reports, _) =
             super::super::discord_types::BoundedReports::from_reports(reports).unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
-        assert!(String::from_utf8_lossy(payload.as_bytes()).contains("more completed episodes"));
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(description
+            .lines()
+            .any(|line| line == "- _+3 more completed episodes_"));
+        assert!(description
+            .lines()
+            .all(|line| line.chars().count() <= MAX_ROW_SCALARS));
+        assert!(description.lines().count() <= MAX_ROWS);
     }
 
     #[test]
@@ -577,6 +590,23 @@ mod tests {
     }
 
     #[test]
+    fn markdown_row_truncation_includes_formatting_overhead() {
+        let title = "A#".repeat(256);
+        let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
+            TargetStatus::Completed { warning: None },
+            &title,
+        )])
+        .unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let line = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(line.chars().count() <= MAX_ROW_SCALARS);
+        assert!(line.starts_with("- **series "));
+        assert!(line.contains("** — `"));
+        assert!(line.ends_with('`'));
+    }
+
+    #[test]
     fn renders_per_target_generation_method_and_actual_models() {
         let method = GenerationMethod::new(
             GenerationSource::Whisper,
@@ -606,7 +636,10 @@ mod tests {
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
         let results = value["embeds"][0]["description"].as_str().unwrap();
-        assert!(results.contains("id:ok · Whisper: provider/whisper-1 → LLM: openai/gpt-4o-mini"));
+        assert_eq!(
+            results,
+            "- **movie movie movie** — `id:ok · Whisper: provider/whisper-1 → LLM: openai/gpt-4o-mini`"
+        );
         assert!(results.chars().count() <= MAX_ROW_SCALARS);
     }
 
