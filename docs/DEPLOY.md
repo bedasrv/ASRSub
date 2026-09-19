@@ -103,8 +103,10 @@ summary is intentionally not a copy of Docker stderr.
 
 ## 3. CI release descriptor and immutable image
 
-`.github/workflows/release.yml` is the image publishing path. The
-`docker/build-push-action` step is named `build`; its `digest` output is the
+`.github/workflows/release.yml` publishes the full-SHA tag on every release and
+advances `ghcr.io/bedasrv/asrsub:latest` only when the workflow ref is `main`.
+`latest` is a convenience alias, not the production deployment identity.
+The `docker/build-push-action` step is named `build`; its `digest` output is the
 registry digest emitted for the pushed image. The workflow writes a non-secret
 artifact named `release.json` containing:
 
