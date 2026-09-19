@@ -44,11 +44,16 @@ DEFAULT_SERVICE = "orchestrator"
 DEFAULT_PROJECT_NAME = "asrsub"
 DEFAULT_WEBHOOK_PORT = "8085"
 DEFAULT_NAS_MEDIA_PREFIX = "/mnt/nas/share/media"
-DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
-DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
-DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
-DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
-DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
+LEGACY_CONFIG_SOURCE = "/var/lib/asrsub/config"
+LEGACY_CACHE_SOURCE = "/var/lib/asrsub/cache"
+LEGACY_STATE_SOURCE = "/var/lib/asrsub/state"
+LEGACY_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
+LEGACY_PROVIDER_KEYS_FILE = LEGACY_CONFIG_SOURCE + "/provider_keys.env"
+PROJECT_CONFIG_SOURCE = "config"
+PROJECT_CACHE_SOURCE = "cache"
+PROJECT_STATE_SOURCE = "state"
+PROJECT_SECRETS_SOURCE = "secrets"
+PROJECT_PROVIDER_KEYS_FILE = "secrets/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
 STATE_CONTAINER_PATH = "/var/lib/asrsub/state"
@@ -72,9 +77,7 @@ RESERVED_MEDIA_PREFIXES = (
 )
 DEFAULT_LISTENER_PROCESS = "asrsub"
 DEFAULT_TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "compose.simple.yaml"
-MANAGED_ENV_KEYS = frozenset(
-    {"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"}
-)
+MANAGED_ENV_KEYS = frozenset({"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX"})
 SENSITIVE_ENV_KEY = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|ACCESS_TOKEN|API_KEY|AUTHORIZATION|BEARER|CERT|CERTIFICATE|COOKIE|CREDENTIALS?|ENCRYPTION_KEY|KEY|PASSWORD|PASSWD|PRIVATE_KEY|SECRET|TOKEN|WEBHOOK)(?:_|$)",
     re.IGNORECASE,
@@ -357,7 +360,7 @@ def _validate_non_secret_env(text: str) -> None:
         _validate_non_secret_value(value, key=key)
         if key in MANAGED_ENV_KEYS:
             continue
-        if SENSITIVE_ENV_KEY.search(key):
+        if key == "PROVIDER_KEYS_FILE" or SENSITIVE_ENV_KEY.search(key):
             raise ValueError(f"secret-bearing env key is not accepted: {key}")
 
 
@@ -367,15 +370,11 @@ def build_candidate_env(
     image: str,
     webhook_port: str,
     nas_media_prefix: str,
-    provider_keys_file: str = DEFAULT_PROVIDER_KEYS_FILE,
 ) -> str:
     """Build only non-secret interpolation values; secret files are never read."""
     validate_image_reference(image)
     webhook_port = _validate_port(webhook_port)
     nas_media_prefix = validate_nas_media_prefix(nas_media_prefix)
-    provider_keys_file = _safe_text(provider_keys_file, name="PROVIDER_KEYS_FILE")
-    if provider_keys_file != DEFAULT_PROVIDER_KEYS_FILE:
-        raise ValueError("PROVIDER_KEYS_FILE must use the managed legacy path")
     lines: list[str] = []
     if source is not None:
         source = Path(source)
@@ -392,7 +391,6 @@ def build_candidate_env(
             f"ASRSUB_IMAGE={image}",
             f"WEBHOOK_PORT={webhook_port}",
             f"NAS_MEDIA_PREFIX={nas_media_prefix}",
-            f"PROVIDER_KEYS_FILE={provider_keys_file}",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -405,12 +403,15 @@ def validate_template_text(text: str) -> None:
         "restart: unless-stopped",
         "WEBHOOK_PORT",
         "NAS_MEDIA_PREFIX",
+        "path: ./secrets/provider_keys.env",
         "required: false",
-        DEFAULT_CONFIG_SOURCE,
-        DEFAULT_CACHE_SOURCE,
-        DEFAULT_STATE_SOURCE,
-        DEFAULT_RUNTIME_SECRETS_SOURCE,
-        DEFAULT_PROVIDER_KEYS_FILE,
+        "source: ./config",
+        "source: ./cache",
+        "source: ./state",
+        "source: ./secrets",
+        CONFIG_CONTAINER_PATH,
+        CACHE_CONTAINER_PATH,
+        STATE_CONTAINER_PATH,
         SECRETS_CONTAINER_PATH + "/discord_webhook",
     )
     if any(value not in text for value in required):
@@ -422,6 +423,8 @@ def validate_template_text(text: str) -> None:
         "egress-policy",
         "/usr/local/libexec",
         "systemd",
+        "source: /var/lib/asrsub/",
+        "PROVIDER_KEYS_FILE",
         "source: /home/user/.config/asr-pipeline",
         "source: /home/user/.cache/asr-pipeline",
         "source: /home/user/.config/asr-pipeline/secrets",
@@ -764,11 +767,16 @@ MAX_TIMEOUT = 3600.0
 READINESS_TIMEOUT = 60.0
 FORBIDDEN = frozenset({"down", "prune", "rm", "restart", "systemctl", "daemon-reload"})
 EXPECTED_LISTENER_PROCESS = "asrsub"
-DEFAULT_CONFIG_SOURCE = "/var/lib/asrsub/config"
-DEFAULT_CACHE_SOURCE = "/var/lib/asrsub/cache"
-DEFAULT_STATE_SOURCE = "/var/lib/asrsub/state"
-DEFAULT_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
-DEFAULT_PROVIDER_KEYS_FILE = DEFAULT_CONFIG_SOURCE + "/provider_keys.env"
+LEGACY_CONFIG_SOURCE = "/var/lib/asrsub/config"
+LEGACY_CACHE_SOURCE = "/var/lib/asrsub/cache"
+LEGACY_STATE_SOURCE = "/var/lib/asrsub/state"
+LEGACY_RUNTIME_SECRETS_SOURCE = "/var/lib/asrsub/runtime-secrets"
+LEGACY_PROVIDER_KEYS_FILE = LEGACY_CONFIG_SOURCE + "/provider_keys.env"
+PROJECT_CONFIG_SOURCE = "config"
+PROJECT_CACHE_SOURCE = "cache"
+PROJECT_STATE_SOURCE = "state"
+PROJECT_SECRETS_SOURCE = "secrets"
+PROJECT_PROVIDER_KEYS_FILE = "secrets/provider_keys.env"
 CONFIG_CONTAINER_PATH = "/home/user/.config/asr-pipeline"
 CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
 STATE_CONTAINER_PATH = "/var/lib/asrsub/state"
@@ -783,7 +791,7 @@ RESERVED_MEDIA_PREFIXES = (
     MEDIA_CONTAINER_PATH,
     SECRETS_CONTAINER_PATH,
 )
-MANAGED_ENV_KEYS = frozenset({"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"})
+MANAGED_ENV_KEYS = frozenset({"ASRSUB_IMAGE", "WEBHOOK_PORT", "NAS_MEDIA_PREFIX"})
 SENSITIVE_ENV_KEY = re.compile(
     r"(?:^|_)(?:ACCESS_KEY|ACCESS_TOKEN|API_KEY|AUTHORIZATION|BEARER|CERT|CERTIFICATE|COOKIE|CREDENTIALS?|ENCRYPTION_KEY|KEY|PASSWORD|PASSWD|PRIVATE_KEY|SECRET|TOKEN|WEBHOOK)(?:_|$)",
     re.IGNORECASE,
@@ -918,7 +926,7 @@ def validate_expected_hostname(payload):
 
 def project_paths(payload):
     project = Path(payload["project_directory"])
-    if not project.is_absolute():
+    if not project.is_absolute() or any(part in {".", ".."} for part in project.parts):
         raise RemoteFailure("project directory is not a real directory")
     _check_parent_components(project)
     project_info = metadata(project)
@@ -931,6 +939,44 @@ def project_paths(payload):
     compose = project / compose_name
     env = project / env_name
     return project, compose, env
+
+
+def project_relative_path(project, relative):
+    project = Path(project)
+    if not project.is_absolute() or any(part in {".", ".."} for part in project.parts):
+        raise RemoteFailure("project directory is not absolute")
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise RemoteFailure("project-relative path is invalid")
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or any(part in {"", ".", ".."} for part in relative_path.parts):
+        raise RemoteFailure("project-relative path escapes the project directory")
+    candidate = project.joinpath(*relative_path.parts)
+    try:
+        candidate.relative_to(project)
+    except ValueError as exc:
+        raise RemoteFailure("project-relative path escapes the project directory") from exc
+    _check_parent_components(candidate)
+    return candidate
+
+
+def project_data_paths(payload):
+    project = Path(payload.get("project_directory", ""))
+    if not project.is_absolute() or any(part in {".", ".."} for part in project.parts):
+        raise RemoteFailure("project directory is not a real directory")
+    _check_parent_components(project)
+    project_info = metadata(project)
+    if not project_info.get("present") or project_info.get("symlink") or not project_info.get("directory"):
+        raise RemoteFailure("project directory is not a real directory")
+    paths = {
+        "config": project_relative_path(project, PROJECT_CONFIG_SOURCE),
+        "cache": project_relative_path(project, PROJECT_CACHE_SOURCE),
+        "state": project_relative_path(project, PROJECT_STATE_SOURCE),
+        "secrets": project_relative_path(project, PROJECT_SECRETS_SOURCE),
+        "provider_keys.env": project_relative_path(project, PROJECT_PROVIDER_KEYS_FILE),
+    }
+    for name in ("config", "cache", "state", "secrets"):
+        require_path(paths[name], directory=True)
+    return paths
 
 
 def docker_argv(*args):
@@ -983,7 +1029,7 @@ def validate_non_secret_env(text):
         validate_non_secret_value(value, key)
         if key in MANAGED_ENV_KEYS:
             continue
-        if SENSITIVE_ENV_KEY.search(key):
+        if key == "PROVIDER_KEYS_FILE" or SENSITIVE_ENV_KEY.search(key):
             raise RemoteFailure("active env file contains a secret-bearing key")
 
 
@@ -1005,7 +1051,7 @@ def env_values(path):
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, value = line.split("=", 1)
-                if key in {"WEBHOOK_PORT", "NAS_MEDIA_PREFIX", "PROVIDER_KEYS_FILE"}:
+                if key in {"WEBHOOK_PORT", "NAS_MEDIA_PREFIX"}:
                     values[key] = value
     except (OSError, UnicodeError) as exc:
         raise RemoteFailure("non-secret env file cannot be read") from exc
@@ -1211,13 +1257,14 @@ def expected_mounts(payload):
     validate_nas_media_prefix(payload["nas_media_prefix"])
     prefix = payload["nas_media_prefix"]
     media = "/mnt/nas/share/media"
+    project = Path(payload.get("project_directory", "/opt/mediastack/asrsub"))
     return [
-        (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
-        (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
-        (DEFAULT_STATE_SOURCE, STATE_CONTAINER_PATH, True),
+        (str(project / PROJECT_CONFIG_SOURCE), CONFIG_CONTAINER_PATH, True),
+        (str(project / PROJECT_CACHE_SOURCE), CACHE_CONTAINER_PATH, True),
+        (str(project / PROJECT_STATE_SOURCE), STATE_CONTAINER_PATH, True),
         (media, prefix, True),
         (media, MEDIA_CONTAINER_PATH, False),
-        (DEFAULT_RUNTIME_SECRETS_SOURCE, SECRETS_CONTAINER_PATH, False),
+        (str(project / PROJECT_SECRETS_SOURCE), SECRETS_CONTAINER_PATH, False),
     ]
 
 
@@ -1272,15 +1319,15 @@ def legacy_mounts_match(identity, payload):
     actual = set(entries)
     media = "/mnt/nas/share/media"
     required = {
-        (DEFAULT_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
-        (DEFAULT_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
-        (DEFAULT_STATE_SOURCE, STATE_CONTAINER_PATH, True),
+        (LEGACY_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
+        (LEGACY_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
+        (LEGACY_STATE_SOURCE, STATE_CONTAINER_PATH, True),
         (media, payload["nas_media_prefix"], True),
         (media, MEDIA_CONTAINER_PATH, False),
     }
     optional = {
         (
-            DEFAULT_RUNTIME_SECRETS_SOURCE + "/discord_webhook",
+            LEGACY_RUNTIME_SECRETS_SOURCE + "/discord_webhook",
             SECRETS_CONTAINER_PATH + "/discord_webhook",
             False,
         ),
@@ -1307,23 +1354,19 @@ def collect(payload, *, strict):
     validate_expected_hostname(payload)
     validate_nas_media_prefix(payload["nas_media_prefix"])
     project, compose, env = project_paths(payload)
+    project_data = project_data_paths(payload)
     paths = {
         "project": require_path(project, directory=True, role="project"),
         "compose": require_path(compose, directory=False, role="project_file"),
         "env": require_path(env, directory=False, role="project_file"),
     }
+    for name in ("config", "cache", "state", "secrets"):
+        paths[name] = require_path(project_data[name], directory=True)
+    paths["media"] = require_path(Path("/mnt/nas/share/media"), directory=True)
     validate_env_file(env)
-    for name, path in (
-        ("config", Path(DEFAULT_CONFIG_SOURCE)),
-        ("cache", Path(DEFAULT_CACHE_SOURCE)),
-        ("state", Path(DEFAULT_STATE_SOURCE)),
-        ("media", Path("/mnt/nas/share/media")),
-        ("secrets", Path(DEFAULT_RUNTIME_SECRETS_SOURCE)),
-    ):
-        paths[name] = require_path(path, directory=True)
     secret_metadata = {
-        "discord_webhook": metadata(Path(DEFAULT_RUNTIME_SECRETS_SOURCE) / "discord_webhook"),
-        "provider_keys.env": metadata(Path(DEFAULT_PROVIDER_KEYS_FILE)),
+        "discord_webhook": metadata(project_data["secrets"] / "discord_webhook"),
+        "provider_keys.env": metadata(project_data["provider_keys.env"]),
     }
     if strict:
         if paths["secrets"]["mode"] & 0o077:
@@ -1342,8 +1385,6 @@ def collect(payload, *, strict):
         "/mnt/nas/share/media",
     )
     values = env_values(env)
-    if values.get("PROVIDER_KEYS_FILE", DEFAULT_PROVIDER_KEYS_FILE) != DEFAULT_PROVIDER_KEYS_FILE:
-        raise RemoteFailure("PROVIDER_KEYS_FILE does not match the managed legacy path")
     validate_nas_media_prefix(values.get("NAS_MEDIA_PREFIX", payload["nas_media_prefix"]))
     port = values.get("WEBHOOK_PORT", payload["webhook_port"])
     if not re.fullmatch(r"[1-9][0-9]{0,4}", port or "") or int(port) > 65535:
@@ -1360,6 +1401,27 @@ def collect(payload, *, strict):
     current_mounts = mounts_match(identity, payload)
     known_legacy_mounts = legacy_mounts_match(identity, payload)
     previous_repo_digest = immutable_repo_digest(identity)
+    if strict and known_legacy_mounts:
+        for name, path in (
+            ("legacy_config", Path(LEGACY_CONFIG_SOURCE)),
+            ("legacy_cache", Path(LEGACY_CACHE_SOURCE)),
+            ("legacy_state", Path(LEGACY_STATE_SOURCE)),
+            ("legacy_secrets", Path(LEGACY_RUNTIME_SECRETS_SOURCE)),
+        ):
+            paths[name] = require_path(path, directory=True)
+        legacy_secret_metadata = {
+            "discord_webhook": metadata(Path(LEGACY_RUNTIME_SECRETS_SOURCE) / "discord_webhook"),
+            "provider_keys.env": metadata(Path(LEGACY_PROVIDER_KEYS_FILE)),
+        }
+        if paths["legacy_secrets"]["mode"] & 0o077:
+            raise RemoteFailure("legacy secret directory permissions are too broad")
+        for optional in legacy_secret_metadata.values():
+            if optional.get("present") and (
+                not optional.get("regular")
+                or optional.get("symlink")
+                or optional.get("mode", 0) & 0o077
+            ):
+                raise RemoteFailure("legacy optional secret metadata is not safe")
     if strict and not owned:
         raise RemoteFailure("active container project/service ownership does not match")
     if strict and not port_owned:

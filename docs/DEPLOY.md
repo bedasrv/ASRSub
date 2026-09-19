@@ -25,29 +25,34 @@ The routine model is one Docker Compose service and one immutable image:
 
 The tracked candidate is `deploy/compose.simple.yaml`. It has one
 `orchestrator`, host networking, `restart: unless-stopped`, and no build
-directive. It deliberately preserves the target's existing data layout:
-`/var/lib/asrsub/config` is bound to the container config target
-`/home/user/.config/asr-pipeline`, `/var/lib/asrsub/cache` is bound to
-`/home/user/.cache/asr-pipeline`, and the production Discord StateFs at
-`/var/lib/asrsub/state` is bound read-write to the same container path. The
-production Discord StateFs remains mounted and is not migrated, copied, or
-relocated. The config mount continues to own the ordinary application ledgers
-(`state.jsonl`, `refine_state.jsonl`, `actions.jsonl`,
-`subtitle_registry.jsonl`, and related files); the separate StateFs mount owns
-Discord notification state. The runtime-secrets directory is bound read-only
-to `/run/secrets` so its optional webhook remains available at
-`/run/secrets/discord_webhook`. The provider key file is the optional
-`/var/lib/asrsub/config/provider_keys.env` Compose `env_file`. The template
-contains no secret values and no top-level Compose `secrets:` file. User access
-control is external via Pomerium/Pocket ID over HTTPS; the daemon does not
-implement user authentication.
+directive. All ASRSub-owned host data is under the project directory:
 
-The no-migration contract is exact: preflight accepts the candidate mount set
-or the known hardened legacy mount set only. It rejects an unsafe or unknown
-config, cache, state, media, or secret source before any candidate file is
-written. The first simple deployment therefore changes the Compose wiring, not
-the location or contents of the existing ledgers, Discord StateFs, cache, or
-secrets.
+| Project-relative source | Container target | Mode | Purpose |
+| --- | --- | --- | --- |
+| `./config` | `/home/user/.config/asr-pipeline` | read-write | application config and ledgers |
+| `./cache` | `/home/user/.cache/asr-pipeline` | read-write | cache |
+| `./state` | `/var/lib/asrsub/state` | read-write | current image's required notification StateFs |
+| `./secrets` | `/run/secrets` | read-only | optional runtime secrets |
+
+The separate StateFs mount is required by the selected Rust image's fixed
+`/var/lib/asrsub/state` production backend. Its host source is still the
+project-relative `./state`; no `/var/lib/asrsub` host data directory is used by
+the simple Compose candidate. The config mount owns the ordinary application
+ledgers (`state.jsonl`, `refine_state.jsonl`, `actions.jsonl`,
+`subtitle_registry.jsonl`, and related files). The parent secrets bind exposes
+the optional webhook at `/run/secrets/discord_webhook`. The provider key file is
+the optional project-relative Compose `env_file` `./secrets/provider_keys.env`.
+The template contains no secret values and no top-level Compose `secrets:` file.
+User access control is external via Pomerium/Pocket ID over HTTPS; the daemon
+does not implement user authentication.
+
+The preflight resolves every project-relative source lexically beneath the
+project directory, rejects traversal and symlinked parents/targets, and checks
+the required data directories before any candidate file is written. It accepts
+the candidate mount set or the known hardened legacy mount set for a staged
+transition, but never writes or migrates legacy data. NAS media mounts remain
+the existing `/mnt/nas/share/media` source at both `/mnt/nas/share/media` and
+`/media` container targets.
 
 `ASRSUB_IMAGE` must be the exact lowercase digest reference. A tag, including a
 full-SHA lookup tag, is rejected by the tool. The tool never resolves a tag and
@@ -60,13 +65,11 @@ The operator machine needs Python 3 and an SSH client. The target needs:
 - the expected hostname and non-interactive SSH access;
 - Docker Engine, the Docker Compose plugin, `findmnt`, and `ss`;
 - the active project, Compose file, non-secret `.env`, and `orchestrator` service;
-- `/var/lib/asrsub/config` (which is mounted at the container config target and
-  owns the ordinary application ledgers), `/var/lib/asrsub/cache`, and
-  `/var/lib/asrsub/state` (the production Discord StateFs) as real directories;
+- project-relative `config`, `cache`, `state`, and `secrets` directories as
+  real, non-symlinked directories beneath `/opt/mediastack/asrsub`;
 - the mounted `/mnt/nas/share/media` directory;
-- `/var/lib/asrsub/runtime-secrets` as a real directory; if present, its
-  `discord_webhook` file remains optional;
-- the optional `/var/lib/asrsub/config/provider_keys.env` file;
+- the optional `secrets/provider_keys.env` file; if present, it is checked only
+  by metadata and loaded by Compose;
 - an existing healthy service for a deploy backup. A deployment without
   resolvable provider keys will not be ready.
 
@@ -186,10 +189,10 @@ IMAGE="$(python3 -c 'import json; print(json.load(open("release.json", encoding=
 
 Before any target write, the streamed remote script verifies the target
 hostname and runs the pre-apply safety checks. The first simple deployment may
-start from the target's **known hardened legacy Compose shape** (for example, with
-its production StateFs mounted at `/var/lib/asrsub/state`), as long as the
-current service is owned, healthy, safely provisioned, and has a recoverable
-previous repo digest. The preflight
+start from the target's **known hardened legacy Compose shape**, as long as the
+current service is owned, healthy, safely provisioned, its legacy metadata is
+safe, and it has a recoverable previous repo digest. The project-relative
+candidate directories must still exist before the candidate can be applied. The preflight
 rejects an unsafe or unknown legacy layout before this point. It then:
 
 1. creates a timestamped `.asrsub-rollback/<timestamp>/` backup containing the
@@ -299,8 +302,8 @@ secret values and the deploy tool accepts no secret argument.
 
 | Input | Host location | Required metadata |
 | --- | --- | --- |
-| Optional Discord webhook | `/var/lib/asrsub/runtime-secrets/discord_webhook` | if present, file `0600`; absence disables it |
-| Provider key env file | `/var/lib/asrsub/config/provider_keys.env` | optional, file `0600`; loaded as optional `env_file` |
+| Optional Discord webhook | `./secrets/discord_webhook` under the project | if present, file `0600`; absence disables it |
+| Provider key env file | `./secrets/provider_keys.env` under the project | optional, file `0600`; loaded as optional `env_file` |
 | Container projection | `/run/secrets` | read-only parent bind keeps the optional webhook path |
 
 The operator must enforce `chmod 600` on each present secret file and `chmod 700`
@@ -315,8 +318,8 @@ Compose secret mount. It sends one direct HTTP POST to the webhook endpoint.
 The default smoke-test input is separate from the deployment input:
 
 - Host-local smoke test: `~/.config/asr-pipeline/secrets/discord_webhook`
-- Compose deployment: `/var/lib/asrsub/runtime-secrets/discord_webhook`, mounted
-  in the container as `/run/secrets/discord_webhook`
+- Compose deployment: `./secrets/discord_webhook` under the project, mounted in
+  the container as `/run/secrets/discord_webhook`
 
 For the host-local test, store the rotated webhook URL in the default file.
 Use a protected directory with mode `0700` and a file with mode `0600`. The file
@@ -350,12 +353,12 @@ stop, rotate it out-of-band, and treat the log as compromised.
 
 Non-secret values belong in the target `.env` and are represented by
 `deploy/asrsub.env.example`. The tool may stage `ASRSUB_IMAGE`, `WEBHOOK_PORT`,
-`NAS_MEDIA_PREFIX`, `PROVIDER_KEYS_FILE`, and other explicitly non-secret
-settings. Strict preflight validates the active `.env` before success and
-rejects secret-bearing keys, URL userinfo, inline bearer/basic credentials,
-private-key material, and secret query parameters. Ordinary non-secret URLs and
-managed legacy paths remain valid. The tool will not read `provider_keys.env` as
-a candidate env source.
+`NAS_MEDIA_PREFIX`, and other explicitly non-secret settings. The provider path
+is fixed by the tracked Compose template at `./secrets/provider_keys.env`; it is
+not an `.env` override and the tool never opens it. Strict preflight validates
+the active `.env` before success and rejects secret-bearing keys, URL userinfo,
+inline bearer/basic credentials, private-key material, and secret query
+parameters. Ordinary non-secret URLs remain valid.
 
 `--compose-source` is not an extension point for this routine deployment. The
 local CLI resolves it and accepts only the repository's tracked
@@ -427,12 +430,11 @@ executed.
 - **Project/service ownership failure:** inspect only safe `docker compose ps`
   metadata and labels. Confirm project `asrsub` and service `orchestrator`; do
   not take over an unrelated project.
-- **Missing path or media mount:** create/fix the approved legacy directory or
-  NFS mount under the target change process. The required data paths are
-  `/var/lib/asrsub/config`, `/var/lib/asrsub/cache`, and
-  `/var/lib/asrsub/state` (production Discord StateFs), plus
-  `/var/lib/asrsub/runtime-secrets`; `findmnt -T /mnt/nas/share/media` must
-  identify a real mount, not merely a directory.
+- **Missing path or media mount:** create/fix the project-relative `config`,
+  `cache`, `state`, and `secrets` directories under the project, or fix the NFS
+  mount under the target change process. `findmnt -T /mnt/nas/share/media` must
+  identify a real mount, not merely a directory. The preflight rejects missing,
+  symlinked, traversing, or project-external data paths.
 - **Unsafe project directory:** stop. The project must be a current-owner,
   non-group-writable `0700` directory before lock, pending, or rollback paths
   are opened; symlinks and wrong types are rejected.

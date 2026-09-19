@@ -47,40 +47,77 @@ def remote_payload(project: Path) -> dict[str, object]:
     }
 
 
-class TestLegacyLayoutSafety(unittest.TestCase):
-    def test_candidate_preserves_state_and_legacy_data_sources(self):
+class TestSimpleLayoutSafety(unittest.TestCase):
+    def test_candidate_uses_project_relative_data_sources(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         for needle in (
-            "path: ${PROVIDER_KEYS_FILE:-/var/lib/asrsub/config/provider_keys.env}",
-            "source: /var/lib/asrsub/config",
+            "path: ./secrets/provider_keys.env",
+            "source: ./config",
             "target: /home/user/.config/asr-pipeline",
-            "source: /var/lib/asrsub/cache",
+            "source: ./cache",
             "target: /home/user/.cache/asr-pipeline",
-            "source: /var/lib/asrsub/state",
+            "source: ./state",
             "target: /var/lib/asrsub/state",
-            "source: /var/lib/asrsub/runtime-secrets",
+            "source: ./secrets",
             "target: /run/secrets",
-            "/var/lib/asrsub/runtime-secrets/discord_webhook",
             "/run/secrets/discord_webhook",
         ):
             self.assertIn(needle, text)
-        self.assertNotIn("source: /home/user/.config/asr-pipeline", text)
-        self.assertNotIn("source: /home/user/.cache/asr-pipeline", text)
+        for legacy_source in (
+            "source: /var/lib/asrsub/config",
+            "source: /var/lib/asrsub/cache",
+            "source: /var/lib/asrsub/runtime-secrets",
+        ):
+            self.assertNotIn(legacy_source, text)
+        self.assertNotIn("control_api_key", text)
 
-    def test_expected_mount_contract_preserves_state_and_discord_interface(self):
+    def test_expected_mount_contract_resolves_sources_under_the_project(self):
         remote = load_remote_namespace()
-        expected = set(remote["expected_mounts"]({"nas_media_prefix": "/mnt/nas/share/media"}))
+        project = "/opt/mediastack/asrsub"
+        expected = set(
+            remote["expected_mounts"](
+                {
+                    "project_directory": project,
+                    "nas_media_prefix": "/mnt/nas/share/media",
+                }
+            )
+        )
         self.assertEqual(
             expected,
             {
-                ("/var/lib/asrsub/config", "/home/user/.config/asr-pipeline", True),
-                ("/var/lib/asrsub/cache", "/home/user/.cache/asr-pipeline", True),
-                ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
+                (f"{project}/config", "/home/user/.config/asr-pipeline", True),
+                (f"{project}/cache", "/home/user/.cache/asr-pipeline", True),
+                (f"{project}/state", "/var/lib/asrsub/state", True),
                 ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                 ("/mnt/nas/share/media", "/media", False),
-                ("/var/lib/asrsub/runtime-secrets", "/run/secrets", False),
+                (f"{project}/secrets", "/run/secrets", False),
             },
         )
+
+    def test_project_relative_data_paths_reject_traversal_and_symlink_escape(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            outside = root / "outside"
+            project.mkdir(mode=0o700)
+            outside.mkdir(mode=0o700)
+            for name in ("config", "cache", "state", "secrets"):
+                (project / name).mkdir(mode=0o700)
+            payload = {"project_directory": str(project)}
+            paths = remote["project_data_paths"](payload)
+            self.assertEqual(paths["config"], project / "config")
+            self.assertEqual(paths["secrets"], project / "secrets")
+
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["project_relative_path"](project, "../outside")
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["project_data_paths"]({"project_directory": str(project / ".." / "project")})
+
+            (project / "config").rmdir()
+            (project / "config").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(remote["RemoteFailure"]):
+                remote["project_data_paths"](payload)
 
     def test_current_known_hardened_legacy_mount_layout_is_accepted(self):
         remote = load_remote_namespace()
@@ -187,8 +224,7 @@ class TestActiveEnvBoundary(unittest.TestCase):
             safe = root / "safe.env"
             safe.write_text(
                 "METRICS_URL=https://example.invalid/health\n"
-                "NAS_MEDIA_PREFIX=/mnt/nas/share/media\n"
-                "PROVIDER_KEYS_FILE=/var/lib/asrsub/config/provider_keys.env\n",
+                "NAS_MEDIA_PREFIX=/mnt/nas/share/media\n",
                 encoding="utf-8",
             )
             deploy.build_candidate_env(
@@ -251,6 +287,8 @@ class TestActiveEnvBoundary(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
             project.mkdir(mode=0o700)
+            for name in ("config", "cache", "state", "secrets"):
+                (project / name).mkdir(mode=0o700)
             (project / "compose.yaml").write_text("compose", encoding="utf-8")
             (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
             payload = remote_payload(project)
@@ -293,7 +331,7 @@ class TestActiveEnvBoundary(unittest.TestCase):
             finally:
                 remote.update(original)
             called.assert_called_once_with(project / ".env")
-            self.assertIn(Path("/var/lib/asrsub/state"), required_paths)
+            self.assertIn(project / "state", required_paths)
 
 
 class TestTemplateAndHostnameBoundaries(unittest.TestCase):

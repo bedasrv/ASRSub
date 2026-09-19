@@ -198,7 +198,7 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
                 "ASRSUB_IMAGE=ignored\n"
                 "WEBHOOK_PORT=ignored\n"
                 "NAS_MEDIA_PREFIX=ignored\n"
-                "PROVIDER_KEYS_FILE=/non-secret/provider_keys.env\n",
+                "METRICS_URL=https://example.invalid/health\n",
                 encoding="utf-8",
             )
             env_text = deploy.build_candidate_env(
@@ -212,10 +212,10 @@ class TestOutputAndSecretBoundaries(unittest.TestCase):
             env_text,
             "\n".join(
                 (
+                    "METRICS_URL=https://example.invalid/health",
                     f"ASRSUB_IMAGE={VALID_IMAGE}",
                     "WEBHOOK_PORT=8085",
                     "NAS_MEDIA_PREFIX=/mnt/nas/share/media",
-                    "PROVIDER_KEYS_FILE=/var/lib/asrsub/config/provider_keys.env",
                     "",
                 )
             ),
@@ -308,11 +308,13 @@ class TestComposeTemplateContract(unittest.TestCase):
             "restart: unless-stopped",
             "WEBHOOK_PORT",
             "NAS_MEDIA_PREFIX",
+            "path: ./secrets/provider_keys.env",
             "provider_keys.env",
             "required: false",
-            "/var/lib/asrsub/config",
-            "/var/lib/asrsub/cache",
-            "/var/lib/asrsub/runtime-secrets",
+            "source: ./config",
+            "source: ./cache",
+            "source: ./state",
+            "source: ./secrets",
             "/home/user/.config/asr-pipeline",
             "/home/user/.cache/asr-pipeline",
             "/mnt/nas/share/media",
@@ -324,6 +326,10 @@ class TestComposeTemplateContract(unittest.TestCase):
         self.assertNotIn("cgroup", text)
         self.assertNotIn("egress-policy", text)
         self.assertNotIn("/usr/local/libexec", text)
+        self.assertNotIn("/var/lib/asrsub/config", text)
+        self.assertNotIn("/var/lib/asrsub/cache", text)
+        self.assertNotIn("/var/lib/asrsub/runtime-secrets", text)
+        self.assertNotIn("control_api_key", text)
         self.assertNotRegex(text, r"(?m)^secrets:\s*$")
         self.assertEqual(text.count("/run/secrets/"), 1)
         self.assertNotIn("discord_webhook:", text)
@@ -331,10 +337,17 @@ class TestComposeTemplateContract(unittest.TestCase):
     def test_config_mount_keeps_application_ledgers_and_statefs_stays_separate(self):
         text = TEMPLATE.read_text(encoding="utf-8")
         self.assertIn("target: /home/user/.config/asr-pipeline", text)
-        self.assertIn("source: /var/lib/asrsub/state", text)
+        self.assertIn("source: ./state", text)
         self.assertIn("target: /var/lib/asrsub/state", text)
         self.assertNotIn("ASRSUB_CONFIG_DIR:", text)
         self.assertNotIn("STATE_FILE:", text)
+
+    def test_provider_file_is_fixed_to_the_project_relative_optional_env_file(self):
+        text = TEMPLATE.read_text(encoding="utf-8")
+        self.assertIn("env_file:", text)
+        self.assertIn("path: ./secrets/provider_keys.env", text)
+        self.assertIn("required: false", text)
+        self.assertNotIn("PROVIDER_KEYS_FILE", text)
 
 
 class TestReleaseDescriptorDigestContract(unittest.TestCase):
@@ -370,10 +383,12 @@ class TestDeployDocumentationContract(unittest.TestCase):
             "saved previous mount contract",
             "legacy/tag",
             "current pipeline ledgers",
-            "production Discord StateFs",
+            "notification StateFs",
             "/var/lib/asrsub/state",
-            "remains mounted",
-            "not migrated",
+            "All ASRSub-owned host data",
+            "./secrets/provider_keys.env",
+            "symlinked parents/targets",
+            "never writes or migrates legacy data",
             "release.json",
             "ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>",
             "docker compose config -q",
@@ -418,6 +433,8 @@ class TestDeployPhases(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
             project.mkdir(mode=0o700)
+            for name in ("config", "cache", "state", "secrets"):
+                (project / name).mkdir(mode=0o700)
             (project / "compose.yaml").write_text("legacy", encoding="utf-8")
             (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
             payload = {
@@ -1127,14 +1144,27 @@ class TestDeploymentHardeningContracts(unittest.TestCase):
                         nas_media_prefix="/mnt/nas/share/media",
                     )
             source = Path(directory) / "managed.env"
-            source.write_text("PROVIDER_KEYS_FILE=/var/lib/asrsub/config/provider_keys.env\n", encoding="utf-8")
+            source.write_text("METRICS_URL=https://example.invalid/health\n", encoding="utf-8")
             env_text = deploy.build_candidate_env(
                 source,
                 image=VALID_IMAGE,
                 webhook_port="8085",
                 nas_media_prefix="/mnt/nas/share/media",
             )
-        self.assertIn("PROVIDER_KEYS_FILE=", env_text)
+        self.assertNotIn("PROVIDER_KEYS_FILE", env_text)
+
+    def test_env_source_cannot_override_the_project_relative_provider_file(self):
+        deploy = load_tool()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "provider-override.env"
+            source.write_text("PROVIDER_KEYS_FILE=./outside/provider_keys.env\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "secret-bearing env key"):
+                deploy.build_candidate_env(
+                    source,
+                    image=VALID_IMAGE,
+                    webhook_port="8085",
+                    nas_media_prefix="/mnt/nas/share/media",
+                )
 
     def test_backup_refuses_to_copy_an_active_env_with_secret_key(self):
         remote = load_remote_namespace()

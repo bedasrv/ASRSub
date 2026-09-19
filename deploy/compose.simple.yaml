@@ -11,21 +11,21 @@ services:
       WEBHOOK_PORT: "${WEBHOOK_PORT:?WEBHOOK_PORT must be set}"
       NAS_MEDIA_PREFIX: "${NAS_MEDIA_PREFIX:?NAS_MEDIA_PREFIX must be set}"
     env_file:
-      - path: ${PROVIDER_KEYS_FILE:-/var/lib/asrsub/config/provider_keys.env}
+      - path: ./secrets/provider_keys.env
         required: false
     volumes:
       - type: bind
-        source: /var/lib/asrsub/config
+        source: ./config
         target: /home/user/.config/asr-pipeline
         read_only: false
         bind: { propagation: rprivate, create_host_path: false }
       - type: bind
-        source: /var/lib/asrsub/cache
+        source: ./cache
         target: /home/user/.cache/asr-pipeline
         read_only: false
         bind: { propagation: rprivate, create_host_path: false }
       - type: bind
-        source: /var/lib/asrsub/state
+        source: ./state
         target: /var/lib/asrsub/state
         read_only: false
         bind: { propagation: rprivate, create_host_path: false }
@@ -40,12 +40,12 @@ services:
         read_only: true
         bind: { propagation: rprivate, create_host_path: false }
       - type: bind
-        source: /var/lib/asrsub/runtime-secrets
+        source: ./secrets
         target: /run/secrets
         read_only: true
         bind: { propagation: rprivate, create_host_path: false }
       # The parent bind exposes the optional
-      # /var/lib/asrsub/runtime-secrets/discord_webhook at
+      # ./secrets/discord_webhook at
       # /run/secrets/discord_webhook without a direct optional-file bind.
       # The deployment tool never reads or copies secret values.
     command: ["daemon"]
