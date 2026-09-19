@@ -111,7 +111,7 @@ fn truncate_title(title: &str, capacity: usize) -> String {
 }
 
 fn formatted_row(kind: &str, title: &str, meta: &str, entries: &[String]) -> String {
-    format!("- **{kind} {title} {meta}** — `{}`", entries.join(", "))
+    format!("**{kind} {title} {meta}** - {}", entries.join(" | "))
 }
 
 fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>), RenderError> {
@@ -128,7 +128,13 @@ fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>)
                     target.language().as_str(),
                     target
                         .generation_method()
-                        .map(|method| format!(" · {}", method.display()))
+                        .map(|method| {
+                            let display = method
+                                .display()
+                                .replace(" · ", " | ")
+                                .replace(" → ", " -> ");
+                            format!(" | {display}")
+                        })
                         .unwrap_or_default()
                 ),
             )
@@ -231,37 +237,37 @@ fn summary_rows(summary: &OverflowSummaryV1) -> (Vec<String>, Vec<String>) {
     let mut completed = Vec::new();
     if summary.attention_reports() > 0 {
         attention.push(format!(
-            "- **Attention:** at least {} additional attention reports",
+            "**Attention:** at least {} additional attention reports",
             summary.attention_reports()
         ));
     }
     if summary.warning_reports() > 0 {
         attention.push(format!(
-            "- **Warning:** at least {} additional warning reports",
+            "**Warning:** at least {} additional warning reports",
             summary.warning_reports()
         ));
     }
     if summary.blocked_admissions() > 0 {
         attention.push(format!(
-            "- **Blocked:** at least {} committed reports awaiting capacity",
+            "**Blocked:** at least {} committed reports awaiting capacity",
             summary.blocked_admissions()
         ));
     }
     if summary.target_outcomes() > 0 {
         attention.push(format!(
-            "- **Targets:** at least {} additional target outcomes",
+            "**Targets:** at least {} additional target outcomes",
             summary.target_outcomes()
         ));
     }
     if summary.pre_admission_drops() > 0 {
         attention.push(format!(
-            "- **State capacity:** at least {} reports rejected by state capacity",
+            "**State capacity:** at least {} reports rejected by state capacity",
             summary.pre_admission_drops()
         ));
     }
     if summary.completed_reports() > 0 {
         completed.push(format!(
-            "- **Completed:** at least {} additional completed reports",
+            "**Completed:** at least {} additional completed reports",
             summary.completed_reports()
         ));
     }
@@ -303,12 +309,12 @@ fn result_lines(
     results.extend(attention.iter().cloned());
     results.extend(attention_rows.iter().cloned());
     if omitted_attention > 0 {
-        results.push(format!("- _+{omitted_attention} more attention episodes_"));
+        results.push(format!("_+{omitted_attention} more attention episodes_"));
     }
     results.extend(completed.iter().cloned());
     results.extend(completed_rows.iter().cloned());
     if omitted_completed > 0 {
-        results.push(format!("- _+{omitted_completed} more completed episodes_"));
+        results.push(format!("_+{omitted_completed} more completed episodes_"));
     }
     results
 }
@@ -460,8 +466,13 @@ mod tests {
         assert!(value["embeds"][0].get("title").is_none());
         assert_eq!(
             value["embeds"][0]["description"],
-            "- **series Show S01E02** — `id:ok`"
+            "**series Show S01E02** - id:ok"
         );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
         assert!(value["embeds"][0].get("fields").is_none());
         assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(value.get("content").is_none());
@@ -476,8 +487,13 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
         assert_eq!(
             value["embeds"][0]["description"],
-            "- **Attention:** at least 2 additional attention reports\n- **State capacity:** at least 3 reports rejected by state capacity\n- **Completed:** at least 4 additional completed reports"
+            "**Attention:** at least 2 additional attention reports\n**State capacity:** at least 3 reports rejected by state capacity\n**Completed:** at least 4 additional completed reports"
         );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
     }
 
     #[test]
@@ -498,7 +514,15 @@ mod tests {
         );
         assert!(value["embeds"][0].get("title").is_none());
         assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xFEE75C));
-        assert!(String::from_utf8_lossy(payload.as_bytes()).contains("id:warn-unknown"));
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "**series Show S01E02** - id:warn-unknown"
+        );
+        let description = value["embeds"][0]["description"].as_str().unwrap();
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
     }
 
     #[test]
@@ -519,6 +543,10 @@ mod tests {
         );
         assert!(value["embeds"][0].get("title").is_none());
         assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xED4245));
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "**series Show S01E02** - id:fail-unknown"
+        );
     }
 
     #[test]
@@ -545,7 +573,11 @@ mod tests {
         let description = value["embeds"][0]["description"].as_str().unwrap();
         assert!(description
             .lines()
-            .any(|line| line == "- _+3 more completed episodes_"));
+            .any(|line| line == "_+3 more completed episodes_"));
+        assert!(!description.contains('`'));
+        assert!(description
+            .lines()
+            .all(|line| !line.starts_with('-') && !line.starts_with('•')));
         assert!(description
             .lines()
             .all(|line| line.chars().count() <= MAX_ROW_SCALARS));
@@ -601,9 +633,10 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
         let line = value["embeds"][0]["description"].as_str().unwrap();
         assert!(line.chars().count() <= MAX_ROW_SCALARS);
-        assert!(line.starts_with("- **series "));
-        assert!(line.contains("** — `"));
-        assert!(line.ends_with('`'));
+        assert!(line.starts_with("**series "));
+        assert!(line.contains("** - id:ok"));
+        assert!(!line.contains('`'));
+        assert!(!line.starts_with('-'));
     }
 
     #[test]
@@ -638,8 +671,10 @@ mod tests {
         let results = value["embeds"][0]["description"].as_str().unwrap();
         assert_eq!(
             results,
-            "- **movie movie movie** — `id:ok · Whisper: provider/whisper-1 → LLM: openai/gpt-4o-mini`"
+            "**movie movie movie** - id:ok | Whisper: provider/whisper-1 -> LLM: openai/gpt-4o-mini"
         );
+        assert!(!results.contains('`'));
+        assert!(!results.starts_with('-'));
         assert!(results.chars().count() <= MAX_ROW_SCALARS);
     }
 
