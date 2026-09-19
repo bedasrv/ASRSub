@@ -1,8 +1,9 @@
 name: Release
 
 # The only path that publishes images. Every push to main builds the image
-# once and pushes the full-40-character git SHA digest to GHCR. Production
-# deploys bind the exact image digest through the validated approval manifest.
+# once, publishes the full-40-character git SHA tag, and advances `latest`.
+# Production deploys bind the exact image digest through the validated
+# approval manifest; `latest` is only a convenience alias.
 # NOTE: the image name is hardcoded lowercase — github.repository would
 # expand to bedasrv/ASRSub, which GHCR rejects (must be lowercase).
 
@@ -37,7 +38,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/bedasrv/asrsub:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}:latest', env.IMAGE_NAME) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Emit non-secret release descriptor
