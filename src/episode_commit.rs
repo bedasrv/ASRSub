@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::feature_modules::discord_text::SafeDisplayText;
 use crate::feature_modules::discord_types::{
-    FailureClass, TargetLanguage, TargetRunResult, TargetStatus,
+    FailureClass, GenerationMethod, TargetLanguage, TargetRunResult, TargetStatus,
 };
 use crate::feature_modules::pipeline_commit::{
     commit_target_ledgers, CommitLedgerError, CommitWitness, LedgerCommitRequest, LedgerIdentity,
@@ -75,9 +75,18 @@ pub(super) fn target_result(
     status: TargetStatus,
     artifact_sha256: Option<[u8; 32]>,
 ) -> Result<TargetRunResult> {
+    target_result_with_method(lang, status, artifact_sha256, None)
+}
+
+pub(super) fn target_result_with_method(
+    lang: &str,
+    status: TargetStatus,
+    artifact_sha256: Option<[u8; 32]>,
+    generation_method: Option<GenerationMethod>,
+) -> Result<TargetRunResult> {
     let language = TargetLanguage::parse(lang)
         .map_err(|error| anyhow::anyhow!("invalid target language {lang:?}: {error:?}"))?;
-    TargetRunResult::try_new(language, status, artifact_sha256)
+    TargetRunResult::try_new_with_method(language, status, artifact_sha256, generation_method)
         .map_err(|error| anyhow::anyhow!("invalid target result for {lang:?}: {error:?}"))
 }
 

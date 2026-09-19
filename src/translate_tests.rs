@@ -138,6 +138,196 @@ async fn persistent_failure_returns_error_instead_of_blank_success() {
 }
 
 #[tokio::test]
+async fn trace_records_only_a_successful_fallback_model() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let Ok(size) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..size]);
+                if request.starts_with("POST /failed ") {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                let body = serde_json::json!({
+                    "choices": [{"message": {"content": "[\"Halo dunia\"]"}}]
+                })
+                .to_string();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(body.as_bytes()).await;
+            });
+        }
+    });
+
+    let pool = ProviderPool::new_with_timeouts(
+        crate::providers::ProvidersFile {
+            llm_translation_models: vec![
+                crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/failed"),
+                    model: "configured-only-model".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key-a".to_string(),
+                    probe_latency_s: 1.0,
+                    thinking_param_accepted: false,
+                },
+                crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/success"),
+                    model: "provider/actual-model".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key-b".to_string(),
+                    probe_latency_s: 2.0,
+                    thinking_param_accepted: false,
+                },
+            ],
+            whisper_stt: None,
+            whisper_stt_fallbacks: vec![],
+        },
+        reqwest::Client::new(),
+        crate::providers::LlmTimeouts {
+            connect: std::time::Duration::from_millis(50),
+            read: std::time::Duration::from_millis(50),
+            request: std::time::Duration::from_millis(100),
+            translation: std::time::Duration::from_secs(1),
+        },
+    );
+    let trace = translate_lines_with_trace(
+        &pool,
+        TranslateJob {
+            lines: vec!["first line".to_string()],
+            target_lang: "id",
+            source_lang: "English",
+            knowledge: "",
+            chunk_size: 1,
+            fanout: 1,
+            skip_guard: true,
+            placeholders: &[],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(trace.lines, vec!["Halo dunia"]);
+    assert_eq!(trace.models, vec!["provider/actual-model"]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn trace_deduplicates_chunk_and_fallback_models_deterministically() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let primary_attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = primary_attempts.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let server_attempts = server_attempts.clone();
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let Ok(size) = stream.read(&mut request).await else {
+                    return;
+                };
+                let request = String::from_utf8_lossy(&request[..size]);
+                let primary = request.starts_with("POST /a ");
+                if primary && server_attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    return;
+                }
+                let body = serde_json::json!({
+                    "choices": [{"message": {"content": "[\"Halo dunia\"]"}}]
+                })
+                .to_string();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(body.as_bytes()).await;
+            });
+        }
+    });
+
+    let pool = ProviderPool::new_with_timeouts(
+        crate::providers::ProvidersFile {
+            llm_translation_models: vec![
+                crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/a"),
+                    model: "model-b".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key-a".to_string(),
+                    probe_latency_s: 1.0,
+                    thinking_param_accepted: false,
+                },
+                crate::providers::LlmProvider {
+                    endpoint: format!("http://{address}/b"),
+                    model: "model-a".to_string(),
+                    key_env: String::new(),
+                    api_key: "test-key-b".to_string(),
+                    probe_latency_s: 2.0,
+                    thinking_param_accepted: false,
+                },
+            ],
+            whisper_stt: None,
+            whisper_stt_fallbacks: vec![],
+        },
+        reqwest::Client::new(),
+        crate::providers::LlmTimeouts {
+            connect: std::time::Duration::from_millis(50),
+            read: std::time::Duration::from_millis(50),
+            request: std::time::Duration::from_millis(100),
+            translation: std::time::Duration::from_secs(1),
+        },
+    );
+    let trace = translate_lines_with_trace(
+        &pool,
+        TranslateJob {
+            lines: vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            target_lang: "id",
+            source_lang: "English",
+            knowledge: "",
+            chunk_size: 1,
+            fanout: 1,
+            skip_guard: true,
+            placeholders: &[],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(trace.lines, vec!["Halo dunia", "Halo dunia", "Halo dunia"]);
+    assert_eq!(trace.models, vec!["model-a", "model-b"]);
+    server.abort();
+}
+
+#[tokio::test]
 async fn stalled_response_is_cancelled_and_fails_translation() {
     use tokio::io::AsyncReadExt;
 

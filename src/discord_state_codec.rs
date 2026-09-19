@@ -64,6 +64,9 @@ fn opt_u32(value: Option<u32>, out: &mut Vec<u8>) {
 }
 
 pub(crate) fn encode_report(report: &EpisodeRunReport) -> Vec<u8> {
+    // Target generation_method is notification-only metadata. Keep it out of
+    // canonical report bytes so state identities and pipeline commit IDs stay
+    // unchanged; decode_report therefore restores it as absent.
     let mut out = Vec::new();
     out.extend_from_slice(b"{\"schema\":\"report-v1\",\"kind\":");
     quoted(
@@ -252,6 +255,7 @@ pub(crate) fn decode_report(bytes: &[u8]) -> Result<EpisodeRunReport, Notificati
             }
             _ => return Err(NotificationStateError::Corrupt),
         };
+        // Canonical state carries no notification-only generation metadata.
         targets.push(
             super::discord_types::TargetRunResult::try_new(lang, status, digest)
                 .map_err(|_| NotificationStateError::Corrupt)?,

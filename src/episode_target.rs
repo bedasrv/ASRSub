@@ -2,14 +2,16 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::feature_modules::discord_types::{TargetRunResult, TargetStatus, WarningClass};
+use crate::feature_modules::discord_types::{
+    GenerationMethod, GenerationSource, TargetRunResult, TargetStatus, WarningClass,
+};
 use crate::feature_modules::pipeline_commit::LedgerPaths;
 use crate::pipeline::{Candidate, Pipeline};
 use crate::srt::{self, Cue};
 
 use super::episode_commit::{
     cleanup_failed_install, install_sidecar, publish_target_ledgers, target_ledger_rows,
-    target_result, InstalledSidecar, RegistryCommit, TargetFailure,
+    target_result_with_method, InstalledSidecar, RegistryCommit, TargetFailure,
 };
 
 /// Per-language source bundle from phase 1 (ladder hit or shared ASR
@@ -24,6 +26,8 @@ pub(super) struct LangWork {
     pub(super) reg_kind: Option<String>,
     /// Chosen audio stream index (ASR rows only; ladder rows are None).
     pub(super) src_stream: Option<u32>,
+    pub(super) generation_source: GenerationSource,
+    pub(super) whisper_models: Vec<String>,
 }
 
 /// Episode-scoped context shared (by reference) across one episode's
@@ -45,7 +49,7 @@ impl Pipeline {
         &self,
         series_title: &str,
         w: &LangWork,
-    ) -> Result<Vec<String>> {
+    ) -> Result<crate::translate::TranslationTrace> {
         let knowledge = if series_title.is_empty() || series_title == "?" {
             String::new()
         } else {
@@ -53,7 +57,7 @@ impl Pipeline {
             self.glossary
                 .knowledge_block_for_cues(series_title, &texts, crate::glossary::MAX_REFS)
         };
-        crate::translate::translate_lines(
+        crate::translate::translate_lines_with_trace(
             &self.pool,
             crate::translate::TranslateJob {
                 lines: w.src_cues.iter().map(|c| c.text.clone()).collect(),
@@ -81,6 +85,7 @@ impl Pipeline {
         ctx: EpisodeCtx<'_>,
         w: LangWork,
         translated: Vec<String>,
+        llm_models: Vec<String>,
     ) -> std::result::Result<TargetRunResult, TargetFailure> {
         let lang = &w.lang;
         let cand = ctx.cand;
@@ -170,10 +175,13 @@ impl Pipeline {
                 return Err(error);
             }
         };
-        target_result(
+        let generation_method =
+            GenerationMethod::new(w.generation_source, &w.whisper_models, &llm_models);
+        target_result_with_method(
             lang,
             TargetStatus::Completed { warning },
             Some(artifact_sha256),
+            Some(generation_method),
         )
         .map_err(TargetFailure::storage_error)
     }

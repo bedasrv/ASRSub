@@ -119,7 +119,14 @@ fn target_rows(report: &EpisodeRunReport) -> Result<(Vec<String>, Option<usize>)
             (
                 severity,
                 target.language().as_str().to_string(),
-                format!("{}:{token}", target.language().as_str()),
+                format!(
+                    "{}:{token}{}",
+                    target.language().as_str(),
+                    target
+                        .generation_method()
+                        .map(|method| format!(" · {}", method.display()))
+                        .unwrap_or_default()
+                ),
             )
         })
         .collect();
@@ -418,7 +425,8 @@ mod tests {
     use super::super::discord_state_schema::OverflowSummaryV1;
     use super::super::discord_text::SafeDisplayText;
     use super::super::discord_types::{
-        AggregateDisposition, BoundedTargets, TargetLanguage, TargetRunResult,
+        AggregateDisposition, BoundedTargets, GenerationMethod, GenerationSource, TargetLanguage,
+        TargetRunResult, MAX_GENERATION_METHOD_SCALARS,
     };
     use super::*;
 
@@ -572,5 +580,105 @@ mod tests {
         let results = value["embeds"][0]["fields"][0]["value"].as_str().unwrap();
         assert!(!results.contains("https://"));
         assert!(!results.contains("discord.com/token"));
+    }
+
+    #[test]
+    fn renders_per_target_generation_method_and_actual_models() {
+        let method = GenerationMethod::new(
+            GenerationSource::Whisper,
+            &["provider/whisper-1".to_string()],
+            &["openai/gpt-4o-mini".to_string()],
+        );
+        let target = TargetRunResult::try_new_with_method(
+            TargetLanguage::parse("id").unwrap(),
+            TargetStatus::Completed { warning: None },
+            Some([9; 32]),
+            Some(method),
+        )
+        .unwrap();
+        let report = EpisodeRunReport::try_new(
+            EpisodeKind::Movie,
+            9,
+            SafeDisplayText::sanitize("movie").unwrap(),
+            None,
+            None,
+            BoundedTargets::try_from([target]).unwrap(),
+            None,
+            AggregateDisposition::Complete,
+        )
+        .unwrap();
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports([report]).unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let results = value["embeds"][0]["fields"][0]["value"].as_str().unwrap();
+        assert!(results.contains("id:ok · Whisper: provider/whisper-1 → LLM: openai/gpt-4o-mini"));
+        assert!(results.chars().count() <= MAX_ROW_SCALARS);
+    }
+
+    #[test]
+    fn generation_method_cases_are_compact_and_safe() {
+        let cases = [
+            (
+                GenerationSource::Sidecar,
+                vec![],
+                vec!["provider/model".to_string()],
+                "Sidecar → LLM: provider/model",
+            ),
+            (
+                GenerationSource::Jimaku,
+                vec![],
+                vec!["provider:model".to_string()],
+                "Jimaku → LLM: provider:model",
+            ),
+            (
+                GenerationSource::Whisper,
+                vec!["provider/whisper-model".to_string()],
+                vec![],
+                "Whisper: provider/whisper-model",
+            ),
+            (
+                GenerationSource::Whisper,
+                vec!["provider/whisper-model".to_string()],
+                vec!["provider/translation-model".to_string()],
+                "Whisper: provider/whisper-model → LLM: provider/translation-model",
+            ),
+            (
+                GenerationSource::ExistingSubtitle,
+                vec![],
+                vec![],
+                "Existing subtitle",
+            ),
+        ];
+        for (source, whisper, llm, expected) in cases {
+            assert_eq!(
+                GenerationMethod::new(source, &whisper, &llm).display(),
+                expected
+            );
+        }
+
+        let method = GenerationMethod::new(
+            GenerationSource::Whisper,
+            &["provider/model:v1.2-name_with-dash".to_string()],
+            &[format!(
+                "https://endpoint.example/{}/{} @everyone *bad* `code` # [x] ~ {}\n",
+                "key_env",
+                "secret",
+                "x".repeat(MAX_GENERATION_METHOD_SCALARS * 2)
+            )],
+        );
+        let display = method.display();
+        assert!(display.contains("provider/model:v1.2-name_with-dash"));
+        assert!(!display.contains("https://endpoint.example"));
+        assert!(!display.contains("key_env"));
+        assert!(!display.contains("@everyone"));
+        assert!(!display.contains('*'));
+        assert!(!display.contains('`'));
+        assert!(!display.contains('#'));
+        assert!(!display.contains('['));
+        assert!(!display.contains(']'));
+        assert!(!display.contains('~'));
+        assert!(!display.contains('\n'));
+        assert!(display.chars().count() <= MAX_GENERATION_METHOD_SCALARS);
     }
 }

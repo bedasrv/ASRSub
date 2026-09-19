@@ -17,9 +17,10 @@ mod episode_target;
 
 use crate::asr;
 use crate::feature_modules::discord_types::{
-    EpisodeKind, EpisodeRunResult, FailureClass, NoTargetCase, TargetStatus,
+    EpisodeKind, EpisodeRunResult, FailureClass, GenerationMethod, GenerationSource, NoTargetCase,
+    TargetStatus,
 };
-use crate::ladder::LadderQuery;
+use crate::ladder::{LadderQuery, LadderSource};
 use crate::lang::normalize_lang;
 use crate::pipeline::{Candidate, Pipeline};
 use crate::sonarr::Episode;
@@ -27,10 +28,21 @@ use crate::srt::Cue;
 use crate::state::{self, StateEntry};
 
 use episode_commit::{
-    existing_target_digest, target_is_verified, target_result, validated_report_title,
-    TargetFailure,
+    existing_target_digest, target_is_verified, target_result, target_result_with_method,
+    validated_report_title, TargetFailure,
 };
 use episode_target::{EpisodeCtx, LangWork};
+
+type SourceBundle = (
+    Vec<Cue>,
+    String,
+    bool,
+    String,
+    Option<String>,
+    Option<u32>,
+    GenerationSource,
+    Vec<String>,
+);
 
 impl Pipeline {
     /// Process one episode/movie for all its missing languages.
@@ -107,10 +119,11 @@ impl Pipeline {
                 tracing::info!(episode = cand.episode_id, lang = %lang, "skip: sidecar already exists");
                 match existing_target_digest(&verified.target_path) {
                     Ok(digest) if digest == verified.artifact_sha256 => {
-                        target_outcomes.push(target_result(
+                        target_outcomes.push(target_result_with_method(
                             lang,
                             TargetStatus::Completed { warning: None },
                             Some(digest),
+                            Some(GenerationMethod::existing_subtitle()),
                         )?)
                     }
                     Ok(_) => {
@@ -153,17 +166,23 @@ impl Pipeline {
                     duration_s,
                 })
                 .await;
-            // (source cues, source lang, needs-translate, registry source, registry kind, stream)
-            let (src_cues, src_lang, needs_translate, reg_source, reg_kind, src_stream): (
-                Vec<Cue>,
-                String,
-                bool,
-                String,
-                Option<String>,
-                Option<u32>,
-            ) = match ladder {
+            // (source cues, source lang, needs-translate, registry source, registry kind, stream, generation source, whisper models)
+            let (
+                src_cues,
+                src_lang,
+                needs_translate,
+                reg_source,
+                reg_kind,
+                src_stream,
+                generation_source,
+                whisper_models,
+            ): SourceBundle = match ladder {
                 Some(hit) => {
                     let need = normalize_lang(&hit.src_lang) != normalize_lang(lang);
+                    let generation_source = match hit.generation_source {
+                        LadderSource::Sidecar => GenerationSource::Sidecar,
+                        LadderSource::Jimaku => GenerationSource::Jimaku,
+                    };
                     (
                         hit.cues,
                         hit.src_lang.clone(),
@@ -171,6 +190,8 @@ impl Pipeline {
                         hit.source,
                         hit.source_kind,
                         None,
+                        generation_source,
+                        Vec::new(),
                     )
                 }
                 None => {
@@ -261,6 +282,8 @@ impl Pipeline {
                         "asr".to_string(),
                         None,
                         Some(choice.stream_index),
+                        GenerationSource::Whisper,
+                        transcript.whisper_models.clone(),
                     )
                 }
             };
@@ -280,6 +303,8 @@ impl Pipeline {
                 reg_source,
                 reg_kind,
                 src_stream,
+                generation_source,
+                whisper_models,
             });
         }
 
@@ -314,10 +339,10 @@ impl Pipeline {
                 let result = if !w.needs_translate {
                     let translated: Vec<String> =
                         w.src_cues.iter().map(|cue| cue.text.clone()).collect();
-                    self.finish_lang(ctx, w, translated).await
+                    self.finish_lang(ctx, w, translated, Vec::new()).await
                 } else {
                     match self.translate_lang(ctx.series_title, &w).await {
-                        Ok(translated) => self.finish_lang(ctx, w, translated).await,
+                        Ok(trace) => self.finish_lang(ctx, w, trace.lines, trace.models).await,
                         Err(error) => Err(TargetFailure::translation(error)),
                     }
                 };
