@@ -782,6 +782,11 @@ CACHE_CONTAINER_PATH = "/home/user/.cache/asr-pipeline"
 STATE_CONTAINER_PATH = "/var/lib/asrsub/state"
 SECRETS_CONTAINER_PATH = "/run/secrets"
 MEDIA_CONTAINER_PATH = "/media"
+HOME_LEGACY_CONFIG_SOURCE = CONFIG_CONTAINER_PATH
+HOME_LEGACY_CACHE_SOURCE = CACHE_CONTAINER_PATH
+HOME_LEGACY_SECRETS_SOURCE = HOME_LEGACY_CONFIG_SOURCE + "/secrets"
+HOME_LEGACY_CONTROL_KEY_SOURCE = HOME_LEGACY_SECRETS_SOURCE + "/control_api_key"
+CONTROL_KEY_CONTAINER_PATH = SECRETS_CONTAINER_PATH + "/control_api_key"
 RESERVED_MEDIA_PREFIXES = (
     "/",
     "/run",
@@ -1118,7 +1123,25 @@ def inspect_container(container):
     health = inspect("{{json .State.Health.Status}}", "container health")
     config_image = inspect("{{json .Config.Image}}", "container image reference")
     image_id = inspect("{{json .Image}}", "container image id")
-    repo_digests = inspect("{{json .RepoDigests}}", "container image digests") or []
+    if not isinstance(image_id, str) or not image_id:
+        raise RemoteFailure("active container has no valid image id")
+    try:
+        repo_digests = json.loads(
+            checked(
+                docker_argv(
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .RepoDigests}}",
+                    image_id,
+                ),
+                "image RepoDigests",
+            ).strip()
+        ) or []
+    except json.JSONDecodeError as exc:
+        raise RemoteFailure("image RepoDigests metadata is invalid") from exc
+    if not isinstance(repo_digests, list) or any(not isinstance(value, str) for value in repo_digests):
+        raise RemoteFailure("image RepoDigests metadata is invalid")
     pid = inspect("{{json .State.Pid}}", "container pid")
     if type(pid) is not int or pid <= 0:
         raise RemoteFailure("active container has no valid host pid")
@@ -1355,6 +1378,26 @@ def legacy_mounts_match(identity, payload):
     return required.issubset(actual) and actual.issubset(required | optional)
 
 
+def home_legacy_mounts_match(identity, payload):
+    """Accept only the observed home-directory legacy layout."""
+    validate_nas_media_prefix(payload["nas_media_prefix"])
+    entries = contract_tuples(mount_contract(identity))
+    if len(entries) != len(set(entries)):
+        return False
+    actual = set(entries)
+    media = "/mnt/nas/share/media"
+    required = {
+        (HOME_LEGACY_CONFIG_SOURCE, CONFIG_CONTAINER_PATH, True),
+        (HOME_LEGACY_CACHE_SOURCE, CACHE_CONTAINER_PATH, True),
+        (media, payload["nas_media_prefix"], True),
+        (media, MEDIA_CONTAINER_PATH, False),
+    }
+    optional = {
+        (HOME_LEGACY_CONTROL_KEY_SOURCE, CONTROL_KEY_CONTAINER_PATH, False),
+    }
+    return required.issubset(actual) and actual.issubset(required | optional)
+
+
 def collect(payload, *, strict):
     validate_expected_hostname(payload)
     validate_nas_media_prefix(payload["nas_media_prefix"])
@@ -1405,6 +1448,7 @@ def collect(payload, *, strict):
     )
     current_mounts = mounts_match(identity, payload)
     known_legacy_mounts = legacy_mounts_match(identity, payload)
+    known_home_legacy_mounts = home_legacy_mounts_match(identity, payload)
     previous_repo_digest = immutable_repo_digest(identity)
     if strict and known_legacy_mounts:
         for name, path in (
@@ -1427,6 +1471,26 @@ def collect(payload, *, strict):
                 or optional.get("mode", 0) & 0o077
             ):
                 raise RemoteFailure("legacy optional secret metadata is not safe")
+    elif strict and known_home_legacy_mounts:
+        for name, path in (
+            ("home_legacy_config", Path(HOME_LEGACY_CONFIG_SOURCE)),
+            ("home_legacy_cache", Path(HOME_LEGACY_CACHE_SOURCE)),
+            ("home_legacy_secrets", Path(HOME_LEGACY_SECRETS_SOURCE)),
+        ):
+            paths[name] = require_path(path, directory=True)
+        home_control_key = metadata(Path(HOME_LEGACY_CONTROL_KEY_SOURCE))
+        if home_control_key.get("present") and (
+            not home_control_key.get("regular")
+            or home_control_key.get("symlink")
+            or home_control_key.get("mode", 0) & 0o077
+        ):
+            raise RemoteFailure("home legacy control-key metadata is not safe")
+        home_entries = set(contract_tuples(mount_contract(identity)))
+        if (HOME_LEGACY_CONTROL_KEY_SOURCE, CONTROL_KEY_CONTAINER_PATH, False) in home_entries:
+            paths["home_legacy_control_api_key"] = require_path(
+                Path(HOME_LEGACY_CONTROL_KEY_SOURCE),
+                directory=False,
+            )
     if strict and not owned:
         raise RemoteFailure("active container project/service ownership does not match")
     if strict and not port_owned:
@@ -1435,7 +1499,7 @@ def collect(payload, *, strict):
         raise RemoteFailure("active container is not healthy")
     if strict and previous_repo_digest is None:
         raise RemoteFailure("active service has no recoverable immutable RepoDigest")
-    if strict and not current_mounts and not known_legacy_mounts:
+    if strict and not current_mounts and not known_legacy_mounts and not known_home_legacy_mounts:
         raise RemoteFailure("active service uses an unsafe or unknown data layout")
     current_mount_contract = "simple" if current_mounts else "legacy-compatible"
     return {

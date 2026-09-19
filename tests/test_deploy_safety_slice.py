@@ -119,6 +119,201 @@ class TestSimpleLayoutSafety(unittest.TestCase):
             with self.assertRaises(remote["RemoteFailure"]):
                 remote["project_data_paths"](payload)
 
+    def test_inspect_container_reads_repo_digests_from_image_object_by_image_id(self):
+        remote = load_remote_namespace()
+        image_id = "sha256:" + "b" * 64
+        calls = []
+        inspected = {
+            "{{json .Config.Labels}}": {
+                "com.docker.compose.project": "asrsub",
+                "com.docker.compose.service": "orchestrator",
+            },
+            "{{json .Mounts}}": [],
+            "{{json .State.Health.Status}}": "healthy",
+            "{{json .Config.Image}}": "ghcr.io/bedasrv/asrsub:legacy",
+            "{{json .Image}}": image_id,
+            "{{json .State.Pid}}": 123,
+        }
+
+        def fake_checked(argv, label, **kwargs):
+            calls.append((list(argv), label))
+            if argv[3:5] == ["image", "inspect"]:
+                return json.dumps([VALID_IMAGE])
+            return json.dumps(inspected[argv[5]])
+
+        original = remote["checked"]
+        remote["checked"] = fake_checked
+        try:
+            identity = remote["inspect_container"]("container-id")
+        finally:
+            remote["checked"] = original
+
+        self.assertEqual(identity["repo_digests"], [VALID_IMAGE])
+        image_lookup = [argv for argv, _label in calls if argv[3:5] == ["image", "inspect"]]
+        self.assertEqual(
+            image_lookup,
+            [[
+                "/usr/bin/docker",
+                "--context",
+                "default",
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                image_id,
+            ]],
+        )
+        container_inspects = [argv for argv, _label in calls if argv[3] == "inspect"]
+        self.assertFalse(any(".RepoDigests" in argument for argv in container_inspects for argument in argv))
+
+    def test_known_home_directory_legacy_mount_layout_is_accepted(self):
+        remote = load_remote_namespace()
+        identity = {
+            "mounts": [
+                {"Source": source, "Destination": destination, "RW": rw}
+                for source, destination, rw in (
+                    ("/home/user/.config/asr-pipeline", "/home/user/.config/asr-pipeline", True),
+                    ("/home/user/.cache/asr-pipeline", "/home/user/.cache/asr-pipeline", True),
+                    ("/mnt/nas/share/media", "/media", False),
+                    ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
+                    (
+                        "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
+                )
+            ]
+        }
+        self.assertTrue(
+            remote["home_legacy_mounts_match"](
+                identity,
+                {"nas_media_prefix": "/mnt/nas/share/media"},
+            )
+        )
+
+    def test_home_directory_legacy_mount_layout_rejects_unknown_extra_bind(self):
+        remote = load_remote_namespace()
+        identity = {
+            "mounts": [
+                {"Source": source, "Destination": destination, "RW": rw}
+                for source, destination, rw in (
+                    ("/home/user/.config/asr-pipeline", "/home/user/.config/asr-pipeline", True),
+                    ("/home/user/.cache/asr-pipeline", "/home/user/.cache/asr-pipeline", True),
+                    ("/mnt/nas/share/media", "/media", False),
+                    ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
+                    (
+                        "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
+                )
+            ]
+        }
+        identity["mounts"].append(
+            {
+                "Source": "/home/user/.config/asr-pipeline/unknown",
+                "Destination": "/opt/unknown",
+                "RW": False,
+            }
+        )
+        self.assertFalse(
+            remote["home_legacy_mounts_match"](
+                identity,
+                {"nas_media_prefix": "/mnt/nas/share/media"},
+            )
+        )
+
+    def test_strict_collect_validates_home_legacy_paths_without_var_lib_requirements(self):
+        remote = load_remote_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            project.mkdir(mode=0o700)
+            for name in ("config", "cache", "state", "secrets"):
+                (project / name).mkdir(mode=0o700)
+            (project / "compose.yaml").write_text("compose", encoding="utf-8")
+            (project / ".env").write_text("WEBHOOK_PORT=8085\n", encoding="utf-8")
+            payload = remote_payload(project)
+            identity = {
+                "labels": {
+                    "com.docker.compose.project": "asrsub",
+                    "com.docker.compose.service": "orchestrator",
+                },
+                "mounts": [
+                    {"Source": source, "Destination": destination, "RW": rw}
+                    for source, destination, rw in (
+                        ("/home/user/.config/asr-pipeline", "/home/user/.config/asr-pipeline", True),
+                        ("/home/user/.cache/asr-pipeline", "/home/user/.cache/asr-pipeline", True),
+                        ("/mnt/nas/share/media", "/media", False),
+                        ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
+                        (
+                            "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                            "/run/secrets/control_api_key",
+                            False,
+                        ),
+                    )
+                ],
+                "health": "healthy",
+                "config_image": "ghcr.io/bedasrv/asrsub:legacy",
+                "image_id": "image-id",
+                "repo_digests": [VALID_IMAGE],
+                "pid": 1,
+            }
+            original = {
+                name: remote[name]
+                for name in (
+                    "metadata",
+                    "require_path",
+                    "checked",
+                    "active_container",
+                    "inspect_container",
+                    "validate_env_file",
+                )
+            }
+            required_paths = []
+            remote["metadata"] = lambda path: {
+                "present": True,
+                "regular": True,
+                "directory": True,
+                "symlink": False,
+                "mode": 0o700,
+                "uid": os.geteuid(),
+            }
+            def fake_require_path(path, **kwargs):
+                required_paths.append(Path(path))
+                return {
+                    "present": True,
+                    "regular": kwargs.get("directory") is False,
+                    "directory": kwargs.get("directory") is True,
+                    "symlink": False,
+                    "mode": 0o600 if kwargs.get("directory") is False else 0o700,
+                    "uid": os.geteuid(),
+                }
+
+            remote["require_path"] = fake_require_path
+            remote["checked"] = lambda argv, label, **kwargs: (
+                'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:* users:(("asrsub",pid=1,fd=1))\n'
+                if argv[0] == "ss"
+                else "/mnt/nas/share nfs4 nas.example:/exports/media\n"
+                if argv[0] == "findmnt"
+                else "ok\n"
+            )
+            remote["active_container"] = lambda value: ("container-id", {})
+            remote["inspect_container"] = lambda value: identity
+            try:
+                with mock.patch.object(remote["socket"], "gethostname", return_value="target-host"), mock.patch.object(remote["socket"], "getfqdn", return_value="target-host"):
+                    result = remote["collect"](payload, strict=True)
+            finally:
+                remote.update(original)
+
+        self.assertEqual(result["checks"]["current_mount_contract"], "legacy-compatible")
+        self.assertIn(Path("/home/user/.config/asr-pipeline"), required_paths)
+        self.assertIn(Path("/home/user/.cache/asr-pipeline"), required_paths)
+        self.assertIn(Path("/home/user/.config/asr-pipeline/secrets"), required_paths)
+        self.assertNotIn(Path("/var/lib/asrsub/config"), required_paths)
+        self.assertNotIn(Path("/var/lib/asrsub/cache"), required_paths)
+        self.assertNotIn(Path("/var/lib/asrsub/state"), required_paths)
+        self.assertNotIn(Path("/var/lib/asrsub/runtime-secrets"), required_paths)
+
     def test_current_known_hardened_legacy_mount_layout_is_accepted(self):
         remote = load_remote_namespace()
         identity = {
