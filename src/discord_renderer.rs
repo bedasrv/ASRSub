@@ -14,6 +14,10 @@ const MAX_TITLE_SCALARS: usize = 800;
 const MAX_EMBED_TEXT_SCALARS: usize = 4_000;
 const MAX_ROWS: usize = 8;
 const MAX_TARGET_ENTRIES: usize = 6;
+const WEBHOOK_USERNAME: &str = "ASRSub";
+const COMPLETE_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/2705/128.png";
+const WARNING_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/26a0/128.png";
+const ATTENTION_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/274c/128.png";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderError {
@@ -254,28 +258,60 @@ fn summary_rows(summary: &OverflowSummaryV1) -> (Vec<String>, Vec<String>) {
     (attention, completed)
 }
 
-fn outcome(view: &DeliveryView, rows: &[Row]) -> (String, u32) {
+fn outcome(view: &DeliveryView, rows: &[Row]) -> (&'static str, &'static str, u32) {
     let summary = view.overflow_summary();
-    let attention = summary.attention_reports() > 0
+    let failure = summary.attention_reports() > 0
         || summary.target_outcomes() > 0
         || summary.pre_admission_drops() > 0
         || summary.blocked_admissions() > 0
-        || rows.iter().any(|r| r.attention);
-    if attention {
-        ("❌ ASRSub · Attention required".to_string(), 0xED4245)
+        || rows.iter().any(|r| r.severity == 0);
+    if failure {
+        ("Attention required", ATTENTION_AVATAR_URL, 0xED4245)
     } else if summary.warning_reports() > 0 || rows.iter().any(|r| r.severity == 1) {
-        ("⚠ ASRSub · Partial".to_string(), 0xFEE75C)
+        ("Partial", WARNING_AVATAR_URL, 0xFEE75C)
     } else {
-        ("✅ ASRSub · Complete".to_string(), 0x57F287)
+        ("Complete", COMPLETE_AVATAR_URL, 0x57F287)
     }
 }
 
-fn field_value(rows: &[String]) -> String {
-    if rows.is_empty() {
-        "none".to_string()
-    } else {
-        rows.join("\n")
+fn result_lines(
+    attention: &[String],
+    attention_rows: &[String],
+    completed: &[String],
+    completed_rows: &[String],
+    omitted_attention: usize,
+    omitted_completed: usize,
+) -> Vec<String> {
+    let mut attention = attention.to_vec();
+    let mut attention_rows = attention_rows.to_vec();
+    let mut completed = completed.to_vec();
+    let mut completed_rows = completed_rows.to_vec();
+    if omitted_attention > 0 {
+        let marker = format!("+{omitted_attention} more attention episodes");
+        if let Some(last) = attention_rows.last_mut() {
+            last.push(' ');
+            last.push_str(&marker);
+        } else if let Some(last) = attention.last_mut() {
+            last.push(' ');
+            last.push_str(&marker);
+        }
     }
+    if omitted_completed > 0 {
+        let marker = format!("+{omitted_completed} more completed episodes");
+        if let Some(last) = completed_rows.last_mut() {
+            last.push(' ');
+            last.push_str(&marker);
+        } else if let Some(last) = completed.last_mut() {
+            last.push(' ');
+            last.push_str(&marker);
+        }
+    }
+    attention
+        .into_iter()
+        .chain(attention_rows)
+        .chain(completed)
+        .chain(completed_rows)
+        .collect()
 }
 
 pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
@@ -285,7 +321,7 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         .map(make_row)
         .collect::<Result<_, _>>()?;
     episode_rows.sort_by(|a, b| (a.severity, &a.text).cmp(&(b.severity, &b.text)));
-    let (mut attention, mut completed) = summary_rows(view.overflow_summary());
+    let (attention, completed) = summary_rows(view.overflow_summary());
     let mut attention_rows: Vec<String> = episode_rows
         .iter()
         .filter(|r| r.attention)
@@ -322,67 +358,57 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
         .filter(|r| !r.attention)
         .count()
         .saturating_sub(completed_rows.len());
-    if omitted_attention > 0 {
-        let marker = format!("+{omitted_attention} more attention episodes");
-        if let Some(last) = attention_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = attention.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
-    }
-    if omitted_completed > 0 {
-        let marker = format!("+{omitted_completed} more completed episodes");
-        if let Some(last) = completed_rows.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        } else if let Some(last) = completed.last_mut() {
-            last.push(' ');
-            last.push_str(&marker);
-        }
-    }
-    let (title, color) = outcome(view, &episode_rows);
-    debug_assert!(scalar_len("Needs attention") <= MAX_FIELD_NAME_SCALARS);
-    debug_assert!(scalar_len("Completed") <= MAX_FIELD_NAME_SCALARS);
-    let needs = field_value(
-        &attention
-            .iter()
-            .chain(attention_rows.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
+    let mut results = result_lines(
+        &attention,
+        &attention_rows,
+        &completed,
+        &completed_rows,
+        omitted_attention,
+        omitted_completed,
     );
-    let done = field_value(
-        &completed
-            .iter()
-            .chain(completed_rows.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
-    );
-    if scalar_len(&needs) > MAX_FIELD_VALUE_SCALARS || scalar_len(&done) > MAX_FIELD_VALUE_SCALARS {
+    if results.is_empty() {
+        return Err(RenderError::CannotFit);
+    }
+    while scalar_len(&results.join("\n")) > MAX_FIELD_VALUE_SCALARS {
+        if !completed_rows.is_empty() {
+            completed_rows.pop();
+        } else if !attention_rows.is_empty() {
+            attention_rows.pop();
+        } else {
+            return Err(RenderError::TooLarge);
+        }
+        results = result_lines(
+            &attention,
+            &attention_rows,
+            &completed,
+            &completed_rows,
+            omitted_attention,
+            omitted_completed,
+        );
+    }
+    let results = results.join("\n");
+    if results.is_empty() || results == "none" {
+        return Err(RenderError::CannotFit);
+    }
+    let (title, avatar_url, color) = outcome(view, &episode_rows);
+    if scalar_len(title) > MAX_TITLE_SCALARS {
         return Err(RenderError::TooLarge);
     }
-    if scalar_len(&title) > MAX_TITLE_SCALARS {
-        return Err(RenderError::TooLarge);
-    }
-    let total = scalar_len(&title)
-        + scalar_len("Needs attention")
-        + scalar_len("Completed")
-        + scalar_len(&needs)
-        + scalar_len(&done)
-        + 4;
+    let total = scalar_len(title) + scalar_len("Results") + scalar_len(&results) + 2;
     if total > MAX_EMBED_TEXT_SCALARS {
         return Err(RenderError::TooLarge);
     }
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"{\"embeds\":[{\"title\":");
-    bytes.extend_from_slice(&encode_string(&title));
+    bytes.extend_from_slice(b"{\"username\":");
+    bytes.extend_from_slice(&encode_string(WEBHOOK_USERNAME));
+    bytes.extend_from_slice(b",\"avatar_url\":");
+    bytes.extend_from_slice(&encode_string(avatar_url));
+    bytes.extend_from_slice(b",\"embeds\":[{\"title\":");
+    bytes.extend_from_slice(&encode_string(title));
     bytes.extend_from_slice(b",\"color\":");
     bytes.extend_from_slice(color.to_string().as_bytes());
-    bytes.extend_from_slice(b",\"fields\":[{\"name\":\"Needs attention\",\"value\":");
-    bytes.extend_from_slice(&encode_string(&needs));
-    bytes.extend_from_slice(b",\"inline\":false},{\"name\":\"Completed\",\"value\":");
-    bytes.extend_from_slice(&encode_string(&done));
+    bytes.extend_from_slice(b",\"fields\":[{\"name\":\"Results\",\"value\":");
+    bytes.extend_from_slice(&encode_string(&results));
     bytes.extend_from_slice(b",\"inline\":false}]}],\"allowed_mentions\":{\"parse\":[]}}");
     PayloadBytes::try_from_bytes(bytes.into_boxed_slice()).map_err(|_| RenderError::TooLarge)
 }
@@ -431,9 +457,22 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/2705/128.png"
+        );
+        assert_eq!(value["embeds"][0]["title"], "Complete");
         assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(value.get("content").is_none());
         assert!(value["embeds"][0].get("description").is_none());
+        assert_eq!(value["embeds"][0]["fields"].as_array().unwrap().len(), 1);
+        assert_eq!(value["embeds"][0]["fields"][0]["name"], "Results");
+        assert_ne!(value["embeds"][0]["fields"][0]["value"], "none");
+        assert!(!value["embeds"][0]["fields"][0]["value"]
+            .as_str()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -446,7 +485,40 @@ mod tests {
         )])
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/26a0/128.png"
+        );
+        assert_eq!(value["embeds"][0]["title"], "Partial");
         assert!(String::from_utf8_lossy(payload.as_bytes()).contains("id:warn-unknown"));
+    }
+
+    #[test]
+    fn renders_failure_with_attention_avatar_and_title() {
+        let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
+            TargetStatus::Failed {
+                class: FailureClass::Unknown,
+            },
+            "Show",
+        )])
+        .unwrap();
+        let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(
+            value["avatar_url"],
+            "https://emojiapi.dev/api/v1/274c/128.png"
+        );
+        assert_eq!(value["embeds"][0]["title"], "Attention required");
+    }
+
+    #[test]
+    fn rejects_empty_results_without_bounded_summary() {
+        let (reports, _) =
+            super::super::discord_types::BoundedReports::from_reports(std::iter::empty()).unwrap();
+        assert!(render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).is_err());
     }
 
     #[test]
@@ -496,7 +568,9 @@ mod tests {
         )])
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
-        let text = String::from_utf8_lossy(payload.as_bytes());
-        assert!(!text.contains("https://"));
+        let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
+        let results = value["embeds"][0]["fields"][0]["value"].as_str().unwrap();
+        assert!(!results.contains("https://"));
+        assert!(!results.contains("discord.com/token"));
     }
 }
