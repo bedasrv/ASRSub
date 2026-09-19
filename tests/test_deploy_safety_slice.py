@@ -136,6 +136,11 @@ class TestSimpleLayoutSafety(unittest.TestCase):
                         False,
                     ),
                     (
+                        "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
+                    (
                         "/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children",
                         "/run/asrsub/children-cgroup",
                         True,
@@ -171,6 +176,11 @@ class TestSimpleLayoutSafety(unittest.TestCase):
                     ("/var/lib/asrsub/state", "/var/lib/asrsub/state", True),
                     ("/mnt/nas/share/media", "/mnt/nas/share/media", True),
                     ("/mnt/nas/share/media", "/media", False),
+                    (
+                        "/home/user/.config/asr-pipeline/secrets/control_api_key",
+                        "/run/secrets/control_api_key",
+                        False,
+                    ),
                 )
             ]
         }

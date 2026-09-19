@@ -1332,6 +1332,11 @@ def legacy_mounts_match(identity, payload):
             False,
         ),
         (
+            "/home/user/.config/asr-pipeline/secrets/control_api_key",
+            SECRETS_CONTAINER_PATH + "/control_api_key",
+            False,
+        ),
+        (
             "/sys/fs/cgroup/system.slice/asrsub-runtime.service/asrsub-children",
             "/run/asrsub/children-cgroup",
             True,
