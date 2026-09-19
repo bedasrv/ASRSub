@@ -282,7 +282,9 @@ mod tests {
         assert_eq!(transport.payload_count(), 1);
         let payload: serde_json::Value =
             serde_json::from_slice(&transport.first_payload()).unwrap();
-        assert_eq!(payload["embeds"][0]["title"], "Complete");
+        assert_eq!(payload["username"], "ASRSub · Complete");
+        assert!(payload["embeds"][0].get("title").is_none());
+        assert!(payload["embeds"][0].get("fields").is_none());
     }
 
     #[tokio::test]
@@ -297,7 +299,9 @@ mod tests {
         assert_eq!(transport.payload_count(), 1);
         let payload: serde_json::Value =
             serde_json::from_slice(&transport.first_payload()).unwrap();
-        assert_eq!(payload["embeds"][0]["title"], "Attention required");
+        assert_eq!(payload["username"], "ASRSub · Attention");
+        assert!(payload["embeds"][0].get("title").is_none());
+        assert!(payload["embeds"][0].get("fields").is_none());
     }
 
     #[tokio::test]
@@ -319,12 +323,13 @@ mod tests {
             .iter()
             .map(|payload| serde_json::from_slice(payload).unwrap())
             .collect();
-        assert_eq!(values[0]["embeds"][0]["title"], "Partial");
-        assert_eq!(values[1]["embeds"][0]["title"], "Complete");
-        assert_ne!(
-            values[0]["embeds"][0]["title"],
-            values[1]["embeds"][0]["title"]
-        );
+        assert_eq!(values[0]["username"], "ASRSub · Partial");
+        assert_eq!(values[1]["username"], "ASRSub · Complete");
+        assert!(values[0]["embeds"][0].get("title").is_none());
+        assert!(values[0]["embeds"][0].get("fields").is_none());
+        assert!(values[1]["embeds"][0].get("title").is_none());
+        assert!(values[1]["embeds"][0].get("fields").is_none());
+        assert_ne!(values[0]["username"], values[1]["username"]);
     }
 
     #[tokio::test]
@@ -349,8 +354,12 @@ mod tests {
             .contains("state-capacity: at least 3 reports rejected by state capacity"));
         assert!(!String::from_utf8_lossy(&payloads[1])
             .contains("state-capacity: at least 3 reports rejected by state capacity"));
-        assert_eq!(values[0]["embeds"][0]["title"], "Attention required");
-        assert_eq!(values[1]["embeds"][0]["title"], "Complete");
+        assert_eq!(values[0]["username"], "ASRSub · Attention");
+        assert_eq!(values[1]["username"], "ASRSub · Complete");
+        assert!(values[0]["embeds"][0].get("title").is_none());
+        assert!(values[0]["embeds"][0].get("fields").is_none());
+        assert!(values[1]["embeds"][0].get("title").is_none());
+        assert!(values[1]["embeds"][0].get("fields").is_none());
     }
 
     #[tokio::test]
