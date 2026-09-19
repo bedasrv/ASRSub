@@ -351,9 +351,9 @@ mod tests {
             .map(|payload| serde_json::from_slice(payload).unwrap())
             .collect();
         assert!(String::from_utf8_lossy(&payloads[0])
-            .contains("state-capacity: at least 3 reports rejected by state capacity"));
+            .contains("- **State capacity:** at least 3 reports rejected by state capacity"));
         assert!(!String::from_utf8_lossy(&payloads[1])
-            .contains("state-capacity: at least 3 reports rejected by state capacity"));
+            .contains("- **State capacity:** at least 3 reports rejected by state capacity"));
         assert_eq!(values[0]["username"], "ASRSub · Attention");
         assert_eq!(values[1]["username"], "ASRSub · Complete");
         assert!(values[0]["embeds"][0].get("title").is_none());
@@ -385,7 +385,9 @@ mod tests {
 
         let payload = String::from_utf8(transport.first_payload()).unwrap();
         assert!(payload.len() <= MAX_PAYLOAD_BYTES);
-        assert!(payload.contains("state-capacity: at least 3 reports rejected by state capacity"));
+        assert!(
+            payload.contains("- **State capacity:** at least 3 reports rejected by state capacity")
+        );
         assert!(!payload.contains("episode 3"));
     }
 
