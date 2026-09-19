@@ -106,8 +106,9 @@ and does not change the existing inbound `/webhook` route.
 Render and transport failures emit only a generic local classification; URL,
 payload, response-body, path, and credential values are not logged. Automated
 notifier tests use deterministic in-process fakes and local mock HTTP only. The
-live smoke helper is explicitly opt-in and deployment validation remains
-unverified.
+live smoke helper is explicitly opt-in; production deployment validation is
+recorded separately in `docs/DEPLOY.md` and is not replaced by a webhook smoke
+result.
 
 The repository's `pipeline.env.example` remains non-secret and intentionally
 contains no Discord URL, token, enable flag, or outbound webhook setting.

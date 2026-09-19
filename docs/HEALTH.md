@@ -109,7 +109,7 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
   dashboard behavior.
 - **Local evidence:** deterministic notifier tests use an in-process fake
   transport and local mock HTTP. The live smoke helper is explicitly opt-in;
-  deployment validation remains unverified.
+  production deployment validation is recorded separately in `docs/DEPLOY.md`.
 
 ### 1. Local State Directory
 
@@ -123,6 +123,12 @@ Checked by `/ready` (media root, state dir, providers) or by the operator:
   stat -f -c %T /home/user/.config/asr-pipeline  # expected: btrfs
   test -w /home/user/.config/asr-pipeline
   ```
+
+In the current simple Compose production layout, this is a container-internal
+path backed by the host source `/opt/mediastack/asrsub/config`. The separate
+container-internal `/var/lib/asrsub/state` path is backed by
+`/opt/mediastack/asrsub/state`. Do not recreate the retired host-side
+`/home/user/.config/asr-pipeline` or `/home/user/.cache/asr-pipeline` mounts.
 
 ### 2. Media Mount
 
@@ -169,9 +175,10 @@ There is nothing to `PRAGMA
 integrity_check` — if you migrated from the Python deployment, the stale
 `.db` files under the state dir are inert and can be archived away.
 
-> OPS: the Tdarr/Sonarr notification that POSTs `/webhook` MUST carry the
-> key header — without it webhooks 401 and new episodes wait for the next
-> periodic pass (30–120s) instead of starting immediately.
+> OPS: the current Rust daemon does not require a daemon API-key header for
+> `/webhook`; access control is external via Pomerium/Pocket ID over HTTPS.
+> Restrict ingress to the approved proxy path and keep the route boundary
+> separate from the optional outbound Discord webhook.
 
 ### 4. Runtime Pause (no paused boot)
 
@@ -191,13 +198,12 @@ curl http://127.0.0.1:8085/status | jq .paused
 - **Empty means unset, in every layer**: a variable that is set but empty (or whitespace-only) pins nothing, does not shadow a file value during the merge, is not validated, and is treated as unset by the consumers that read the environment directly — `PROVIDERS_FILE`, `ASRSUB_CONFIG_DIR`, `HOME`, `JIMAKU_BASE_URL`, `JIMAKU_CALL_SLEEP_MS`, `JIMAKU_TIMEOUT`, `ANILIST_BASE_URL`, `ANILIST_CACHE`, `ANILIST_TIMEOUT`, `LLM_TIMEOUT_S`, `LLM_PER_ENDPOINT_CONCURRENCY`, `WHISPER_TIMEOUT_S`, `WHISPER_CONCURRENCY` and every provider entry's `key_env`. Because of that, **blanking a variable no longer clears a value that lives in `pipeline.env` or `config.overrides.json`** — the file value survives. To clear such a value, edit `pipeline.env`, `POST /api2/config {"KEY":""}`, or delete the key from `config.overrides.json`; note the settings form never submits an empty `Secret`, so a password is cleared through one of those, not through the UI.
 - **Build vs deploy**: images are built by CI and published under an immutable
   `ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` identity. The SHA tag is
-  only a lookup label. Production approval binds that digest, the validated
-  runtime bundle, and the rendered Compose bytes. Systemd invokes
-  `/usr/local/libexec/asrsub/asrsub-recover --preflight` and
-  `/usr/local/libexec/asrsub/asrsub-runtime --reconcile`; the adapter pulls
-  the approved digest first and starts the fixed Compose projection with
-  `up -d --no-build --pull=never`. A direct `docker compose up` is not the
-  production rollout path.
+  only a lookup label. The active routine production path is
+  `tools/asrsub_deploy.py`: it snapshots and backs up before mutation, requires
+  an idle daemon, applies the exact digest with `--pull=never`, and verifies
+  image identity, mounts, health, readiness, and Docker health. The earlier
+  hardened systemd/runtime path is not the active production deployment path;
+  direct ad-hoc `docker compose up` is not the operator rollout path.
 - **Probes** (Compose ships this healthcheck; `/health` for liveness, `/ready` for readiness). The tracked template follows `WEBHOOK_PORT`; the validated rendered projection fixes the value before its Compose hash is recorded:
   ```yaml
   healthcheck:

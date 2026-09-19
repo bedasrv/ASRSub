@@ -2,9 +2,9 @@
 
 This is the operator runbook for routine ASRSub deployment. It is self-contained:
 all routine status, preflight, apply, verification, and rollback actions use
-`tools/asrsub_deploy.py`. This checkout does not claim that a production
-deployment, rollback, secret activation, or hardened-residue transition has
-run.
+`tools/asrsub_deploy.py`. The last verified production deployment is recorded
+below; future changes still require a fresh status, preflight, snapshot, and
+post-apply verification.
 
 ## 1. Authoritative deployment model
 
@@ -22,6 +22,42 @@ The routine model is one Docker Compose service and one immutable image:
 | Readiness port | `8085` via `WEBHOOK_PORT` | override with `--webhook-port` |
 | Container media prefix | `/mnt/nas/share/media` via `NAS_MEDIA_PREFIX` | override with `--nas-media-prefix` |
 | Image identity | `ghcr.io/bedasrv/asrsub@sha256:<64-lowercase-hex>` | exact digest only |
+
+### Last verified production instance
+
+This is the live configuration verified on **2026-09-19 UTC**:
+
+- Target: VM `1002`, `user@10.10.20.160`, hostname `docker-host-local`.
+- Compose project: `asrsub` at `/opt/mediastack/asrsub`, using
+  `/opt/mediastack/asrsub/compose.yaml`.
+- Service/container: `orchestrator` / `asrsub-orchestrator-1`.
+- Runtime: command `daemon`, user `1000:1000`, host networking,
+  `restart: unless-stopped`, and `privileged: false`.
+- Image: `ghcr.io/bedasrv/asrsub@sha256:c3cd3c0bf3e30c4da3c5daaa959ca62b3ba22d0214d2df3b4083a013c0563981`.
+- Verification: container running and healthy, restart count `0`, `/health`
+  HTTP 200, and `/ready` HTTP 200.
+
+The live host-to-container bind contract is:
+
+| Host source | Container target | Mode |
+| --- | --- | --- |
+| `/opt/mediastack/asrsub/config` | `/home/user/.config/asr-pipeline` | read-write |
+| `/opt/mediastack/asrsub/cache` | `/home/user/.cache/asr-pipeline` | read-write |
+| `/opt/mediastack/asrsub/state` | `/var/lib/asrsub/state` | read-write |
+| `/opt/mediastack/asrsub/secrets` | `/run/secrets` | read-only |
+| `/mnt/nas/share/media` | `/mnt/nas/share/media` | read-write |
+| `/mnt/nas/share/media` | `/media` | read-only |
+
+The `/home/user/...` paths in the target column are container-internal paths;
+they are not the current host data sources. The host media directory is
+already mounted by NFS and is bind-mounted into the container; the container
+does not mount NFS itself.
+
+The last deployment created rollback backup `.asrsub-rollback/20260919T173057Z`
+under the project. The old pre-migration host paths were archived at
+`backups/pre-layout-data-20260919T174630Z`; the original directories remain
+as rollback copies and are not mounted. Do not remove them without explicit
+approval and an elevated cleanup plan.
 
 The tracked candidate is `deploy/compose.simple.yaml`. It has one
 `orchestrator`, host networking, `restart: unless-stopped`, and no build
@@ -417,8 +453,9 @@ reviewed per-file residue, run the required systemd manager reload, and verify
 that the simple Compose service remains the sole owner. It must not use
 `rm -rf`, broad deletion, or a daemon/systemd restart as a substitute for an
 inventory. Keep the old files until the transition owner confirms the new path;
-this document makes no claim that the transition or production deployment was
-executed.
+this document makes no claim that the hardened systemd/drop-in/runtime
+transition was executed. The simple Compose deployment is recorded above as
+verified.
 
 ## 9. Troubleshooting
 
