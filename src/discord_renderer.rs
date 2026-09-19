@@ -8,13 +8,13 @@ use super::discord_types::{
 };
 
 const MAX_ROW_SCALARS: usize = 160;
-const MAX_FIELD_NAME_SCALARS: usize = 32;
 const MAX_FIELD_VALUE_SCALARS: usize = 900;
-const MAX_TITLE_SCALARS: usize = 800;
 const MAX_EMBED_TEXT_SCALARS: usize = 4_000;
 const MAX_ROWS: usize = 8;
 const MAX_TARGET_ENTRIES: usize = 6;
-const WEBHOOK_USERNAME: &str = "ASRSub";
+const COMPLETE_USERNAME: &str = "ASRSub · Complete";
+const PARTIAL_USERNAME: &str = "ASRSub · Partial";
+const ATTENTION_USERNAME: &str = "ASRSub · Attention";
 const COMPLETE_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/2705/128.png";
 const WARNING_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/26a0/128.png";
 const ATTENTION_AVATAR_URL: &str = "https://emojiapi.dev/api/v1/274c/128.png";
@@ -273,11 +273,11 @@ fn outcome(view: &DeliveryView, rows: &[Row]) -> (&'static str, &'static str, u3
         || summary.blocked_admissions() > 0
         || rows.iter().any(|r| r.severity == 0);
     if failure {
-        ("Attention required", ATTENTION_AVATAR_URL, 0xED4245)
+        (ATTENTION_USERNAME, ATTENTION_AVATAR_URL, 0xED4245)
     } else if summary.warning_reports() > 0 || rows.iter().any(|r| r.severity == 1) {
-        ("Partial", WARNING_AVATAR_URL, 0xFEE75C)
+        (PARTIAL_USERNAME, WARNING_AVATAR_URL, 0xFEE75C)
     } else {
-        ("Complete", COMPLETE_AVATAR_URL, 0x57F287)
+        (COMPLETE_USERNAME, COMPLETE_AVATAR_URL, 0x57F287)
     }
 }
 
@@ -397,26 +397,20 @@ pub(crate) fn render(view: &DeliveryView) -> Result<PayloadBytes, RenderError> {
     if results.is_empty() || results == "none" {
         return Err(RenderError::CannotFit);
     }
-    let (title, avatar_url, color) = outcome(view, &episode_rows);
-    if scalar_len(title) > MAX_TITLE_SCALARS {
-        return Err(RenderError::TooLarge);
-    }
-    let total = scalar_len(title) + scalar_len("Results") + scalar_len(&results) + 2;
-    if total > MAX_EMBED_TEXT_SCALARS {
+    let (username, avatar_url, color) = outcome(view, &episode_rows);
+    if scalar_len(&results) > MAX_EMBED_TEXT_SCALARS {
         return Err(RenderError::TooLarge);
     }
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"{\"username\":");
-    bytes.extend_from_slice(&encode_string(WEBHOOK_USERNAME));
+    bytes.extend_from_slice(&encode_string(username));
     bytes.extend_from_slice(b",\"avatar_url\":");
     bytes.extend_from_slice(&encode_string(avatar_url));
-    bytes.extend_from_slice(b",\"embeds\":[{\"title\":");
-    bytes.extend_from_slice(&encode_string(title));
+    bytes.extend_from_slice(b",\"embeds\":[{\"description\":");
+    bytes.extend_from_slice(&encode_string(&results));
     bytes.extend_from_slice(b",\"color\":");
     bytes.extend_from_slice(color.to_string().as_bytes());
-    bytes.extend_from_slice(b",\"fields\":[{\"name\":\"Results\",\"value\":");
-    bytes.extend_from_slice(&encode_string(&results));
-    bytes.extend_from_slice(b",\"inline\":false}]}],\"allowed_mentions\":{\"parse\":[]}}");
+    bytes.extend_from_slice(b"}],\"allowed_mentions\":{\"parse\":[]}}");
     PayloadBytes::try_from_bytes(bytes.into_boxed_slice()).map_err(|_| RenderError::TooLarge)
 }
 
@@ -465,22 +459,20 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(value["username"], "ASRSub · Complete");
         assert_eq!(
             value["avatar_url"],
             "https://emojiapi.dev/api/v1/2705/128.png"
         );
-        assert_eq!(value["embeds"][0]["title"], "Complete");
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0x57F287));
+        assert!(value["embeds"][0].get("title").is_none());
+        assert_eq!(
+            value["embeds"][0]["description"],
+            "series Show S01E02 - id:ok"
+        );
+        assert!(value["embeds"][0].get("fields").is_none());
         assert_eq!(value["allowed_mentions"]["parse"], serde_json::json!([]));
         assert!(value.get("content").is_none());
-        assert!(value["embeds"][0].get("description").is_none());
-        assert_eq!(value["embeds"][0]["fields"].as_array().unwrap().len(), 1);
-        assert_eq!(value["embeds"][0]["fields"][0]["name"], "Results");
-        assert_ne!(value["embeds"][0]["fields"][0]["value"], "none");
-        assert!(!value["embeds"][0]["fields"][0]["value"]
-            .as_str()
-            .unwrap()
-            .is_empty());
     }
 
     #[test]
@@ -494,17 +486,18 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(value["username"], "ASRSub · Partial");
         assert_eq!(
             value["avatar_url"],
             "https://emojiapi.dev/api/v1/26a0/128.png"
         );
-        assert_eq!(value["embeds"][0]["title"], "Partial");
+        assert!(value["embeds"][0].get("title").is_none());
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xFEE75C));
         assert!(String::from_utf8_lossy(payload.as_bytes()).contains("id:warn-unknown"));
     }
 
     #[test]
-    fn renders_failure_with_attention_avatar_and_title() {
+    fn renders_failure_with_attention_avatar_and_username() {
         let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
             TargetStatus::Failed {
                 class: FailureClass::Unknown,
@@ -514,12 +507,13 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        assert_eq!(value["username"], "ASRSub");
+        assert_eq!(value["username"], "ASRSub · Attention");
         assert_eq!(
             value["avatar_url"],
             "https://emojiapi.dev/api/v1/274c/128.png"
         );
-        assert_eq!(value["embeds"][0]["title"], "Attention required");
+        assert!(value["embeds"][0].get("title").is_none());
+        assert_eq!(value["embeds"][0]["color"], serde_json::json!(0xED4245));
     }
 
     #[test]
@@ -567,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn redacts_untrusted_fields() {
+    fn redacts_untrusted_description() {
         let (reports, _) = super::super::discord_types::BoundedReports::from_reports([report(
             TargetStatus::Failed {
                 class: FailureClass::Unknown,
@@ -577,7 +571,7 @@ mod tests {
         .unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        let results = value["embeds"][0]["fields"][0]["value"].as_str().unwrap();
+        let results = value["embeds"][0]["description"].as_str().unwrap();
         assert!(!results.contains("https://"));
         assert!(!results.contains("discord.com/token"));
     }
@@ -611,7 +605,7 @@ mod tests {
             super::super::discord_types::BoundedReports::from_reports([report]).unwrap();
         let payload = render(&DeliveryView::new(1, reports, OverflowSummaryV1::default())).unwrap();
         let value: serde_json::Value = serde_json::from_slice(payload.as_bytes()).unwrap();
-        let results = value["embeds"][0]["fields"][0]["value"].as_str().unwrap();
+        let results = value["embeds"][0]["description"].as_str().unwrap();
         assert!(results.contains("id:ok · Whisper: provider/whisper-1 → LLM: openai/gpt-4o-mini"));
         assert!(results.chars().count() <= MAX_ROW_SCALARS);
     }
